@@ -130,6 +130,55 @@ def acquire(stack, path, directory=False):
         raise RunnerError('Another Runner is active for this state directory or project') from None
 
 
+def process_pi_stream(stream, result, errors, transient_errors, usage, events_file=None):
+    last_assistant_error = None
+    summary = ''
+    final_response = False
+    for raw in stream:
+        line = raw if isinstance(raw, str) else raw.decode('utf-8', errors='replace')
+        if events_file is not None:
+            if isinstance(raw, bytes):
+                events_file.write(raw)
+            else:
+                events_file.write(raw.encode('utf-8'))
+            events_file.flush()
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            errors.append('Invalid JSON output from Pi')
+            continue
+        if not isinstance(event, dict):
+            errors.append('Pi event must be a JSON object')
+            continue
+        if event.get('type') == 'session':
+            result['pi_session_id'] = event.get('id')
+        if event.get('type') == 'auto_retry_end' and event.get('success'):
+            last_assistant_error = None
+        if event.get('type') == 'message_end':
+            message = event.get('message', {})
+            if message.get('role') == 'assistant':
+                stop_reason = message.get('stopReason')
+                if stop_reason == 'stop':
+                    final_response = True
+                    last_assistant_error = None
+                elif stop_reason in ('error', 'aborted'):
+                    final_response = False
+                    err = message.get('errorMessage', stop_reason)
+                    last_assistant_error = err
+                    transient_errors.append(err)
+                text = '\n'.join(x.get('text', '') for x in message.get('content', []) if x.get('type') == 'text')
+                if text:
+                    summary = text
+                for key, value in message.get('usage', {}).items():
+                    if isinstance(value, (float, int)):
+                        usage[key] = usage.get(key, 0) + value
+                result['model'] = message.get('model', result.get('model'))
+                result['provider'] = message.get('provider', result.get('provider'))
+    if last_assistant_error and not final_response:
+        errors.append(last_assistant_error)
+    return summary, final_response
+
+
 def execute(config_path, task=None, resume=None, turn_id=None):
     config_path = config_path.resolve()
     c = Config.load(config_path)
@@ -184,6 +233,8 @@ def execute(config_path, task=None, resume=None, turn_id=None):
         summary = ''
         final_response = False
         errors = []
+        transient_errors = []
+        last_assistant_error = None
         usage = {}
         files_to_archive = []
         def terminate(signum, frame):
@@ -250,33 +301,9 @@ def execute(config_path, task=None, resume=None, turn_id=None):
                 # Close the signal race between the pre-start check and Popen.
                 if stopped:
                     terminate(signal.SIGTERM, None)
-                for line in proc.stdout:
-                    events.write(line)
-                    events.flush()
-                    try:
-                        event = json.loads(line)
-                    except (ValueError, UnicodeDecodeError):
-                        errors.append('Invalid JSON output from Pi')
-                        continue
-                    if not isinstance(event, dict):
-                        errors.append('Pi event must be a JSON object')
-                        continue
-                    if event.get('type') == 'session':
-                        result['pi_session_id'] = event.get('id')
-                    if event.get('type') == 'message_end':
-                        message = event.get('message', {})
-                        if message.get('role') == 'assistant':
-                            final_response = message.get('stopReason') == 'stop'
-                            text = '\n'.join(x.get('text', '') for x in message.get('content', []) if x.get('type') == 'text')
-                            if text:
-                                summary = text
-                            if message.get('stopReason') in ('error', 'aborted'):
-                                errors.append(message.get('errorMessage', message['stopReason']))
-                            for key, value in message.get('usage', {}).items():
-                                if isinstance(value, (float, int)):
-                                    usage[key] = usage.get(key, 0) + value
-                            result['model'] = message.get('model', result['model'])
-                            result['provider'] = message.get('provider', result['provider'])
+                summary, final_response = process_pi_stream(
+                    proc.stdout, result, errors, transient_errors, usage, events_file=events
+                )
                 result['exit_code'] = proc.wait()
                 proc.stdout.close()
             if stopped:
@@ -300,6 +327,8 @@ def execute(config_path, task=None, resume=None, turn_id=None):
             result['usage'] = usage or None
             if errors:
                 result['error'] = '\n'.join(errors)
+            if transient_errors:
+                result['transient_errors'] = transient_errors
             if summary:
                 (directory / 'summary.md').write_text(summary + '\n')
             elif not (directory / 'summary.md').exists():

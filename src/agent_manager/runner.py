@@ -406,6 +406,7 @@ class AgentManagerServices:
             default_agent_id=self.config.developer_agent_id,
             knowledge_base=self.knowledge_base,
             permissions=self.permissions,
+            artifact_root=self.config.artifact_root,
         )
         uvicorn_cfg = uvicorn.Config(
             app=app,

@@ -24,6 +24,7 @@ tools bound what its sandbox can reach even through raw HTTP.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -92,8 +93,13 @@ from .schemas import (
     AgentPatch,
     AgentRead,
     AnalysisReportRead,
+    AskRequest,
+    AskResponse,
     ConversationCreate,
     ConversationRead,
+    KnowledgeDocumentRead,
+    KnowledgeDocumentWrite,
+    KnowledgeListResponse,
     MessageAppendResponse,
     MessageCreate,
     MessageRead,
@@ -101,6 +107,8 @@ from .schemas import (
     OperationSubmit,
     RecommendationPreviewRead,
     RecommendationRead,
+    TaskArtifactListResponse,
+    TaskArtifactRead,
     TaskCreate,
     TaskImportRequest,
     TaskImportResponse,
@@ -121,9 +129,7 @@ from .schemas import (
     task_to_read,
     turn_to_read,
 )
-
-if TYPE_CHECKING:
-    from ..knowledge import KnowledgeBase
+from ..knowledge import KnowledgeBase
 
 
 ENV_VAR = "AGENT_MANAGER_DB_URL"
@@ -735,6 +741,7 @@ def create_app(
     default_agent_id: str = "agent-manager-developer",
     knowledge_base: KnowledgeBase | None = None,
     permissions: ExecutionPermissions | None = None,
+    artifact_root: str | Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI application bound to a file-backed SQLite database.
 
@@ -775,6 +782,7 @@ def create_app(
     app.state.permissions = resolved_permissions
     app.state.require_auth = require_auth
     app.state.knowledge_base = knowledge_base
+    app.state.artifact_root = Path(artifact_root) if artifact_root else None
 
     # Added inner-to-outer: BearerAuth is inner to RequestCorrelation
     app.add_middleware(
@@ -825,9 +833,130 @@ def create_app(
             knowledge_base=getattr(request.app.state, "knowledge_base", None),
         )
 
+    def get_knowledge_base(request: Request) -> KnowledgeBase:
+        kb = getattr(request.app.state, "knowledge_base", None)
+        if kb is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="knowledge base not configured",
+            )
+        return kb
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/knowledge", response_model=KnowledgeListResponse)
+    def list_knowledge(
+        category: str | None = None,
+        kb: KnowledgeBase = Depends(get_knowledge_base),
+    ) -> KnowledgeListResponse:
+        items = kb.list_documents(category=category)
+        return KnowledgeListResponse(items=items, category=category)
+
+    @app.get("/knowledge/{path:path}", response_model=KnowledgeDocumentRead)
+    def read_knowledge(
+        path: str,
+        kb: KnowledgeBase = Depends(get_knowledge_base),
+    ) -> KnowledgeDocumentRead:
+        content = kb.read_document(path)
+        if content is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"knowledge document not found: {path}",
+            )
+        return KnowledgeDocumentRead(path=path, content=content)
+
+    @app.put("/knowledge/{path:path}", response_model=KnowledgeDocumentRead)
+    def write_knowledge(
+        path: str,
+        payload: KnowledgeDocumentWrite,
+        kb: KnowledgeBase = Depends(get_knowledge_base),
+    ) -> KnowledgeDocumentRead:
+        try:
+            kb.write_document(
+                relative_path=path,
+                content=payload.content,
+                commit_message=payload.commit_message,
+            )
+        except Exception as err:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(err),
+            ) from err
+        content = kb.read_document(path)
+        return KnowledgeDocumentRead(path=path, content=content or payload.content)
+
+    @app.post("/ask", response_model=AskResponse)
+    @app.post("/conversations/ask", response_model=AskResponse)
+    async def ask_agent(
+        payload: AskRequest,
+        conversation_repo: ConversationRepository = Depends(get_conversation_repository),
+        turn_processor: TurnProcessor = Depends(get_turn_processor),
+    ) -> AskResponse:
+        if payload.conversation_id:
+            conv = conversation_repo.get_conversation(payload.conversation_id)
+            if conv is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"conversation not found: {payload.conversation_id}",
+                )
+            conv_id = conv.id
+        else:
+            conv = conversation_repo.create_conversation(
+                title=payload.message[:50],
+                metadata=payload.metadata,
+            )
+            conv_id = conv.id
+
+        msg_result = conversation_repo.append_message(
+            conversation_id=conv_id,
+            role="user",
+            text=payload.message,
+            metadata=payload.metadata,
+        )
+
+        turn_result = turn_processor.enqueue(
+            conversation_id=conv_id,
+            input_message_id=msg_result.message.id,
+            metadata={"agent_id": payload.agent_id, **payload.metadata},
+        )
+        turn_id = turn_result.turn.id
+
+        deadline = time.monotonic() + max(1.0, payload.timeout_seconds)
+        while time.monotonic() < deadline:
+            current_turn = turn_processor.get_turn(turn_id)
+            if current_turn is None:
+                break
+            if current_turn.status == "completed":
+                reply_text = None
+                if current_turn.reply_message_id:
+                    messages = conversation_repo.list_messages(conv_id)
+                    for m in messages:
+                        if m.id == current_turn.reply_message_id:
+                            reply_text = m.text
+                            break
+                return AskResponse(
+                    conversation_id=conv_id,
+                    turn_id=turn_id,
+                    status="completed",
+                    reply=reply_text,
+                )
+            elif current_turn.status == "failed":
+                return AskResponse(
+                    conversation_id=conv_id,
+                    turn_id=turn_id,
+                    status="failed",
+                    error=current_turn.error or "turn execution failed",
+                )
+            await asyncio.sleep(0.1)
+
+        return AskResponse(
+            conversation_id=conv_id,
+            turn_id=turn_id,
+            status="timeout",
+            error=f"Turn execution did not finish within {payload.timeout_seconds}s",
+        )
 
     @app.get("/workspaces/resolve")
     def resolve_task_workspace(
@@ -920,6 +1049,105 @@ def create_app(
         if task is None:
             raise HTTPException(status_code=404, detail="task not found")
         return task_to_read(task)
+
+    @app.get("/tasks/{task_id}/artifacts", response_model=TaskArtifactListResponse)
+    def list_task_artifacts(
+        task_id: str,
+        request: Request,
+        repository: TaskRepository = Depends(get_repository),
+    ) -> TaskArtifactListResponse:
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        meta = task.meta or {}
+        provenance = meta.get("provenance") or {}
+        artifacts = []
+        for a in provenance.get("artifacts") or meta.get("artifacts") or []:
+            artifacts.append(TaskArtifactRead(
+                name=a.get("name"),
+                size=a.get("size"),
+                path=a.get("path"),
+            ))
+        artifact_root = getattr(request.app.state, "artifact_root", None) or Path("~/.local/share/agent-manager/artifacts").expanduser()
+        for cand_dir in [
+            Path(artifact_root) / "tasks" / str(task.id) / "artifacts",
+            Path(artifact_root) / str(task.id) / "artifacts",
+        ]:
+            if cand_dir.is_dir():
+                existing = {a.name for a in artifacts}
+                for item in sorted(cand_dir.iterdir()):
+                    if item.is_file() and item.name not in existing:
+                        artifacts.append(TaskArtifactRead(
+                            name=item.name,
+                            size=item.stat().st_size,
+                            path=str(item),
+                        ))
+        return TaskArtifactListResponse(task_id=task_id, artifacts=artifacts)
+
+    @app.get("/tasks/{task_id}/artifacts/{artifact_name:path}")
+    def get_task_artifact(
+        task_id: str,
+        artifact_name: str,
+        request: Request,
+        repository: TaskRepository = Depends(get_repository),
+    ) -> Response:
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        meta = task.meta or {}
+        provenance = meta.get("provenance") or {}
+        artifact_file = None
+        for a in provenance.get("artifacts") or meta.get("artifacts") or []:
+            if a.get("name") == artifact_name and a.get("path"):
+                p = Path(a["path"])
+                if p.is_file():
+                    artifact_file = p
+                    break
+        if artifact_file is None:
+            artifact_root = getattr(request.app.state, "artifact_root", None) or Path("~/.local/share/agent-manager/artifacts").expanduser()
+            for cand_dir in [
+                Path(artifact_root) / "tasks" / str(task.id) / "artifacts",
+                Path(artifact_root) / str(task.id) / "artifacts",
+            ]:
+                cand = cand_dir / artifact_name
+                if cand.is_file():
+                    artifact_file = cand
+                    break
+        if artifact_file is None or not artifact_file.is_file():
+            raise HTTPException(status_code=404, detail=f"artifact not found: {artifact_name}")
+        content = artifact_file.read_bytes()
+        return Response(content=content, media_type="text/plain; charset=utf-8")
+
+    @app.get("/tasks/{task_id}/session")
+    def get_task_session(
+        task_id: str,
+        repository: TaskRepository = Depends(get_repository),
+    ) -> dict[str, Any]:
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        meta = task.meta or {}
+        provenance = meta.get("provenance") or {}
+        session_path = provenance.get("session_path")
+        summary_path = provenance.get("summary_path")
+        summary_text = None
+        if summary_path and Path(summary_path).is_file():
+            summary_text = Path(summary_path).read_text(encoding="utf-8", errors="replace")
+        elif meta.get("summary"):
+            summary_text = meta["summary"]
+        elif task.description:
+            summary_text = task.description
+        changed_files = meta.get("changed_files") or provenance.get("changed_files") or []
+        return {
+            "task_id": task_id,
+            "session_id": provenance.get("session_id") or provenance.get("runner_session_id"),
+            "status": task.status,
+            "summary": summary_text,
+            "session_path": session_path,
+            "events_path": provenance.get("events_path"),
+            "changed_files": changed_files,
+            "usage": provenance.get("usage"),
+        }
 
     def change_task_subscription(task_id, payload, request, *, cancel=False):
         from ..task_subscriptions import TaskSubscriptions

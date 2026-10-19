@@ -116,7 +116,7 @@ def test_service_created_telegram_client_uses_host_internal_principal(
     a scoped child credential cannot reach administrative routes.
     """
     telegram_config = TelegramConfig(
-        bot_token="123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",
+        bot_token="123456789:TEST_BOT_TOKEN_FOR_MOCKING_ONLY_123",
         allowed_user_id=123,
         backend_url="http://testserver",
         api_token=None,

@@ -602,3 +602,46 @@ def recommendation_preview_to_read(
         would_conflict=preview.would_conflict,
         conflict_reason=preview.conflict_reason,
     )
+
+
+class KnowledgeListResponse(BaseModel):
+    items: list[str]
+    category: str | None = None
+
+
+class KnowledgeDocumentRead(BaseModel):
+    path: str
+    content: str
+
+
+class KnowledgeDocumentWrite(BaseModel):
+    content: str
+    commit_message: str | None = None
+
+
+class AskRequest(BaseModel):
+    message: str
+    agent_id: str = "system-secretary"
+    conversation_id: str | None = None
+    timeout_seconds: float = 60.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AskResponse(BaseModel):
+    conversation_id: str
+    turn_id: str
+    status: str
+    reply: str | None = None
+    error: str | None = None
+
+
+class TaskArtifactRead(BaseModel):
+    name: str
+    size: int | None = None
+    path: str | None = None
+    content_type: str = "text/plain"
+
+
+class TaskArtifactListResponse(BaseModel):
+    task_id: str
+    artifacts: list[TaskArtifactRead]

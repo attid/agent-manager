@@ -44,6 +44,7 @@ class Config:
     backend: dict[str, str] | None = None
     inbox_dir: Path | None = None
     attachments_dir: Path | None = None
+    outbox_dir: Path | None = None
 
     @classmethod
     def load(cls, path):
@@ -103,14 +104,18 @@ class Config:
         # read-only without treating them as current attachments.
         inbox_dir = absolute(data['inbox_dir']) if data.get('inbox_dir') else None
         attachments_dir = absolute(data['attachments_dir']) if data.get('attachments_dir') else None
+        outbox_dir = absolute(data['outbox_dir']) if data.get('outbox_dir') else None
         for label, directory in (('knowledge_dir', knowledge_dir), ('skills_dir', skills_dir),
-                                 ('inbox_dir', inbox_dir), ('attachments_dir', attachments_dir)):
+                                 ('inbox_dir', inbox_dir), ('attachments_dir', attachments_dir),
+                                 ('outbox_dir', outbox_dir)):
             if directory is not None and not directory.is_dir():
                 raise RunnerError(f'{label} must be an existing directory')
         if inbox_dir is not None and (inbox_dir == Path('/') or within(project, inbox_dir)):
             raise RunnerError('inbox_dir must not expose the project or /')
         if attachments_dir is not None and attachments_dir == Path('/'):
             raise RunnerError('attachments_dir must not be /')
+        if outbox_dir is not None and (outbox_dir == Path('/') or within(project, outbox_dir)):
+            raise RunnerError('outbox_dir must not expose the project or /')
         backend = data.get('backend')
         if backend is not None:
             if not isinstance(backend, dict) or not all(
@@ -124,7 +129,7 @@ class Config:
                    data.get('credential_env', []), str(wd.relative_to(project)), models_file,
                    data.get('pi_auth_provider'), data.get('project_read_only', False),
                    data.get('skills', []), data.get('allow_git_commit', False),
-                   knowledge_dir, skills_dir, backend, inbox_dir, attachments_dir)
+                   knowledge_dir, skills_dir, backend, inbox_dir, attachments_dir, outbox_dir)
 
 
 def sandbox_command(config, home, session):
@@ -170,6 +175,8 @@ def sandbox_command(config, home, session):
         argv += ['--ro-bind', str(c.inbox_dir), '/workspace/inbox']
     if c.attachments_dir is not None:
         argv += ['--ro-bind', str(c.attachments_dir), '/attachments']
+    if c.outbox_dir is not None:
+        argv += ['--bind', str(c.outbox_dir), '/workspace/outbox']
     dotgit = c.project / '.git'
     if dotgit.is_dir():
         if dotgit.is_symlink():

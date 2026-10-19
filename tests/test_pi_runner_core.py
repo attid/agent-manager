@@ -124,6 +124,75 @@ class RunnerTests(unittest.TestCase):
         # selected; the caller passes the conversation-scoped directory.
         self.assertNotIn('legacy.jpg', ' '.join(file_args))
 
+    def test_process_pi_stream_with_auto_retry_success(self):
+        from pi_runner.cli import process_pi_stream
+
+        lines = [
+            json.dumps({"type": "session", "id": "pi-sess-1"}),
+            json.dumps({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "Connection error.",
+                },
+            }),
+            json.dumps({
+                "type": "auto_retry_start",
+                "attempt": 1,
+                "maxAttempts": 3,
+                "delayMs": 2000,
+                "errorMessage": "Connection error.",
+            }),
+            json.dumps({"type": "auto_retry_end", "success": True, "attempt": 1}),
+            json.dumps({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "stop",
+                    "content": [{"type": "text", "text": "All tasks completed successfully."}],
+                    "usage": {"input": 100, "output": 50},
+                },
+            }),
+        ]
+        result = {}
+        errors = []
+        transient_errors = []
+        usage = {}
+        summary, final_response = process_pi_stream(
+            lines, result, errors, transient_errors, usage
+        )
+        self.assertTrue(final_response)
+        self.assertEqual(summary, "All tasks completed successfully.")
+        self.assertEqual(errors, [])
+        self.assertEqual(transient_errors, ["Connection error."])
+        self.assertEqual(result.get("pi_session_id"), "pi-sess-1")
+        self.assertEqual(usage.get("input"), 100)
+
+    def test_process_pi_stream_fatal_error(self):
+        from pi_runner.cli import process_pi_stream
+
+        lines = [
+            json.dumps({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "Rate limit exceeded permanently.",
+                },
+            }),
+        ]
+        result = {}
+        errors = []
+        transient_errors = []
+        usage = {}
+        summary, final_response = process_pi_stream(
+            lines, result, errors, transient_errors, usage
+        )
+        self.assertFalse(final_response)
+        self.assertEqual(errors, ["Rate limit exceeded permanently."])
+        self.assertEqual(transient_errors, ["Rate limit exceeded permanently."])
+
 
 if __name__ == '__main__':
     unittest.main()

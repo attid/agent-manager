@@ -946,3 +946,53 @@ class KnowledgeBase:
             return comp_file
 
         return None
+
+    def list_documents(self, category: str | None = None) -> list[str]:
+        """List relative paths of markdown documents in knowledge base."""
+        target_dir = (self.root_dir / category).resolve() if category else self.root_dir
+        if not target_dir.is_relative_to(self.root_dir) or not target_dir.is_dir():
+            return []
+        items: list[str] = []
+        for root, dirs, files in os.walk(target_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for f in sorted(files):
+                if f.startswith(".") or not f.endswith(".md"):
+                    continue
+                p = Path(root) / f
+                try:
+                    rel = p.relative_to(self.root_dir)
+                    items.append(str(rel))
+                except ValueError:
+                    pass
+        return sorted(items)
+
+    def read_document(self, relative_path: str) -> str | None:
+        """Read a document from knowledge base by relative path or query."""
+        resolved = self.resolve_file(relative_path)
+        if resolved is not None and resolved.is_file():
+            try:
+                if not resolved.is_relative_to(self.root_dir):
+                    return None
+                return resolved.read_text(encoding="utf-8")
+            except Exception:
+                return None
+        candidate = (self.root_dir / relative_path.strip().lstrip("/")).resolve()
+        if candidate.is_relative_to(self.root_dir) and candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+        return None
+
+    def write_document(
+        self, relative_path: str, content: str, commit_message: str | None = None
+    ) -> Path:
+        """Write a document to knowledge base, creating directories, and commit."""
+        clean_path = relative_path.strip().lstrip("/")
+        if not clean_path.endswith(".md"):
+            clean_path = f"{clean_path}.md"
+        candidate = (self.root_dir / clean_path).resolve()
+        if not candidate.is_relative_to(self.root_dir):
+            raise KnowledgePathError(f"Path escapes knowledge root: {relative_path}")
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text(content.strip() + "\n", encoding="utf-8")
+        msg = commit_message or f"Update knowledge document: {clean_path}"
+        self.git_commit(msg)
+        return candidate

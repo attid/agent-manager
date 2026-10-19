@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import threading
@@ -215,6 +216,27 @@ class TaskExecutionWorker:
                 state_dir.mkdir(parents=True, exist_ok=True)
                 runner_config["state_dir"] = str(state_dir)
 
+                outbox_dir = exec_dir / "outbox"
+                outbox_dir.mkdir(parents=True, exist_ok=True)
+                runner_config["outbox_dir"] = str(outbox_dir)
+
+                attachments = meta_data.get("attachments") or []
+                if attachments:
+                    inbox_dir = exec_dir / "inbox"
+                    inbox_dir.mkdir(parents=True, exist_ok=True)
+                    for att in attachments:
+                        att_name = att.get("name") or att.get("artifact_name")
+                        source_task_id = att.get("task_id")
+                        source_path = att.get("path")
+                        if not source_path and source_task_id and att_name:
+                            candidate = self.artifact_root / str(source_task_id) / "artifacts" / att_name
+                            if candidate.is_file():
+                                source_path = str(candidate)
+                        if source_path and Path(source_path).is_file():
+                            target_name = att_name or Path(source_path).name
+                            shutil.copy2(source_path, inbox_dir / target_name)
+                    runner_config["inbox_dir"] = str(inbox_dir)
+
                 instructions = list(runner_config.get("instructions") or [])
 
                 # Inject project summary if present in knowledge base
@@ -249,6 +271,8 @@ class TaskExecutionWorker:
                     f"Working directory: /workspace/{runner_config.get('workdir', '.')}\n"
                     f"Project read-only: {bool(runner_config.get('project_read_only', False))}\n"
                     f"Sandbox network: {bool(runner_config.get('network', True))}\n"
+                    "Outbox: /workspace/outbox (writable artifacts; write output files, logs or reports here)\n"
+                    "Inbox: /workspace/inbox (read-only input attachments)\n"
                     "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.\n",
                     encoding="utf-8",
                 )
@@ -452,6 +476,37 @@ class TaskExecutionWorker:
                 else:
                     task_status = "done"
                     outcome_status = "completed"
+                task_artifacts_dir = self.artifact_root / str(task.id) / "artifacts"
+                task_artifacts_dir.mkdir(parents=True, exist_ok=True)
+                collected_artifacts = []
+                if outbox_dir.is_dir():
+                    for item in sorted(outbox_dir.iterdir()):
+                        if item.is_file():
+                            dest = task_artifacts_dir / item.name
+                            shutil.copy2(item, dest)
+                            collected_artifacts.append({
+                                "name": item.name,
+                                "path": str(dest),
+                                "size": dest.stat().st_size,
+                            })
+                if summary_path and Path(summary_path).is_file():
+                    sum_dest = task_artifacts_dir / "summary.md"
+                    shutil.copy2(summary_path, sum_dest)
+                    collected_artifacts.append({
+                        "name": "summary.md",
+                        "path": str(sum_dest),
+                        "size": sum_dest.stat().st_size,
+                    })
+                if runner_result.get("session_path") and Path(runner_result["session_path"]).is_file():
+                    sess_path = Path(runner_result["session_path"])
+                    sess_dest = task_artifacts_dir / "session.jsonl"
+                    shutil.copy2(sess_path, sess_dest)
+                    collected_artifacts.append({
+                        "name": "session.jsonl",
+                        "path": str(sess_dest),
+                        "size": sess_dest.stat().st_size,
+                    })
+                runner_result["artifacts"] = collected_artifacts
 
                 updated_task = self._repository.complete_execution(
                     task.id,

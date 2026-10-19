@@ -268,3 +268,88 @@ def test_create_turn_error_handling(
         assert res2.status_code == 400
         assert "expected 'user'" in res2.json()["detail"]
 
+
+def test_knowledge_api_endpoints(migrated_db: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    from agent_manager.knowledge import KnowledgeBase
+
+    kb = KnowledgeBase(tmp_path / "knowledge")
+    kb.initialize()
+    app = create_app(f"sqlite:///{migrated_db}", knowledge_base=kb)
+
+    with TestClient(app) as client:
+        # Write knowledge doc
+        put_res = client.put(
+            "/knowledge/projects/test-proj/summary.md",
+            json={"content": "# Test Project\n\nSummary info.", "commit_message": "test commit"},
+        )
+        assert put_res.status_code == 200
+        assert put_res.json()["path"] == "projects/test-proj/summary.md"
+        assert "# Test Project" in put_res.json()["content"]
+
+        # Read knowledge doc
+        get_res = client.get("/knowledge/projects/test-proj/summary.md")
+        assert get_res.status_code == 200
+        assert "# Test Project" in get_res.json()["content"]
+
+        # List knowledge docs
+        list_res = client.get("/knowledge")
+        assert list_res.status_code == 200
+        items = list_res.json()["items"]
+        assert "projects/test-proj/summary.md" in items
+
+        # Filter by category
+        cat_res = client.get("/knowledge?category=projects")
+        assert cat_res.status_code == 200
+        assert "projects/test-proj/summary.md" in cat_res.json()["items"]
+
+        # Non-existent doc
+        missing_res = client.get("/knowledge/absent/file.md")
+        assert missing_res.status_code == 404
+
+
+def test_task_artifacts_endpoints(migrated_db: pathlib.Path, tmp_path: pathlib.Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    app = create_app(f"sqlite:///{migrated_db}", artifact_root=artifact_root)
+
+    with TestClient(app) as client:
+        # Create task
+        task = client.post("/tasks", json={"title": "Task with artifacts"}).json()
+        task_id = task["id"]
+
+        # Place an artifact file in task artifact dir
+        task_art_dir = artifact_root / str(task_id) / "artifacts"
+        task_art_dir.mkdir(parents=True, exist_ok=True)
+        (task_art_dir / "trace.log").write_text("sample trace log content", encoding="utf-8")
+        (task_art_dir / "summary.md").write_text("# Completed task", encoding="utf-8")
+
+        # List artifacts
+        list_res = client.get(f"/tasks/{task_id}/artifacts")
+        assert list_res.status_code == 200
+        art_names = [a["name"] for a in list_res.json()["artifacts"]]
+        assert "trace.log" in art_names
+        assert "summary.md" in art_names
+
+        # Get artifact content
+        get_art = client.get(f"/tasks/{task_id}/artifacts/trace.log")
+        assert get_art.status_code == 200
+        assert get_art.text == "sample trace log content"
+
+        # Get session info
+        sess_res = client.get(f"/tasks/{task_id}/session")
+        assert sess_res.status_code == 200
+        assert sess_res.json()["task_id"] == task_id
+
+
+def test_ask_endpoint_timeout_and_completion(migrated_db: pathlib.Path) -> None:
+    app = create_app(f"sqlite:///{migrated_db}")
+
+    with TestClient(app) as client:
+        # When no worker processes the turn, it times out gracefully
+        res = client.post("/ask", json={"message": "Hello secretary", "timeout_seconds": 0.2})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] == "timeout"
+        assert data["conversation_id"]
+        assert data["turn_id"]
+
+

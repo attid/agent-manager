@@ -304,6 +304,14 @@ _ROUTE_RULES: tuple[tuple[str, str, str, str | None], ...] = (
     ("GET", "/agents/{agent_id}/revisions/{revision}", AGENTS_READ, "agent"),
     ("PATCH", "/agents/{agent_id}", AGENTS_WRITE, "agent"),
     ("DELETE", "/agents/{agent_id}", AGENTS_WRITE, "agent"),
+    ("GET", "/knowledge", KNOWLEDGE_READ, None),
+    ("GET", "/knowledge/{path}", KNOWLEDGE_READ, None),
+    ("PUT", "/knowledge/{path}", KNOWLEDGE_WRITE, None),
+    ("POST", "/ask", CONVERSATIONS_WRITE, None),
+    ("POST", "/conversations/ask", CONVERSATIONS_WRITE, None),
+    ("GET", "/tasks/{task_id}/artifacts", TASKS_READ, "task"),
+    ("GET", "/tasks/{task_id}/artifacts/{artifact_name}", TASKS_READ, "task"),
+    ("GET", "/tasks/{task_id}/session", TASKS_READ, "task"),
 )
 
 
@@ -317,6 +325,17 @@ def _match(pattern: str, path: str) -> str | None:
     pattern_parts = pattern.strip("/").split("/")
     path_parts = path.strip("/").split("/")
     captures: list[str] = []
+    if pattern_parts and pattern_parts[-1] in ("{path}", "{artifact_name}"):
+        prefix_len = len(pattern_parts) - 1
+        if len(path_parts) <= prefix_len:
+            return None
+        for expected, actual in zip(pattern_parts[:prefix_len], path_parts[:prefix_len]):
+            if expected.startswith("{") and expected.endswith("}"):
+                captures.append(actual)
+            elif expected != actual:
+                return None
+        captures.append("/".join(path_parts[prefix_len:]))
+        return captures[0] if captures else ""
     if len(pattern_parts) != len(path_parts):
         return None
     for expected, actual in zip(pattern_parts, path_parts):
