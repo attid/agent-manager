@@ -32,7 +32,13 @@ runs for coding tasks with `changed_files` that did not disable review. It:
 - runs up to three rounds through `ReviewExecutor`;
 - persists round reports and metrics (`round_<n>.json`, including the verdict);
 - re-runs the developer and re-reviews when changes are requested, and can end
-  in `waiting_user_input` when the developer asks for clarification.
+  in `waiting_user_input` when the developer asks for clarification;
+- resumes the original developer run for the fix round: the native Runner
+  session id reported by the first execution is passed to
+  `pi_runner resume --session <id>` together with the same state directory,
+  role/runtime and project workspace. Only when the runner reported no session
+  id does the fix round fall back to a fresh `run`, so a resume is never
+  attempted without the required `--session`.
 
 The reviewer role also receives the read-only platform handbook discovery as
 an extra instruction file.

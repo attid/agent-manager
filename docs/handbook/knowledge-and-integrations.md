@@ -102,8 +102,10 @@ Drain targets:
   treat the transcript as the user's message and must not claim the audio did
   not exist.
 - `TelegramNotifier` posts task-finished notifications when configured.
-- `cmd_analyze` submits the real durable analysis operation and renders its
-  stored pending/failed/succeeded outcome; see
+- `cmd_analyze` shows a stored analysis report without a model call, and
+  otherwise submits the real durable operation and renders its stored
+  pending/failed/succeeded outcome. A repeated view replays the same
+  revision-bound operation; `/analyze <task_id> refresh` starts a new one; see
   [Analysis and recommendations](analysis-and-recommendations.md).
 - `KnowledgeBase.initialize` copies `docs/handbook/*.md` into
   `<knowledge_root>/handbook` (content-idempotent) so the read-only platform

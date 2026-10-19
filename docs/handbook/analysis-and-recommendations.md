@@ -82,14 +82,22 @@ expose the same surface. They are enabled for the secretary profile only
 - `apply` requires status `approved`, re-checks the observed profile revision
   or knowledge-base content hash, writes, and records `applied`. A stale
   target records `conflict` and raises `RecommendationConflictError`; newer
-  content is never overwritten.
+  content is never overwritten. A profile proposal may be a full replacement
+  document or, as the analyzer output contract permits, a non-empty prompt
+  string (treated as `system_prompt`); an echoed server-managed
+  `agent_id`/`revision` is ignored because identity comes from `target_id`
+  and the revision is re-checked from `target_revision`.
 - HTTP authorization maps the read routes to `analysis.read` and
   approve/apply to the management action `analysis.approve`. A task-scoped
   `analysis.read` grant cannot read another task's report by id (that needs
   wildcard authority), and `analysis.trigger` does not grant approval.
-- `cmd_analyze` (`src/agent_manager/telegram/handlers.py`) submits the real
-  durable operation and renders its stored pending/failed/succeeded outcome;
-  it no longer prints hardcoded findings.
+- `cmd_analyze` (`src/agent_manager/telegram/handlers.py`) shows a stored
+  report without launching a model; when none exists it submits the real
+  durable operation and renders its stored pending/failed/succeeded outcome.
+  A repeated call while an operation is pending replays the same
+  revision-bound idempotent operation, and `/analyze <task_id> refresh`
+  explicitly starts a new analysis after the evidence changed. It never
+  prints hardcoded findings.
 
 ## Related
 
