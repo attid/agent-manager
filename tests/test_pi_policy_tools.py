@@ -83,6 +83,27 @@ class PolicyToolsTests(unittest.TestCase):
                 json.loads(turn_file.read_text()), {"turn_id": "turn-77"}
             )
 
+    def test_turn_identity_is_replaced_on_resume_and_cleared_without_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file, task_file = self._write_config(
+                root, {"tools": ["attach_document"]}
+            )
+
+            result = execute(config_file, task_file, turn_id="turn-1")
+            session_id = result["session_id"]
+            turn_file = root / "state" / "sessions" / session_id / "pi" / "turn.json"
+            self.assertEqual({"turn_id": "turn-1"}, json.loads(turn_file.read_text()))
+
+            resumed = execute(config_file, resume=session_id, turn_id="turn-2")
+            self.assertEqual(resumed["session_id"], session_id)
+            self.assertEqual({"turn_id": "turn-2"}, json.loads(turn_file.read_text()))
+
+            # A manual resume without a turn identity must not expose the
+            # previous turn to policy tools or replay its deferred requests.
+            execute(config_file, resume=session_id)
+            self.assertFalse(turn_file.exists())
+
     def test_no_backend_document_and_no_production_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

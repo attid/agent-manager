@@ -36,6 +36,27 @@ print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[
 '''
 
 
+MEDIA_PROBE_PI = r'''
+import json, pathlib
+inbox = pathlib.Path('/workspace/inbox')
+attachments = pathlib.Path('/attachments')
+def names(directory):
+    return sorted(item.name for item in directory.iterdir()) if directory.is_dir() else []
+probe = {
+    'inbox': names(inbox),
+    'inbox_contents': {
+        item.name: item.read_bytes().decode('utf-8', 'replace')
+        for item in inbox.iterdir()
+        if item.is_file()
+    },
+    'legacy_visible': (inbox / 'legacy.jpg').exists(),
+    'attachments': names(attachments),
+}
+pathlib.Path('/workspace/media_probe.json').write_text(json.dumps(probe))
+print(json.dumps({'type':'message_end','message':{'role':'assistant','content':[{'type':'text','text':'media probe'}],'stopReason':'stop','usage':{'input':1,'output':1},'model':'fixture-model'}}), flush=True)
+'''
+
+
 class SandboxTests(unittest.TestCase):
     def setUp(self):
         if not shutil.which('bwrap'):
@@ -95,6 +116,66 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(inspect(directory)['status'], 'stopped')
         resumed = execute(self.config, resume=directory.name)
         self.assertEqual(resumed['status'], 'completed')
+
+    def test_explicit_turn_inbox_replaces_legacy_project_inbox(self):
+        legacy_inbox = self.repo / 'inbox'
+        legacy_inbox.mkdir()
+        (legacy_inbox / 'legacy.jpg').write_bytes(b'legacy-bytes')
+        (legacy_inbox / 'voice.ogg').write_bytes(b'legacy-voice')
+
+        first_view = self.root / 'view-1'
+        first_view.mkdir()
+        (first_view / 'photo.jpg').write_bytes(b'current-photo-1')
+        first_store = self.root / 'store-1'
+        first_store.mkdir()
+        (first_store / 'prior.txt').write_bytes(b'prior-1')
+
+        media_pi = self.root / 'media_pi.py'
+        media_pi.write_text(MEDIA_PROBE_PI)
+        config = json.loads(self.config.read_text())
+        config['pi_command'] = ['/usr/bin/python3', str(media_pi)]
+        config['runtime_paths'] = [str(media_pi)]
+        config['inbox_dir'] = str(first_view)
+        config['attachments_dir'] = str(first_store)
+        self.config.write_text(json.dumps(config))
+
+        result = execute(self.config, self.task)
+        self.assertEqual(
+            result['status'], 'completed',
+            Path(result['errors_path']).read_text(),
+        )
+        probe = json.loads((self.repo / 'media_probe.json').read_text())
+        self.assertEqual(probe['inbox'], ['photo.jpg'])
+        self.assertEqual(probe['inbox_contents'], {'photo.jpg': 'current-photo-1'})
+        self.assertFalse(probe['legacy_visible'])
+        self.assertEqual(probe['attachments'], ['prior.txt'])
+        # The historical shared inbox is untouched outside the child sandbox.
+        self.assertEqual((legacy_inbox / 'legacy.jpg').read_bytes(), b'legacy-bytes')
+        self.assertEqual((legacy_inbox / 'voice.ogg').read_bytes(), b'legacy-voice')
+
+        # A different conversation mounts only its own read-only store.
+        second_view = self.root / 'view-2'
+        second_view.mkdir()
+        (second_view / 'photo.jpg').write_bytes(b'current-photo-2')
+        second_store = self.root / 'store-2'
+        second_store.mkdir()
+        (second_store / 'other.txt').write_bytes(b'other-2')
+        config['inbox_dir'] = str(second_view)
+        config['attachments_dir'] = str(second_store)
+        self.config.write_text(json.dumps(config))
+
+        second = execute(self.config, self.task)
+        self.assertEqual(
+            second['status'], 'completed',
+            Path(second['errors_path']).read_text(),
+        )
+        second_probe = json.loads((self.repo / 'media_probe.json').read_text())
+        self.assertEqual(second_probe['inbox'], ['photo.jpg'])
+        self.assertEqual(
+            second_probe['inbox_contents'], {'photo.jpg': 'current-photo-2'}
+        )
+        self.assertFalse(second_probe['legacy_visible'])
+        self.assertEqual(second_probe['attachments'], ['other.txt'])
 
     def test_missing_bwrap_fails_closed(self):
         old = os.environ.get('PATH')
