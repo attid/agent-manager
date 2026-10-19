@@ -80,14 +80,11 @@ Drain targets:
 - `openviking_read(uri)` calls
   `GET <openviking_url>/api/v1/content/read?uri=...`.
 - Both are direct HTTP calls from `policy.mjs`, not through the Agent Manager
-  API, and both return an error string on failure rather than a structured
-  status.
-
-**Known gap (T02I / T05 contract):** when `/session/backend_api.json` is
-absent, `getBackendConfig()` falls back to built-in backend/OpenViking
-addresses and an embedded token. Execution instances must inject explicit
-backend settings and tokens; the built-in fallback must not be relied on and
-the embedded credential must be externalized.
+  API, and both return a specific "OpenViking не настроен" diagnostic when the
+  instance does not inject `openviking_url`/`openviking_token`. They never
+  invent an address or credential: `getBackendConfig()` returns only the
+  explicit `/session/backend_api.json` document written from the per-instance
+  role configuration.
 
 ## Files and documents
 
@@ -105,8 +102,12 @@ the embedded credential must be externalized.
   treat the transcript as the user's message and must not claim the audio did
   not exist.
 - `TelegramNotifier` posts task-finished notifications when configured.
-- `cmd_analyze` currently prints hardcoded findings; see
+- `cmd_analyze` submits the real durable analysis operation and renders its
+  stored pending/failed/succeeded outcome; see
   [Analysis and recommendations](analysis-and-recommendations.md).
+- `KnowledgeBase.initialize` copies `docs/handbook/*.md` into
+  `<knowledge_root>/handbook` (content-idempotent) so the read-only platform
+  handbook is mounted at `/knowledge/handbook` for agent discovery.
 
 ## Infrastructure topology
 
@@ -114,11 +115,18 @@ Kustomize, Helm and Terraform files are not read by the running platform in
 this snapshot. Any infrastructure material under `scripts/` or `docs/` is
 deployment tooling, not part of the application runtime contract.
 
-## Pending interfaces
+## Discovery and integrations
 
-- T05: capability discovery injection for secretary and system agents; skills
-  and knowledge connection (if implemented) must be explicit and truthful.
-- T04: evidence/recommendation storage and API.
+- Secretary and `system-*` agents receive the handbook discovery injection on
+  every run/resume; the executable list is filtered by the profile's tools
+  while the full handbook index stays discoverable.
+- Analysis reports and recommendations are stored and retrievable; approval
+  and apply follow the rules in
+  [Approvals and revisions](approvals-and-revisions.md) and
+  [Analysis and recommendations](analysis-and-recommendations.md).
+- Skills, knowledge and infrastructure remain declarative unless an execution
+  path actually connects them; the capability inventory marks local effects
+  explicitly rather than claiming they are loaded.
 
 ## Related
 

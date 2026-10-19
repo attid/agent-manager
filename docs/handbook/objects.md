@@ -107,4 +107,5 @@ than corrupting the queue.
 ## Related
 
 - Storage contract: `src/agent_manager/storage/__init__.py`
-- Migration chain: `migrations/versions/0001`–`0007`
+- Migration chain: `migrations/versions/0001`–`0009`
+  (`0008_operation_owner`, `0009_analysis`)

@@ -103,15 +103,20 @@ Secretary conversations use a separate durable protocol
 The dispatcher loop never dies from one bad turn; loop-level exceptions are
 logged and polling continues.
 
-## Pending interfaces
+## Operation execution permissions and discovery
 
-- T02I/T05: operation-level execution permissions and explicit instance
-  contexts for workers.
-- T03: standalone review executor for `review` operations.
-- T04: analysis runs and recommendation lifecycle.
-- T05: injected platform operating prompt on every run/resume (today the
-  contract is appended through the knowledge catalog instruction file, see
-  [Profiles, runtime and skills](profiles-runtime-skills.md)).
+- Each task execution receives an execution-scoped backend credential derived
+  from its configured tools; a raw HTTP call cannot exceed that scope
+  (`src/agent_manager/permissions.py`).
+- Workers build an explicit per-instance context rather than reading a host
+  path default (`src/agent_manager/instance.py`).
+- The `review` and `analysis` operation kinds have registered executors
+  (`src/agent_manager/operation_handlers.py`); a kind with no executor still
+  fails visibly. See [Review](review.md) and
+  [Analysis and recommendations](analysis-and-recommendations.md).
+- Secretary and `system-*` executions receive the injected platform discovery
+  on every run/resume without replacing the stored identity prompt (see
+  [Profiles, runtime and skills](profiles-runtime-skills.md#platform-operating-instruction-injection)).
 
 ## Related
 

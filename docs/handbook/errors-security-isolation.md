@@ -37,16 +37,19 @@
 ## Authentication
 
 - Loopback only: the API default host is `127.0.0.1`.
-- `BearerAuthMiddleware`: when token(s) are configured, every path except
-  `/health` and `OPTIONS` requires a valid `Authorization: Bearer` header.
-- When no tokens are configured the API is open. This is a development mode;
-  do not expose it beyond loopback.
-
-**Pending (T02I):** execution-scoped tokens limited to intended actions and
-resources; scoped operation status/listing that cannot leak unrelated work;
-revocation must never fall back to anonymous access. In this snapshot a valid
-token grants the full API surface and anonymous access is only possible when
-no token is configured.
+- `BearerAuthMiddleware` fixes the authenticated/`require_auth` decision when
+  the app is built. Administrative tokens from `AGENT_MANAGER_API_TOKENS`
+  receive unrestricted access and are never handed to a child execution.
+- Execution tokens issued by `ExecutionPermissions`
+  (`src/agent_manager/permissions.py`) are accepted only for the granted
+  action and resource. `resolve_requirement` maps every declared route, so a
+  shell inside a sandbox cannot bypass the tool-exposure policy with `curl`.
+  Operations additionally check the submitted `kind` and `target_id`, and a
+  scoped caller can read only its own operations.
+- Issuing the first execution grant never switches a running service from
+  anonymous to protected, and revoking the last grant never reopens anonymous
+  access. A standalone app with no administrative token and no permission
+  registry stays in explicit open development mode.
 
 ## Sandbox isolation
 
@@ -88,8 +91,9 @@ aliases and interpreted programs are outside it.
 - `pending` = deferred, not yet applied.
 - `unknown` = read state before retrying.
 - A submitted operation is not a verdict; read `status`/`result`/`error`.
-- Do not report hardcoded text (for example the current Telegram `/analyze`
-  body) as an analyzer result.
+- Do not report a deferred or submitted request as a completed result, and
+  never substitute hardcoded prose for an analyzer, reviewer or executor
+  result. `cmd_analyze` reads the real operation outcome.
 - Do not claim a skill, knowledge binding or integration works when the
   execution factory reports it disconnected.
 

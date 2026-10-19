@@ -115,9 +115,25 @@ platform secretary; it does not replace the customized identity prompt. In
 `PersistentConversationHandler._prepare_execution`, when the execution role
 exposes `create_task` (the secretary), the handler writes a
 `knowledge_catalog.md` instruction containing `SECRETARY_CONTRACT` plus the
-knowledge-base catalog. The per-call execution role is a copy of the pinned
-base role with this file appended to `instructions`; the base export and the
-stored profile are untouched.
+knowledge-base catalog.
+
+`src/agent_manager/capabilities.py` adds a short handbook discovery block for
+the secretary and every `system-*` agent (`is_platform_agent`). It always
+lists the full read-only handbook index, but lists only the profile's enabled
+platform tools (`executable_tool_names`). The block is appended as an extra
+instruction file:
+
+- conversations: concatenated into `knowledge_catalog.md`;
+- task executions: `platform_discovery.md` written next to the role
+  (`write_handbook_discovery`);
+- review executor: `platform_discovery.md` appended to the reviewer role;
+- analysis executor: passed as `extra_instructions` to
+  `freeze_profile_handler`.
+
+The per-call execution role is a copy of the pinned base role with these files
+appended to `instructions`; the base export and the stored profile are never
+modified. `KnowledgeBase.initialize` copies `docs/handbook/*.md` into
+`<knowledge_root>/handbook`, mounted read-only at `/knowledge/handbook`.
 
 ## Skills
 
@@ -131,15 +147,9 @@ stored profile are untouched.
 - Skills are not loaded by the freeze factory in this snapshot. Treat them as
   declared configuration, not as proven context.
 
-## Pending interfaces
-
-- T02I: scoped execution permissions and explicit per-instance paths/backend
-  settings.
-- T05: capability discovery injection and executable parity checks over the
-  tool/profile surface.
-
 ## Related
 
+- `src/agent_manager/capabilities.py`
 - `src/agent_manager/storage/agents.py`
 - `src/agent_manager/runtime_defaults.py`
 - `src/agent_manager/profile_runtime.py`

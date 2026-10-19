@@ -5,12 +5,13 @@ This directory is the discoverable, read-only operating contract for agents
 It describes the committed behaviour of Agent Manager as of base commit
 `fc7a3f7`, which already contains the T01 durable operation queue.
 
-> **Snapshot, not final parity.** T02I (scoped execution permissions), T03
-> (independent review executor) and T04 (analysis, recommendations and
-> approvals) are parallel tasks that have not landed in this snapshot. Every
-> file labels pending interfaces explicitly. Do not quote a pending interface
-> as available, and do not treat this snapshot as the final verification that
-> T05 owns.
+> **Integrated snapshot.** T02I (instance isolation and scoped execution
+> permissions), T03 (independent review executor), T04 (analysis,
+> recommendations and approvals) and T05 (capability inventory, parity
+> checks and discovery injection) are present. `src/agent_manager/capabilities.py`
+> is the machine-readable inventory and `tests/test_capabilities.py` checks it
+> against the live OpenAPI document and the registered Pi JS tools. Source
+> remains the source of truth.
 
 ## What this handbook is for
 
@@ -55,10 +56,13 @@ authoritative sources, in this order:
    secretary tool list is in `src/agent_manager/knowledge.py`
    (`ensure_default_profiles`, `sec_tools`).
 
-4. **Executable parity tests** — `tests/platform_tools_contract.mjs` runs the
+4. **Executable parity tests** — `tests/test_capabilities.py` compares the
+   machine-readable inventory in `src/agent_manager/capabilities.py` with the
+   live OpenAPI document and the real tools registered by `policy.mjs` (via
+   `tests/policy_tool_names.mjs`). `tests/platform_tools_contract.mjs` runs the
    real `policy.mjs` tools against a temporary HTTP backend, and
-   `tests/test_platform_tools_contract.py` drives that script. These are the
-   only tests that prove the JS tool ↔ API contract end to end.
+   `tests/test_platform_tools_contract.py` drives that script. Together they
+   prove the inventory ↔ API ↔ JS tool contract end to end.
 
 ## How to verify completion
 
@@ -96,8 +100,8 @@ Operation protocol statuses (`accepted`/`pending`, `running`,
 | [profiles-runtime-skills.md](profiles-runtime-skills.md) | Immutable profiles, runtime defaults, frozen execution, skills. |
 | [task-lifecycle.md](task-lifecycle.md) | Task statuses, execution worker, turns, resume, recovery. |
 | [tools-and-api.md](tools-and-api.md) | REST endpoints, JS tools, auth, idempotency, discovery. |
-| [review.md](review.md) | Automatic review cycle; pending independent review executor. |
-| [analysis-and-recommendations.md](analysis-and-recommendations.md) | Analyzer profile; pending evidence/recommendation interface. |
+| [review.md](review.md) | Independent review executor and its verdict contract. |
+| [analysis-and-recommendations.md](analysis-and-recommendations.md) | Analyzer evidence package, recommendation lifecycle, approval/apply. |
 | [approvals-and-revisions.md](approvals-and-revisions.md) | Revision checks and explicit approval rules. |
 | [knowledge-and-integrations.md](knowledge-and-integrations.md) | Knowledge base, OpenViking, skills, files, Telegram. |
 | [errors-security-isolation.md](errors-security-isolation.md) | Error contract, auth, sandbox and isolated instances. |
@@ -109,7 +113,8 @@ Operation protocol statuses (`accepted`/`pending`, `running`,
 When prose and source disagree, source wins:
 
 - REST: `src/agent_manager/api/app.py`, `src/agent_manager/api/schemas.py`
-- Tools: `src/pi_runner/policy.mjs`
+- Tools and permissions: `src/agent_manager/capabilities.py`,
+  `src/pi_runner/policy.mjs`, `src/agent_manager/permissions.py`
 - Operations: `src/agent_manager/storage/operations.py`,
   `src/agent_manager/operation_worker.py`,
   `src/agent_manager/operation_handlers.py`

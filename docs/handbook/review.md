@@ -1,31 +1,43 @@
 # Review
 
-There are two distinct review paths. Do not confuse them.
+There are two entry points to one implementation. Do not confuse them.
 
-## Implemented: automatic review cycle inside task execution
+## Shared implementation
+
+`src/agent_manager/review_executor.py` owns the read-only review round:
+`ReviewExecutor.execute(ReviewRequest) -> ReviewResult`. Both the automatic
+task cycle and the durable operation use it, so a manual review and an
+automatic review validate the same way.
+
+A review approves only when the reviewer produced an explicit, well-formed
+verdict:
+
+- a nonzero exit, a failed Runner status, an empty/malformed report, or an
+  absent/ambiguous verdict raises `ReviewExecutionError` and records the
+  failure; it never approves by absence of findings;
+- the domain verdict (`approved` / `changes_requested`) lives in the
+  operation `result` (or the round metrics), never in the operation `status`;
+- findings are evidence-linked with file/line and rationale;
+- the reviewer role is strictly read-only (`read` + `bash`,
+  `project_read_only=true`, `read_only=true`), strips administrative keys and
+  receives no administrative operation.
+
+## Automatic review inside task execution
 
 `TaskExecutionWorker._run_review_cycle` (`src/agent_manager/task_worker.py`)
-runs for coding tasks that produced `changed_files` and did not disable
-review. It:
+runs for coding tasks with `changed_files` that did not disable review. It:
 
 - loads the current `system-code-reviewer` profile (hot-reloading its file if
   changed);
-- runs up to three rounds of a read-only review against the task project;
-- writes round reports to task artifacts (`review_round_<n>.md`) and the
-  review directory;
-- checks for the explicit verdict strings `ВЕРДИКТ: ОДОБРЕНО`,
-  `VERDICT: APPROVED` and the `P1:` finding marker;
-- **current approval heuristic gap:** it also approves when no line contains
-  `P1`, even without an explicit APPROVED verdict. That is "approval by
-  absence" and T03 must replace it with a mandatory explicit verdict;
-- writes per-round metrics (`round_<n>.json`) with a `verdict` field;
-- if changes are requested, re-runs the developer and re-reviews, and can end
-  in `waiting_user_input` when the developer asks for clarification instead.
+- runs up to three rounds through `ReviewExecutor`;
+- persists round reports and metrics (`round_<n>.json`, including the verdict);
+- re-runs the developer and re-reviews when changes are requested, and can end
+  in `waiting_user_input` when the developer asks for clarification.
 
-The reviewer profile runs with `project_read_only=true` and only `read` +
-`bash` tools. This path is automatic and tied to the developer execution.
+The reviewer role also receives the read-only platform handbook discovery as
+an extra instruction file.
 
-## Implemented: manual trigger submission
+## Manual trigger and standalone operation
 
 `trigger_review(task_id, instructions?, idempotency_key?)`
 (`src/pi_runner/policy.mjs`) submits a durable operation:
@@ -41,47 +53,26 @@ POST /operations
 ```
 
 The tool returns the operation with `status` starting at `pending`. The
-operation id is the durable handle; submission is **not** a verdict.
+operation id is the durable handle; submission is **not** a verdict. Inspect
+the operation (`GET /operations/{id}`) for `status`, `result` and `error`.
 
-At this commit there is no registered executor for the `review` kind.
-`register_default_operation_handlers` registers only
-`git.commit_push` and `git.rollback` (`src/agent_manager/operation_handlers.py`).
-A claimed `review` operation therefore fails visibly with a diagnostic of the
-form:
-
-```
-OperationExecutionError: no executor registered for kind 'review'
-```
-
-It is recorded `failed`; it is never reported as succeeded.
+`review_operation_handler` (`src/agent_manager/operation_handlers.py`) is
+registered by `register_default_operation_handlers`. It loads the target task
+directly, so a review still runs when the task's execution status is already
+`completed`; it never reruns the developer. A failure updates the task
+metadata with the diagnostics and records the operation `failed`.
 
 ## Authority and evidence rules
 
-Review operations must never approve by absence of findings. The intended
-contract (T03) is:
-
-- a nonzero exit, failed Runner status, empty/malformed report, or absent
-  explicit verdict fails the operation;
-- the verdict (`approved` / `changes_requested`) is a domain value stored in
-  the operation `result`, not the operation `status`;
-- findings are evidence-linked (file/line plus rationale);
-- the reviewer has read-only project access and no administrative
-  operations.
-
-## Interface T05 must recheck after integration
-
-- T03 registers a real `review` executor at
-  `register_default_operation_handlers` and reuses the common runtime
-  resolver/profile execution path. Verify the handler signature remains
-  `handler(context: OperationContext) -> Mapping | None`.
-- Verify automatic and manual review share the same implementation.
-- Verify a `review` operation is not ignored because the task execution
-  status is already `completed`.
-- Verify review results are persisted on the operation (`result`, plus report
-  and metrics paths) and failure diagnostics are persisted in `error`.
+- Scope: the operation targets exactly one task and records the caller owner.
+- The reviewer sandbox holds no backend action (`read`/`bash` grant none), so
+  it cannot call the API directly.
+- A review is never reported as succeeded when the report or verdict is
+  missing.
 
 ## Related
 
+- `src/agent_manager/review_executor.py`
 - `src/agent_manager/task_worker.py`
 - `src/agent_manager/operation_handlers.py`
 - `src/agent_manager/operation_worker.py`

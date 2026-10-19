@@ -44,23 +44,31 @@ inside `agents/`.
 - `POST /operations` with an `idempotency_key` is replay-safe. A reused key
   with a different `kind`/`target_id`/`input`/`metadata` payload returns
   `409` and preserves the original.
+- The JS tools derive the default key from
+  `[kind, target_id, input, toolCallId]`. An exact retry of one invocation
+  replays the stored operation; a later distinct invocation (a new
+  `toolCallId`) creates a new operation even with identical input. An explicit
+  `idempotency_key` is honored across invocations.
 - A domain approval (`approved` / `changes_requested`) is stored inside the
   operation `result`. The operation `status` only reports execution
   (`succeeded` / `failed` / `interrupted`). Never treat `succeeded` as a
   domain approval without reading `result`.
-- **Known gap (T02I):** the JS tools currently hash `(kind, target, payload)`
-  into the key, so a later distinct request with the same payload is
-  deduplicated. T02I makes only retries of one invocation share a key.
 
-## Recommendation approvals (pending, T04)
+## Recommendation approvals
 
-The recommendation lifecycle is not implemented in this snapshot. The
-intended rules, which T05 must recheck once T04 lands:
+The recommendation lifecycle is implemented (`src/agent_manager/analysis.py`,
+`RecommendationService`):
 
 - proposal generation never applies the change;
-- applying requires explicit approval;
-- apply rechecks the expected revision/content hash and reports a stale
-  conflict instead of overwriting newer content.
+- `POST /recommendations/{id}/approve` records intent and requires status
+  `proposed`; it never touches the target;
+- `POST /recommendations/{id}/apply` requires status `approved`, rechecks the
+  observed profile revision or knowledge-base content hash, and records
+  `applied`; a stale target records `conflict` and returns `409` instead of
+  overwriting newer content;
+- the analyzer sandbox has no approve/apply capability. HTTP authorization
+  maps approve/apply to the management action `analysis.approve`; a
+  task-scoped `analysis.read` grant cannot read another task's report by id.
 
 ## Related
 

@@ -76,21 +76,21 @@ effective context in `task.metadata.execution_context`. Operators should read
 `agent_id`, `workspace` and this metadata from the task rather than assume
 what was requested.
 
-## Known gaps in this snapshot
+## Instance isolation and operation scoping
 
-These are real gaps the later integration tasks own; do not rely on the
-current behaviour:
-
-- The Runner composition root passes `default_workspace` into workers and the
-  API, but per-instance explicit paths/backend settings are not yet a
-  first-class typed context (T02I / T05 contract).
-- `src/pi_runner/policy.mjs` falls back to built-in backend addresses when
-  `/session/backend_api.json` is absent. Execution instances should always
-  inject explicit backend settings; the hardcoded fallback must not be used
-  for production executions (T02I / T05 contract).
-- Operation authorization scoped to kind and target is not implemented yet
-  (T02I): `POST /operations` currently accepts any known kind from any
-  authorized caller.
+- Explicit per-instance paths and backend settings are a first-class typed
+  context (`src/agent_manager/instance.py`, `InstanceContext`): state root,
+  workspaces root, skills root, knowledge root, artifact root, default
+  workspace and backend/OpenViking addresses. Components receive it from
+  `RunnerConfig` instead of re-deriving a host path.
+- `src/pi_runner/policy.mjs` writes `backend_api.json` only from the
+  role's explicit backend document. There is no built-in address or token
+  fallback; a filesystem-only role has no platform backend.
+- `POST /operations` authorization checks the submitted `kind` and
+  `target_id` (kind-specific action plus the `task:<id>` resource), so a
+  review grant cannot submit a Git action and a task-scoped grant cannot
+  target another task. Scoped callers cannot list the queue and read only
+  their own operations (`src/agent_manager/permissions.py`).
 
 ## Related
 

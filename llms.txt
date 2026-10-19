@@ -8,22 +8,28 @@
 
 ## Snapshot
 
-This handbook documents the committed platform as of base commit `fc7a3f7`
-(T01 durable operations integrated). Tasks T02I (scoped execution
-permissions), T03 (independent review executor) and T04 (analysis,
-recommendations and approvals) are parallel tasks that have not landed in this
-snapshot. Pending interfaces are labelled explicitly in the handbook; do not
-treat them as implemented. This is not a final parity verification.
+This handbook documents the integrated platform after T01 (durable
+operations), T02I (instance isolation and scoped execution permissions), T03
+(independent review executor), T04 (analysis, recommendations and approvals)
+and T05 (capability inventory, parity checks and discovery injection).
+Interfaces that were pending in an earlier snapshot are implemented; the
+source of truth remains code. `tests/test_capabilities.py` is the executable
+parity check between this documentation, the OpenAPI document and the
+registered Pi JS tools.
 
 ## Platform at a glance
 
 - Default API address: `http://127.0.0.1:18767` (loopback only).
 - Storage: one file-backed SQLite database in WAL mode, versioned by Alembic
-  migrations `0001`–`0007`.
+  migrations `0001`–`0009` (`0008_operation_owner`, `0009_analysis`).
 - Execution: `pi_runner` sandboxes each agent run; agent identity and runtime
-  policy come from immutable `AgentProfile` revisions.
+  policy come from immutable `AgentProfile` revisions, and each child receives
+  an execution-scoped backend credential rather than an administrative token.
 - Deferred work: every review/analysis/Git trigger is a durable `Operation`
-  row, not a synchronous side effect.
+  row, not a synchronous side effect; inspect the operation for its outcome.
+- Capability inventory: `src/agent_manager/capabilities.py` is the
+  machine-readable tool/API/permission/doc map, and
+  `audit_capabilities` compares it with the live surface.
 
 ## Handbook
 
@@ -38,10 +44,11 @@ treat them as implemented. This is not a final parity verification.
   cycle, resume and recovery.
 - [Tools and API discovery](docs/handbook/tools-and-api.md): REST endpoints,
   JS tools, auth, idempotency and discovery commands.
-- [Review](docs/handbook/review.md): current automatic review cycle and the
-  pending independent review executor.
+- [Review](docs/handbook/review.md): independent review operation and its
+  explicit verdict contract.
 - [Analysis and recommendations](docs/handbook/analysis-and-recommendations.md):
-  the analyzer profile and the pending evidence/recommendation interface.
+  the analyzer profile, evidence package, recommendation lifecycle and
+  approval/apply rules.
 - [Approvals and revisions](docs/handbook/approvals-and-revisions.md):
   optimistic revision checks and explicit-approval rules.
 - [Knowledge and integrations](docs/handbook/knowledge-and-integrations.md):
@@ -64,6 +71,12 @@ PYTHONPATH=src .venv/bin/python -c \
 
 # Registered JS tool names (authoritative list):
 grep -n 'name: "' src/pi_runner/policy.mjs
+
+# Machine-readable capability inventory and parity audit:
+PYTHONPATH=src .venv/bin/python -c \
+  "from agent_manager.capabilities import inventory_document; \
+   print(len(inventory_document()['tools']), 'tools')"
+PYTHONPATH=src .venv/bin/python -m pytest tests/test_capabilities.py -q
 
 # Durable operation kinds and their executors:
 grep -n 'OPERATION_KIND_\|worker.register' \

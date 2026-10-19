@@ -28,6 +28,13 @@ Current surface (`src/agent_manager/api/app.py`):
 | `POST` | `/operations` | `202`/`200`, `409` | Submit deferred operation. |
 | `GET` | `/operations` | `200` | Filters: `status`, `kind`, `target_id`, `limit`, `offset`. |
 | `GET` | `/operations/{id}` | `200`, `404` | Read status/result/error. |
+| `GET` | `/tasks/{task_id}/analysis` | `200` | List a task's analysis reports. |
+| `GET` | `/analysis/{report_id}` | `200`, `404` | Read one analysis report with evidence. |
+| `GET` | `/analysis/{report_id}/recommendations` | `200`, `404` | List a report's recommendations. |
+| `GET` | `/recommendations` | `200` | Filters: `task_id`, `status`, `target_kind`, `limit`, `offset`. |
+| `GET` | `/recommendations/{id}` | `200`, `404` | Preview a recommendation and its conflict state. |
+| `POST` | `/recommendations/{id}/approve` | `200`, `404`, `409` | Explicit approval; never mutates the target. |
+| `POST` | `/recommendations/{id}/apply` | `200`, `404`, `409`, `422` | Apply after a revision/hash recheck. |
 | `POST` | `/agents` | `201`, `409` | Create revision 1. |
 | `GET` | `/agents` | `200` | `include_archived` query. |
 | `GET` | `/agents/{id}` | `200`, `404` | Current snapshot. |
@@ -38,18 +45,23 @@ Current surface (`src/agent_manager/api/app.py`):
 
 ## Authentication
 
-`BearerAuthMiddleware` (`src/agent_manager/api/app.py`):
+`BearerAuthMiddleware` (`src/agent_manager/api/app.py`) distinguishes two
+credential classes:
 
-- If no tokens are configured (`AGENT_MANAGER_API_TOKENS` /
-  `AGENT_MANAGER_API_TOKEN` empty), the API is open. This is the development
-  mode.
-- When tokens are configured, every path except `/health` and `OPTIONS`
-  requires `Authorization: Bearer <token>`. Missing/invalid tokens return
-  `401` with `WWW-Authenticate: Bearer`.
+- administrative tokens from `AGENT_MANAGER_API_TOKENS` /
+  `AGENT_MANAGER_API_TOKEN` receive unrestricted access and are never handed to
+  a child execution; and
+- execution tokens issued by `ExecutionPermissions`
+  (`src/agent_manager/permissions.py`) are accepted only inside their granted
+  action/resource scope. `resolve_requirement` maps each route to a concrete
+  action and resource, so a raw HTTP call from a shell cannot bypass the tool
+  exposure policy.
 
-**Pending (T02I):** execution-scoped API tokens restricted to intended
-actions and resources. In this snapshot a valid token grants the full API
-surface.
+The authenticated/`require_auth` decision is fixed at process start: issuing
+or revoking execution grants never switches the instance between anonymous and
+protected. A standalone app with no administrative token and no permission
+registry stays in explicit open development mode. `/health` and `OPTIONS` are
+public.
 
 ## Error contract
 
@@ -71,16 +83,16 @@ surface.
 - `PATCH /agents/{id}`: `expected_revision` (not idempotent; it is an
   optimistic concurrency check).
 
-**Known gap (T02I):** the JS tools currently derive the operation
-`idempotency_key` as a deterministic hash of `(kind, target, payload)`
-(`operationKey` in `src/pi_runner/policy.mjs`). That makes an exact retry
-safe but suppresses a later, distinct intentional request with the same
-payload forever. T02I changes this so only retries of one invocation share a
-key and a new invocation can create a new operation.
+**Implemented:** the JS tools derive the operation `idempotency_key` from
+`[kind, target_id, input, toolCallId]` (`operationKey` in
+`src/pi_runner/policy.mjs`). An exact retry of one invocation reuses the same
+operation; a later, distinct invocation with the same payload creates a new
+operation. An explicit `idempotency_key` overrides this and is honored across
+invocations.
 
 ## Registered JS tools
 
-Defined in `src/pi_runner/policy.mjs`. There are 28 tools. Grouped by
+Defined in `src/pi_runner/policy.mjs`. There are 34 tools. Grouped by
 behaviour:
 
 **API-backed reads/writes** (return `ok`/`applied`/`failed`):
@@ -92,6 +104,12 @@ behaviour:
 **Durable operation submissions** (return the operation; inspect it to learn
 the outcome): `trigger_review`, `trigger_analysis`, `trigger_commit_push`,
 `trigger_rollback`.
+
+**Analysis and recommendation reads/writes** (return `ok`/`applied`/`failed`):
+`list_analysis_reports`, `get_analysis_report`, `list_recommendations`,
+`preview_recommendation`, `approve_recommendation`, `apply_recommendation`.
+These are exposed to the secretary profile only, not added unconditionally to
+every execution.
 
 **Session-deferred writes** (write a receipt file; applied after the turn):
 `attach_document`, `archive_agent`, `save_project_summary`, `write_knowledge`,
@@ -133,12 +151,16 @@ grep -n 'OPERATION_KIND_\|\.register(' \
   src/agent_manager/runner.py
 ```
 
-## Pending interfaces
+## Capability inventory
 
-- T02I: kind/target-scoped `/operations` authorization and scoped reads.
-- T05: machine-readable capability inventory and executable parity checks
-  against OpenAPI + registered tools; discovery injection for secretary and
-  system agents.
+`src/agent_manager/capabilities.py` is the machine-readable inventory of every
+tool and route (method, schema, result status, permission action and handbook
+document). `audit_capabilities` compares it with the generated OpenAPI
+document, the tools actually registered by `policy.mjs` and
+`ACTIONS_FOR_TOOLS`. `tests/test_capabilities.py` runs that audit, so an
+undeclared tool, unsupported route, schema drift or silent privilege widening
+fails deterministically. The `doc` field links each capability to its handbook
+file.
 
 ## Related
 
