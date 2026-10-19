@@ -5,6 +5,8 @@ User authorization (2026-10-19): implement the agreed platform plan using Pi/agy
 ## Outcome
 Every advertised tool reaches a working API implementation or reports a truthful diagnostic. The secretary and system agents can discover the complete platform contract. Review, analysis, approved recommendations and the Pirozhki lifecycle work on an isolated instance.
 
+Accepted implementation, verification and limitations are recorded in [completion.md](completion.md). Independent external AGY review ended with APPROVED after the confirmed findings were corrected. Production was not updated.
+
 ## Task DAG
 
 - T00: checkpoint the already verified routing/profile fixes and preserved E2E scenario.
