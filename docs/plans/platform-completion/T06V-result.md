@@ -1,20 +1,22 @@
 # T06V — Delegated isolated acceptance and integrated verification: result
 
 Status: complete for the delegated scope. Base `3af8653` (current committed
-HEAD when the task started). Verified source SHA: `9a8bf37` (the tree the
+HEAD when the task started). Verified source SHA: `180f525` (the tree the
 full suite below ran against; this report only adds documentation on top).
 Task spec `T06V.md` is committed alongside this report.
 
 ## Commits (this task)
 
 ```
+180f525 test: assert strict review failure in Pirozhki acceptance
 9a8bf37 test: add isolated deterministic Pirozhki end-to-end acceptance
 dd515f1 fix: persist applied profile recommendation to knowledge base
 ```
 
 `dd515f1` is the source fix and its focused regression; `9a8bf37` adds the
-deterministic E2E, the real-model gate and the updated scenario. This report
-and the task spec are committed on top of `9a8bf37`.
+deterministic E2E, the real-model gate and the updated scenario; `180f525`
+adds the strict-failure acceptance. This report and the task spec are
+committed on top.
 
 ## What landed
 
@@ -41,6 +43,8 @@ tools against the same backend and prints JSON for the Python assertions.
 
 - a real conversation turn through the dispatcher and the deterministic
   Runner, with the completed turn read back over HTTP;
+- a review that returns no explicit verdict fails the operation and never
+  approves the task by absence of findings;
 - JS-tool creation of `pirozhki-developer` and the task, then acceptance and
   execution in the exact project workspace (`execution_context.host_path` /
   `sandbox_path`);
@@ -98,7 +102,7 @@ PYTHONPATH=src .venv/bin/python -m pytest \
   -q -o addopts='' --tb=short
 ```
 
-Outcome: `4 passed, 1 skipped, 1 warning`, exit code `0`. The skip is the
+Outcome: `5 passed, 1 skipped, 1 warning`, exit code `0`. The skip is the
 opt-in real-model test.
 
 Full suite (as required by T06V, no output pipeline):
@@ -107,7 +111,7 @@ Full suite (as required by T06V, no output pipeline):
 PYTHONPATH=src .venv/bin/python -m pytest -o addopts='' -q --tb=short
 ```
 
-Outcome: `446 passed, 1 skipped, 1 warning`, exit code `0`. The skip is the
+Outcome: `447 passed, 1 skipped, 1 warning`, exit code `0`. The skip is the
 opt-in real-model test.
 
 Static checks:
