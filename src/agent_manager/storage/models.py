@@ -50,6 +50,7 @@ class Task(Base):
     status: Mapped[str] = mapped_column(
         String, nullable=False, default="incoming", server_default="incoming"
     )
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime,

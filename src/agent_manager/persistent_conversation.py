@@ -135,6 +135,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .session_operations import unapplied_items
+from .secretary_contract import SECRETARY_CONTRACT
 from .pi_reply import (
     LAUNCH_MODE_RESUME,
     LAUNCH_MODE_RUN,
@@ -657,6 +659,10 @@ class PersistentConversationHandler:
         native session and state directory.
         """
         base_role_config = _read_role_config(context.base_role_path)
+        tools = list(base_role_config.get("tools") or [])
+        platform_secretary = "create_task" in tools
+        if platform_secretary and "resolve_workspace" not in tools:
+            base_role_config["tools"] = [*tools, "resolve_workspace"]
         resolved = self._runtime_defaults.resolve(base_role_config)
         catalog_text = None
         if self._knowledge_base is not None and hasattr(
@@ -666,6 +672,8 @@ class PersistentConversationHandler:
                 catalog_text = self._knowledge_base.get_catalog_index()
             except Exception:
                 pass
+        if platform_secretary:
+            catalog_text = SECRETARY_CONTRACT + "\n\n" + (catalog_text or "")
         execution_role_path = _write_execution_role(
             context.base_role_path, resolved.role_config, catalog_text
         )
@@ -776,58 +784,50 @@ class PersistentConversationHandler:
         created_agents_file = session_pi_dir / "created_agents.json"
         if created_agents_file.is_file():
             try:
-                import json as _json
-                agents_data = _json.loads(created_agents_file.read_text(encoding="utf-8"))
-                if isinstance(agents_data, list):
-                    agent_repo = AgentProfileRepository(self._database)
-                    for ag in agents_data:
-                        a_id = ag.get("agent_id")
-                        a_prompt = ag.get("system_prompt")
-                        if not a_id or not a_prompt:
-                            continue
-                        current_prof = agent_repo.get_current(a_id)
-                        tools = ag.get("tools") or ["read", "write", "edit", "bash"]
-                        skills = ag.get("skills") or []
-                        skill_names = [s if isinstance(s, str) else s.get("skill") for s in skills if s]
-                        skill_bindings = [
-                            {"skill": s} if isinstance(s, str) else s
-                            for s in skills
-                            if s
-                        ]
-                        agent_state = pathlib.Path.home() / ".local/share/agent-manager/state" / a_id
-                        agent_ws = pathlib.Path.home() / ".local/share/agent-manager/workspaces" / a_id
-                        agent_state.mkdir(parents=True, exist_ok=True)
-                        agent_ws.mkdir(parents=True, exist_ok=True)
-                        runner_cfg = {
-                            "tools": tools,
-                            "state_dir": str(agent_state),
-                            "project": str(agent_ws),
-                        }
-                        if skill_names:
-                            runner_cfg["skills"] = skill_names
-                        if current_prof is None:
-                            prof = agent_repo.create(
-                                agent_id=a_id,
-                                name=ag.get("name") or a_id,
-                                role=ag.get("role") or "developer",
-                                system_prompt=a_prompt,
-                                runner_config=runner_cfg,
-                                skills=skill_bindings,
-                            )
-                        else:
-                            prof = agent_repo.update(
-                                agent_id=a_id,
-                                expected_revision=current_prof.revision,
-                                name=ag.get("name") or current_prof.name,
-                                role=ag.get("role") or current_prof.role,
-                                system_prompt=a_prompt,
-                                runner_config=runner_cfg,
-                                skills=skill_bindings,
-                            )
-                        if self._knowledge_base is not None and hasattr(
-                            self._knowledge_base, "save_agent_profile"
-                        ):
-                            self._knowledge_base.save_agent_profile(prof)
+                agents_data = unapplied_items(created_agents_file)
+                agent_repo = AgentProfileRepository(self._database)
+                for ag in agents_data:
+                    a_id = ag.get("agent_id")
+                    a_prompt = ag.get("system_prompt")
+                    if not a_id or not a_prompt:
+                        continue
+                    current_prof = agent_repo.get_current(a_id)
+                    # A legacy create is not an upsert and must not revert later edits.
+                    if current_prof is not None:
+                        if self._knowledge_base is not None:
+                            self._knowledge_base.save_agent_profile(current_prof)
+                        continue
+                    tools = ag.get("tools") or ["read", "write", "edit", "bash"]
+                    skills = ag.get("skills") or []
+                    skill_names = [s if isinstance(s, str) else s.get("skill") for s in skills if s]
+                    skill_bindings = [
+                        {"skill": s} if isinstance(s, str) else s
+                        for s in skills
+                        if s
+                    ]
+                    agent_state = pathlib.Path.home() / ".local/share/agent-manager/state" / a_id
+                    agent_ws = pathlib.Path.home() / ".local/share/agent-manager/workspaces" / a_id
+                    agent_state.mkdir(parents=True, exist_ok=True)
+                    agent_ws.mkdir(parents=True, exist_ok=True)
+                    runner_cfg = {
+                        "tools": tools,
+                        "state_dir": str(agent_state),
+                        "project": str(agent_ws),
+                    }
+                    if skill_names:
+                        runner_cfg["skills"] = skill_names
+                    prof = agent_repo.create(
+                        agent_id=a_id,
+                        name=ag.get("name") or a_id,
+                        role=ag.get("role") or "developer",
+                        system_prompt=a_prompt,
+                        runner_config=runner_cfg,
+                        skills=skill_bindings,
+                    )
+                    if self._knowledge_base is not None and hasattr(
+                        self._knowledge_base, "save_agent_profile"
+                    ):
+                        self._knowledge_base.save_agent_profile(prof)
             except Exception as e:
                 logger.warning("Failed to persist created agents from session: %s", e)
 
@@ -873,21 +873,25 @@ class PersistentConversationHandler:
         written_kb_file = session_pi_dir / "written_knowledge.json"
         if written_kb_file.is_file() and self._knowledge_base is not None:
             try:
-                import json as _json
-                kb_entries = _json.loads(written_kb_file.read_text(encoding="utf-8"))
-                if isinstance(kb_entries, list):
-                    kb_root = self._knowledge_base.root_dir
-                    for item in kb_entries:
-                        cat = item.get("category", "docs")
-                        name = item.get("name")
-                        content = item.get("content")
-                        if name and content:
-                            dest = kb_root / cat / name
-                            dest.parent.mkdir(parents=True, exist_ok=True)
+                kb_entries = unapplied_items(written_kb_file)
+                kb_root = self._knowledge_base.root_dir
+                for item in kb_entries:
+                    cat = item.get("category", "docs")
+                    name = item.get("name")
+                    content = item.get("content")
+                    if name and content:
+                        dest = (kb_root / cat / name).resolve()
+                        if not dest.is_relative_to(kb_root.resolve()):
+                            raise ValueError("Knowledge path escapes the knowledge base")
+                        if dest.is_relative_to(self._knowledge_base.agents_dir.resolve()):
+                            logger.warning("Ignoring legacy agent document write; use the profile API")
+                            continue
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        if not dest.is_file() or dest.read_text(encoding="utf-8") != content:
                             dest.write_text(content, encoding="utf-8")
-                            logger.info("Saved knowledge item to %s", dest)
-                    if hasattr(self._knowledge_base, "git_commit"):
-                        self._knowledge_base.git_commit("Update knowledge base from secretary session")
+                        logger.info("Saved knowledge item to %s", dest)
+                if hasattr(self._knowledge_base, "git_commit"):
+                    self._knowledge_base.git_commit("Update knowledge base from secretary session")
             except Exception as e:
                 logger.warning("Failed to persist written knowledge from session: %s", e)
 

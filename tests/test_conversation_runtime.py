@@ -176,7 +176,7 @@ def test_upgrade_from_0004_preserves_rows_and_adds_runtime(
         ).fetchall()
     finally:
         connection.close()
-    assert version == [("0005_create_conversation_runtimes",)]
+    assert version == [("0006_task_agent",)]
 
     database = Database.from_path(db_path)
     try:

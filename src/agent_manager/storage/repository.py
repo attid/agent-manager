@@ -184,6 +184,7 @@ class TaskRepository:
         description: str | None = None,
         status: str = "incoming",
         workspace: str | None = None,
+        agent_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
         id: str | None = None,
     ) -> Task:
@@ -194,6 +195,7 @@ class TaskRepository:
             description: Optional longer description.
             status: Free-form status string; defaults to ``"incoming"``.
             workspace: Optional workspace/project identifier.
+            agent_id: Explicit executor; None preserves the worker default.
             metadata: Arbitrary supplemental JSON data.
             id: Optional client-supplied identifier. A random UUID hex string
                 is generated when omitted.
@@ -207,6 +209,7 @@ class TaskRepository:
             description=description,
             status=status,
             workspace=workspace,
+            agent_id=agent_id,
             meta=dict(metadata) if metadata is not None else {},
         )
         with self._database.session() as session:
@@ -255,6 +258,7 @@ class TaskRepository:
                         description=record.get("description"),
                         status=record.get("status", "incoming"),
                         workspace=record.get("workspace"),
+                        agent_id=record.get("agent_id"),
                         meta=dict(record.get("metadata") or {}),
                     )
                     .on_conflict_do_nothing(index_elements=[Task.id])
@@ -307,6 +311,7 @@ class TaskRepository:
         description: Any = _UNSET,
         status: Any = _UNSET,
         workspace: Any = _UNSET,
+        agent_id: Any = _UNSET,
         metadata: Any = _UNSET,
     ) -> Task:
         """Update mutable fields of an existing task and return the record.
@@ -317,6 +322,7 @@ class TaskRepository:
             description: Replacement description if supplied (can be None).
             status: Replacement status if supplied.
             workspace: Replacement workspace if supplied (can be None).
+            agent_id: Replacement executor; None restores the worker default.
             metadata: Replacement metadata mapping if supplied.
 
         Raises:
@@ -334,6 +340,8 @@ class TaskRepository:
                 task.status = str(status)
             if workspace is not _UNSET:
                 task.workspace = str(workspace) if workspace is not None else None
+            if agent_id is not _UNSET:
+                task.agent_id = agent_id
             if metadata is not _UNSET:
                 task.meta = dict(metadata or {})
             task.updated_at = utcnow()

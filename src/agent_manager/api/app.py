@@ -27,9 +27,10 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
 from fastapi import (
@@ -46,6 +47,7 @@ from sqlalchemy.engine import make_url
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import bind_log_context
+from ..workspaces import resolve_workspace
 from ..secretary import (
     TurnConversationMismatchError,
     TurnInputMessageNotFoundError,
@@ -91,6 +93,10 @@ from .schemas import (
     task_to_read,
     turn_to_read,
 )
+
+if TYPE_CHECKING:
+    from ..knowledge import KnowledgeBase
+
 
 ENV_VAR = "AGENT_MANAGER_DB_URL"
 
@@ -446,6 +452,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             + _MIGRATION_HINT.format(url=url)
         )
 
+    task_columns = {column["name"] for column in sa.inspect(database.engine).get_columns("tasks")}
+    if "agent_id" not in task_columns:
+        database.dispose()
+        raise RuntimeError("Database is missing tasks.agent_id. " + _MIGRATION_HINT.format(url=url))
+
     app.state.database = database
     app.state.repository = TaskRepository(database)
     app.state.conversation_repository = ConversationRepository(database)
@@ -498,6 +509,11 @@ def _resolve_api_tokens(
 def create_app(
     database_url: str | None = None,
     api_tokens: Sequence[str] | set[str] | None = None,
+    *,
+    default_workspace: str | Path | None = None,
+    workspace_map: dict[str, str] | None = None,
+    default_agent_id: str = "agent-manager-developer",
+    knowledge_base: KnowledgeBase | None = None,
 ) -> FastAPI:
     """Build a FastAPI application bound to a file-backed SQLite database.
 
@@ -551,6 +567,32 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/workspaces/resolve")
+    def resolve_task_workspace(
+        workspace: str | None = None,
+        agent_id: str | None = None,
+        repository: AgentProfileRepository = Depends(get_agent_repository),
+    ) -> dict[str, object]:
+        selected_agent = agent_id if agent_id is not None else default_agent_id
+        profile = repository.get_current(selected_agent)
+        if profile is None:
+            raise HTTPException(status_code=404, detail=f"agent profile not found: {selected_agent}")
+        cfg = profile.runner_config
+        if cfg.get("archived") or profile.role == "archived":
+            raise HTTPException(status_code=409, detail=f"agent is archived: {selected_agent}")
+        if workspace is None:
+            workspace = cfg.get("project")
+        try:
+            host = resolve_workspace(workspace, default_workspace=default_workspace, workspace_map=workspace_map)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "host_path": str(host), "sandbox_path": "/workspace", "agent_id": selected_agent,
+            "profile_revision": profile.revision if profile else None,
+            "project_read_only": bool(cfg.get("project_read_only", False)),
+            "network": bool(cfg.get("network", True)),
+        }
+
     @app.post(
         "/tasks",
         response_model=TaskRead,
@@ -566,6 +608,7 @@ def create_app(
                 description=payload.description,
                 status=payload.status,
                 workspace=payload.workspace,
+                agent_id=payload.agent_id,
                 metadata=payload.metadata,
                 id=payload.id,
             )
@@ -844,6 +887,8 @@ def create_app(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=detail,
             ) from error
+        if knowledge_base is not None:
+            knowledge_base.save_agent_profile(profile)
         return agent_to_read(profile)
 
     @app.get("/agents", response_model=list[AgentRead])
@@ -944,6 +989,8 @@ def create_app(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=detail,
             ) from error
+        if knowledge_base is not None:
+            knowledge_base.save_agent_profile(profile)
         return agent_to_read(profile)
 
     @app.delete("/agents/{agent_id}", response_model=AgentRead)

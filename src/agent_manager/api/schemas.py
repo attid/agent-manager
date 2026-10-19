@@ -23,6 +23,7 @@ class TaskCreate(BaseModel):
     title: str
     description: str | None = None
     status: str = "incoming"
+    agent_id: str | None = None
     workspace: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     id: str | None = None
@@ -71,6 +72,7 @@ class TaskRead(BaseModel):
     title: str
     description: str | None
     status: str
+    agent_id: str | None
     workspace: str | None
     created_at: dt.datetime
     updated_at: dt.datetime
@@ -92,6 +94,7 @@ def import_item_to_record(item: TaskImportItem) -> dict[str, Any]:
         "description": item.description,
         "status": item.status,
         "workspace": item.workspace,
+        "agent_id": item.agent_id,
         "metadata": metadata,
     }
 
@@ -108,6 +111,7 @@ def task_to_read(task: Task) -> TaskRead:
         description=task.description,
         status=task.status,
         workspace=task.workspace,
+        agent_id=task.agent_id,
         created_at=task.created_at,
         updated_at=task.updated_at,
         metadata=task.meta,
@@ -121,6 +125,7 @@ _TASK_MUTABLE_FIELDS = (
     "description",
     "status",
     "workspace",
+    "agent_id",
     "metadata",
 )
 
@@ -138,6 +143,7 @@ class TaskPatch(BaseModel):
     title: str | None = None
     description: str | None = None
     status: str | None = None
+    agent_id: str | None = None
     workspace: str | None = None
     metadata: dict[str, Any] | None = None
 

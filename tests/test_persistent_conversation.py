@@ -1606,7 +1606,48 @@ def test_session_created_agents_persisted_to_repository(
         assert scout.system_prompt == "Scout prompt."
         assert scout.skills == [{"skill": "codespaces"}]
         assert scout.runner_config.get("tools") == ["read", "bash"]
+        # A resumed conversation must not reapply the historical create request.
+        agent_repo.update(agent_id="project-scout", expected_revision=1, system_prompt="Approved replacement.")
+        processor.complete(turn.id, turn.claim_token, text=reply)
+        message2 = _append_user(database, text="show scout")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message2.id)
+        turn2 = processor.claim_next(conversation_id="conv-1")
+        handler(_turn_input(turn2))
+        reloaded = agent_repo.get_current("project-scout")
+        assert reloaded.revision == 2
+        assert reloaded.system_prompt == "Approved replacement."
+
     finally:
         database.dispose()
 
 
+
+
+def test_custom_secretary_receives_platform_contract_without_replacing_identity(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    database = Database.from_path(migrated_db)
+    probe = tmp_path / 'instructions.json'
+    try:
+        _create_conversation(database)
+        config = _base_runner_config(instructions_probe=probe, state_dir=tmp_path / 'state', stateful_session=True)
+        config['tools'] = ['create_task', 'create_agent', 'update_agent']
+        _profile(database, prompt='Custom identity must remain.', runner_config=config)
+        processor = TurnProcessor(database)
+        message = _append_user(database)
+        _enqueue(processor, conversation_id='conv-1', input_message_id=message.id)
+        turn = processor.claim_next(conversation_id='conv-1')
+        handler = _handler(database, tmp_path / 'artifacts')
+        handler(_turn_input(turn))
+        instructions = '\n'.join(entry.get('text', '') for entry in json.loads(probe.read_text()))
+        assert 'Custom identity must remain.' in instructions
+        assert 'До одобрения не вызывай create_agent' in instructions
+        assert 'resolve_workspace(workspace, agent_id)' in instructions
+        assert 'HTTP 405' in instructions
+        roles = list((tmp_path / 'artifacts').rglob('executions/*/runner_role.json'))
+        assert 'resolve_workspace' in json.loads(roles[0].read_text())['tools']
+        stored = AgentProfileRepository(database).get_current('triage')
+        assert stored.system_prompt == 'Custom identity must remain.'
+        assert 'resolve_workspace' not in stored.runner_config['tools']
+    finally:
+        database.dispose()

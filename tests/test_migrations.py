@@ -34,6 +34,7 @@ def test_fresh_file_database_migrates_to_head(
             "description",
             "status",
             "workspace",
+            "agent_id",
             "created_at",
             "updated_at",
             "metadata",
@@ -99,9 +100,9 @@ def test_upgrade_from_0001_preserves_existing_tasks(
 
     database = Database.from_path(db_path)
     try:
-        TaskRepository(database).create(
-            id="keep", title="keep me", workspace="proj-a"
-        )
+        # Seed using the old schema, without referencing columns introduced later.
+        with database.engine.begin() as connection:
+            connection.exec_driver_sql("INSERT INTO tasks (id, title, workspace) VALUES ('keep', 'keep me', 'proj-a')")
     finally:
         database.dispose()
 
@@ -137,7 +138,7 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
     # was added, and then to 0005 when conversation_runtimes was added; the
     # assertion that exactly one version row is stored, and that it is the
     # current head, is unchanged.
-    assert rows == [("0005_create_conversation_runtimes",)]
+    assert rows == [("0006_task_agent",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

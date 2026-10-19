@@ -231,3 +231,22 @@ curl -X PATCH http://127.0.0.1:18767/agents/crypto-bot-developer \
   curl "http://127.0.0.1:1933/api/v1/content/read?uri=viking://resources/doc_id" \
     -H "Authorization: Bearer $OPENVIKING_TOKEN"
   ```
+
+## Выбор исполнителя задачи и проверка workspace
+
+`POST /tasks` и `PATCH /tasks/{id}` принимают nullable `agent_id`; GET возвращает
+его отдельным полем. NULL сохраняет совместимость со старым default executor.
+`workspace` и `agent_id` независимы. Хранилище не ограничивает свободные статусы
+и исторические записи; фактическое исполнение проверяет профиль и каталог.
+
+`GET /workspaces/resolve?workspace=/absolute/path&agent_id=system-scout` не меняет
+данные. Ответ: `host_path`, `sandbox_path=/workspace`, `agent_id`,
+`profile_revision`, `project_read_only`, `network`. Ошибки: 404 для отсутствующего
+агента, 409 для архивного, 422 для отсутствующего или недопустимого каталога.
+Если workspace отсутствует, берётся project профиля, затем default workspace.
+Инструменты секретаря используют этот endpoint до создания/запуска задачи.
+
+Для новой версии требуется миграция `0006_task_agent`. Она добавляет только
+nullable колонку, не переписывает старые задачи. Startup API откажется работать
+с БД без `tasks.agent_id` и предложит применить миграции. Проверки миграции
+выполняются на временных БД; обновление production выполняется отдельно.

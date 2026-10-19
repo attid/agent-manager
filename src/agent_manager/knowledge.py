@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
 from typing import Any, Mapping
+
+from .secretary_contract import SECRETARY_CONTRACT
 
 from agent_manager.storage import (
     CORE_SYSTEM_AGENTS,
@@ -60,6 +63,10 @@ def format_agent_profile_markdown(profile: AgentProfile) -> str:
     if isinstance(profile.runner_config, dict):
         tools = list(profile.runner_config.get("tools") or [])
 
+    policy = {key: profile.runner_config[key] for key in ("project", "workdir", "project_read_only", "network") if key in (profile.runner_config or {})}
+    policy_json = json.dumps(policy, ensure_ascii=False)
+    skills_json = json.dumps(profile.skills or [], ensure_ascii=False)
+
     tools_str = ", ".join(f'"{t}"' for t in tools) if tools else ""
 
     created_str = (
@@ -74,6 +81,8 @@ revision: {profile.revision}
 name: "{profile.name}"
 role: "{profile.role}"
 tools: [{tools_str}]
+runner_config: {policy_json}
+skills: {skills_json}
 created_at: "{created_str}"
 ---
 
@@ -106,7 +115,9 @@ def parse_agent_profile_markdown(text: str) -> dict[str, Any]:
                 k, v = line.split(":", 1)
                 k = k.strip()
                 v = v.strip().strip('"\'')
-                if k == "tools":
+                if k in ("runner_config", "skills"):
+                    frontmatter[k] = json.loads(v)
+                elif k == "tools":
                     frontmatter[k] = re.findall(r'["\']([^"\']+)["\']', v)
                 else:
                     frontmatter[k] = v
@@ -120,6 +131,8 @@ def parse_agent_profile_markdown(text: str) -> dict[str, Any]:
         "name": frontmatter.get("name"),
         "role": frontmatter.get("role"),
         "tools": frontmatter.get("tools", []),
+        "runner_config": frontmatter.get("runner_config", {}),
+        "skills": frontmatter.get("skills"),
         "system_prompt": instructions,
     }
 
@@ -284,7 +297,7 @@ class KnowledgeBase:
             "read", "attach_document", "create_agent", "update_agent", "archive_agent", "list_agents", "get_agent",
             "save_project_summary", "read_knowledge", "list_knowledge", "write_knowledge",
             "update_component_rules", "openviking_search", "openviking_read",
-            "list_tasks", "get_task", "create_task", "update_task", "get_task_logs", "resume_task_session",
+            "resolve_workspace", "list_tasks", "get_task", "create_task", "update_task", "get_task_logs", "resume_task_session",
             "list_skills", "install_skill", "create_skill",
             "trigger_review", "trigger_commit_push", "trigger_rollback", "trigger_analysis"
         ]
@@ -303,17 +316,18 @@ class KnowledgeBase:
             "  понимай, что речь идёт о тексте расшифровки выше. Никогда не говори, что аудио не было, и не спорь о формате ввода.\n\n"
             "### Доступные инструменты (Platform Controller Tools):\n"
             "1. **Задачи и сессии:**\n"
+            "- `resolve_workspace(workspace, agent_id)`: проверка каталога, исполнителя и режима доступа.\n"
             "- `list_tasks(status, workspace)`: просмотр списка задач с фильтрацией.\n"
             "- `get_task(task_id)`: просмотр карточки задачи.\n"
-            "- `create_task(title, description, workspace, status, task_type)`: постановка новой задачи.\n"
-            "- `update_task(task_id, status, title, description)`: редактирование ТЗ или смена статуса.\n"
+            "- `create_task(title, description, workspace, agent_id, status, task_type)`: постановка новой задачи.\n"
+            "- `update_task(task_id, status, title, description, workspace, agent_id)`: редактирование ТЗ или смена статуса.\n"
             "- `get_task_logs(task_id)`: просмотр логов сессий и отчётов ревьюера.\n"
             "- `resume_task_session(task_id, message)`: отправить разработчику дополнительные указания и продолжить его сессию.\n"
             "2. **Агенты:**\n"
             "- `list_agents()`: список всех активных агентов в системе.\n"
             "- `get_agent(agent_id)`: получить текущий системный промпт и конфигурацию агента.\n"
-            "- `create_agent(agent_id, name, role, tools, skills, system_prompt)`: создание нового агента.\n"
-            "- `update_agent(agent_id, system_prompt, tools, skills, name, role)`: точечная правка существующего агента.\n"
+            "- `create_agent(agent_id, name, role, tools, skills, system_prompt, runner_config)`: создание нового агента.\n"
+            "- `update_agent(agent_id, system_prompt, tools, skills, name, role, runner_config)`: точечная правка существующего агента.\n"
             "- `archive_agent(agent_id)`: архивировать существующего агента (убирает его из активного списка).\n"
             "3. **Скилы:**\n"
             "- `list_skills()`: список всех доступных скилов в системе и их описаний.\n"
@@ -339,6 +353,8 @@ class KnowledgeBase:
             "2. `name`: Human-readable name (e.g., 'Разработчик Skynet Bot', 'Scout проекта').\n"
             "3. System prefix `system-*`: reserved for platform-wide/infrastructure agents. Only create or modify agents with `system-*` prefix when explicitly requested by the user. For regular tasks, use project-specific identifiers.\n"
         )
+        secretary_prompt += "\n\n" + SECRETARY_CONTRACT
+
         base_state = Path.home() / ".local/share/agent-manager/state"
         base_ws = Path.home() / ".local/share/agent-manager/workspaces"
 
@@ -386,6 +402,10 @@ class KnowledgeBase:
                 current_tools = list(updated_cfg.get("tools") or [])
                 if "ask_clarification" in current_tools:
                     current_tools.remove("ask_clarification")
+                    updated_cfg["tools"] = current_tools
+                    cfg_changed = True
+                if "create_task" in current_tools and "resolve_workspace" not in current_tools:
+                    current_tools.append("resolve_workspace")
                     updated_cfg["tools"] = current_tools
                     cfg_changed = True
                 if not current_tools:
@@ -566,7 +586,8 @@ class KnowledgeBase:
                         name=name,
                         role=role,
                         system_prompt=prompt,
-                        runner_config={"tools": tools},
+                        runner_config={"tools": tools, **parsed.get("runner_config", {})},
+                        skills=parsed.get("skills") or [],
                     )
                     imported.append(agent_id)
                 else:
@@ -578,8 +599,11 @@ class KnowledgeBase:
                     if (
                         current.system_prompt.strip() != prompt.strip()
                         or current_tools != tools
+                        or any(current.runner_config.get(key) != value for key, value in parsed.get("runner_config", {}).items())
+                        or (parsed.get("skills") is not None and current.skills != parsed["skills"])
                     ):
                         updated_cfg = dict(current.runner_config or {})
+                        updated_cfg.update(parsed.get("runner_config", {}))
                         updated_cfg["tools"] = tools
                         updated_cfg.pop("provider", None)
                         updated_cfg.pop("model", None)
@@ -590,6 +614,7 @@ class KnowledgeBase:
                             role=role,
                             system_prompt=prompt,
                             runner_config=updated_cfg,
+                            skills=parsed["skills"] if parsed.get("skills") is not None else current.skills,
                         )
                         imported.append(agent_id)
             except Exception as e:
@@ -674,7 +699,8 @@ class KnowledgeBase:
                     name=parsed.get("name") or agent_id,
                     role=parsed.get("role") or "worker",
                     system_prompt=prompt,
-                    runner_config={"tools": tools},
+                    runner_config={"tools": tools, **parsed.get("runner_config", {})},
+                        skills=parsed.get("skills") or [],
                 )
                 logger.info("Hot-reloaded new agent %s from %s", agent_id, agent_file)
                 return True
@@ -688,8 +714,11 @@ class KnowledgeBase:
                 isinstance(current.runner_config, dict)
                 and current.runner_config.get("archived") is True
             )
-            if current.system_prompt.strip() != prompt or current_tools != tools or is_archived:
+            policy_changed = any(current.runner_config.get(key) != value for key, value in parsed.get("runner_config", {}).items())
+            skills_changed = parsed.get("skills") is not None and current.skills != parsed["skills"]
+            if current.system_prompt.strip() != prompt or current_tools != tools or is_archived or policy_changed or skills_changed:
                 updated_cfg = dict(current.runner_config or {})
+                updated_cfg.update(parsed.get("runner_config", {}))
                 updated_cfg["tools"] = tools
                 updated_cfg.pop("provider", None)
                 updated_cfg.pop("model", None)
@@ -702,6 +731,7 @@ class KnowledgeBase:
                     role=parsed.get("role") or current.role,
                     system_prompt=prompt,
                     runner_config=updated_cfg,
+                    skills=parsed["skills"] if parsed.get("skills") is not None else current.skills,
                 )
                 logger.info("Hot-reloaded agent %s revision from %s", agent_id, agent_file)
                 return True

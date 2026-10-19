@@ -27,6 +27,35 @@ function appendJsonArray(filePath, item) {
 }
 
 export default function policy(pi) {
+  function toolResult(result) {
+    return { isError: result.status === "failed", content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+  async function backendRequest(method, endpoint, payload) {
+    const cfg = getBackendConfig();
+    try {
+      const response = await fetch(`${cfg.backend_url}${endpoint}`, {
+        method,
+        headers: { "Content-Type": "application/json", ...(cfg.api_token ? { Authorization: `Bearer ${cfg.api_token}` } : {}) },
+        ...(payload !== undefined ? { body: JSON.stringify(payload) } : {})
+      });
+      const body = await response.text();
+      let data;
+      try { data = JSON.parse(body); } catch { data = body; }
+      if (!response.ok) return { status: "failed", http_status: response.status, error: data,
+        ...(method !== "GET" && response.status >= 500 ? { outcome: "unknown", instruction: "Read current state before retrying this write." } : {}) };
+      return { status: method === "GET" ? "ok" : "applied", data };
+    } catch (error) {
+      return { status: "failed", outcome: method === "GET" ? "unavailable" : "unknown", error: error.message,
+        instruction: "Read the current state before retrying; a lost response does not prove that a write failed." };
+    }
+  }
+  async function executionPreflight(params) {
+    const query = new URLSearchParams();
+    if (params.workspace != null) query.set("workspace", params.workspace);
+    if (params.agent_id != null) query.set("agent_id", params.agent_id);
+    return backendRequest("GET", `/workspaces/resolve?${query}`);
+  }
+
   // 1. Guard against accidental git commit / push
   pi.on("tool_call", async (event) => {
     const allowCommit = fs.existsSync("/session/allow_git_commit") || process.env.RUNNER_ALLOW_GIT_COMMIT === "1";
@@ -61,44 +90,30 @@ export default function policy(pi) {
         target,
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Документ "${target}" добавлен к отправке пользователю.` }]
-      };
+      return toolResult({ status: "pending", operation: "attach_document", target,
+        instruction: "The document will be attached after this turn finishes." });
     }
   });
 
-  // 3. Custom Tool: create_agent
+  // Profile writes use the same synchronous API as profile reads.
   pi.registerTool({
-    name: "create_agent",
-    label: "Create Agent",
-    description: "Create or configure a new specialized agent profile in the knowledge base and system registry.",
+    name: "create_agent", label: "Create Agent",
+    description: "Create an agent only after the user approved its complete Markdown draft. Returns applied and the stored profile; an existing ID is a conflict, never an upsert.",
     parameters: Type.Object({
-      agent_id: Type.String({ description: "Unique slug identifier (e.g. 'skynet-bot-developer')" }),
-      name: Type.String({ description: "Human-readable name of the agent" }),
-      role: Type.String({ description: "Role category, e.g. 'developer', 'reviewer', 'analyzer', 'secretary'" }),
-      tools: Type.Optional(Type.Array(Type.String(), { description: "Allowed tools, e.g. ['read', 'write', 'edit', 'bash']" })),
-      skills: Type.Optional(Type.Array(Type.String(), { description: "Optional skill names (e.g. ['codespaces', 'portainer-operations'])" })),
-      system_prompt: Type.String({ description: "Complete system instructions / prompt for the agent" })
+      agent_id: Type.String(), name: Type.String(), role: Type.String(), system_prompt: Type.String(),
+      tools: Type.Optional(Type.Array(Type.String())), skills: Type.Optional(Type.Array(Type.String())),
+      runner_config: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Runner policy, including project (host path), project_read_only and network. Network=false also blocks direct model API access." }))
     }),
     async execute(toolCallId, params) {
-      const { agent_id, name, role, tools, skills, system_prompt } = params;
-      if (!agent_id || !system_prompt) {
-        return { content: [{ type: "text", text: "Error: agent_id and system_prompt are required" }] };
-      }
-      const sessionDir = "/session";
-      const agentsFile = path.join(sessionDir, "created_agents.json");
-      appendJsonArray(agentsFile, {
-        agent_id: agent_id.trim(),
-        name: (name || agent_id).trim(),
-        role: (role || "developer").trim(),
-        tools: Array.isArray(tools) ? tools : ["read", "write", "edit", "bash"],
-        skills: Array.isArray(skills) ? skills : [],
-        system_prompt: system_prompt.trim(),
-        timestamp: new Date().toISOString()
+      const config = { ...(params.runner_config || {}) };
+      if (params.tools !== undefined) config.tools = params.tools;
+      if (params.skills !== undefined) config.skills = params.skills;
+      const result = await backendRequest("POST", "/agents", {
+        agent_id: params.agent_id, name: params.name, role: params.role,
+        system_prompt: params.system_prompt, runner_config: config,
+        skills: (params.skills || []).map(skill => ({ skill }))
       });
-      return {
-        content: [{ type: "text", text: `Профиль агента "${agent_id}" записан и будет сохранён в базе знаний.` }]
-      };
+      return toolResult(result);
     }
   });
 
@@ -309,164 +324,79 @@ export default function policy(pi) {
     }
   });
 
-  // 9. Custom Tool: list_tasks
   pi.registerTool({
-    name: "list_tasks",
-    label: "List Tasks",
-    description: "List tasks from Agent Manager database with optional status and workspace filtering.",
-    parameters: Type.Object({
-      status: Type.Optional(Type.String({ description: "Filter by status, e.g. 'incoming', 'in_progress', 'ready_to_commit', 'done', 'failed', 'waiting_for_input'" })),
-      workspace: Type.Optional(Type.String({ description: "Filter by workspace/project slug" }))
-    }),
+    name: "list_tasks", label: "List Tasks",
+    description: "Read tasks, including the assigned agent and execution context, with optional filters.",
+    parameters: Type.Object({ status: Type.Optional(Type.String()), workspace: Type.Optional(Type.String()) }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        let url = `${cfg.backend_url}/tasks?limit=25`;
-        if (params.status) url += `&status=${encodeURIComponent(params.status)}`;
-        if (params.workspace) url += `&workspace=${encodeURIComponent(params.workspace)}`;
-        const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
-        const res = await fetch(url, { headers });
-        if (!res.ok) {
-          return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        }
-        const tasks = await res.json();
-        if (!tasks.length) {
-          return { content: [{ type: "text", text: "Список задач пуст." }] };
-        }
-        let out = `### 📋 Задачи (${tasks.length}):\n\n`;
-        for (const t of tasks) {
-          out += `* **#${t.id}**: **${t.title}** [${t.status}] (workspace: ${t.workspace || '—'})\n`;
-        }
-        return { content: [{ type: "text", text: out.trim() }] };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка обращения к API задач: ${err.message}` }] };
-      }
+      const query = new URLSearchParams();
+      if (params.status !== undefined) query.set("status", params.status);
+      if (params.workspace !== undefined) query.set("workspace", params.workspace);
+      return toolResult(await backendRequest("GET", `/tasks?${query}`));
+    }
+  });
+  pi.registerTool({
+    name: "get_task", label: "Get Task",
+    description: "Read the complete task, assigned agent, workspace, execution context, error and provenance.",
+    parameters: Type.Object({ task_id: Type.String() }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id)}`));
     }
   });
 
-  // 10. Custom Tool: get_task
   pi.registerTool({
-    name: "get_task",
-    label: "Get Task",
-    description: "Get full details, description, status, and metadata of a task by ID.",
+    name: "resolve_workspace", label: "Resolve Workspace",
+    description: "Read-only preflight: returns the exact host directory, /workspace mount, executor and filesystem/network policy. Missing explicit paths fail; no fallback to another project.",
+    parameters: Type.Object({ workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String()) }),
+    async execute(toolCallId, params) { return toolResult(await executionPreflight(params)); }
+  });
+
+  pi.registerTool({
+    name: "create_task", label: "Create Task",
+    description: "Create a task for an explicit agent and workspace. incoming saves a draft and does not run; in_progress authorizes execution. Preflight must succeed before creation.",
     parameters: Type.Object({
-      task_id: Type.String({ description: "Task ID (e.g. 'task-123' or number)" })
+      title: Type.String(), description: Type.Optional(Type.String()),
+      workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String()),
+      status: Type.Optional(Type.String()), task_type: Type.Optional(Type.String())
     }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
-        const res = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, { headers });
-        if (!res.ok) {
-          return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        }
-        const t = await res.json();
-        const meta = t.metadata || {};
-        let out = `### 📌 Задача #${t.id}: ${t.title}\n\n`;
-        out += `* **Статус:** \`${t.status}\`\n`;
-        out += `* **Пространство:** ${t.workspace || 'default'}\n`;
-        out += `* **Описание:**\n${t.description || '*(без описания)*'}\n\n`;
-        if (meta.summary) out += `* **Резюме:**\n${meta.summary}\n\n`;
-        if (meta.changed_files && meta.changed_files.length) {
-          out += `* **Изменённые файлы:**\n` + meta.changed_files.map(f => `  • \`${f}\``).join('\n') + '\n';
-        }
-        return { content: [{ type: "text", text: out.trim() }] };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка получения задачи: ${err.message}` }] };
-      }
+      const check = await executionPreflight(params);
+      if (check.status === "failed") return toolResult(check);
+      const created = await backendRequest("POST", "/tasks", {
+        title: params.title, description: params.description || "",
+        workspace: check.data.host_path, agent_id: check.data.agent_id,
+        status: params.status || "incoming", metadata: { task_type: params.task_type || "coding" }
+      });
+      if (created.status !== "failed") created.execution = check.data;
+      return toolResult(created);
     }
   });
 
-  // 11. Custom Tool: create_task
   pi.registerTool({
-    name: "create_task",
-    label: "Create Task",
-    description: "Create a new task in Agent Manager queue.",
+    name: "update_task", label: "Update Task",
+    description: "Edit a task, its executor or workspace. Setting in_progress starts execution. Verify the effective workspace and agent before routing changes or launch.",
     parameters: Type.Object({
-      title: Type.String({ description: "Clear, descriptive title of the task" }),
-      description: Type.Optional(Type.String({ description: "Detailed specification / instructions for the developer" })),
-      workspace: Type.Optional(Type.String({ description: "Workspace slug (e.g. 'scannet', 'agent-manager')" })),
-      status: Type.Optional(Type.String({ description: "Initial status: 'incoming' or 'in_progress' (default: 'incoming')" })),
-      task_type: Type.Optional(Type.String({ description: "Task category: 'coding', 'devops', 'research'" }))
+      task_id: Type.String(), status: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
+      description: Type.Optional(Type.String()), workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String())
     }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        const headers = {
-          "Content-Type": "application/json",
-          ...(cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {})
-        };
-        const payload = {
-          title: params.title.trim(),
-          description: (params.description || "").trim(),
-          workspace: params.workspace || null,
-          status: params.status || "incoming",
-          metadata: {
-            task_type: params.task_type || "coding"
-          }
-        };
-        const res = await fetch(`${cfg.backend_url}/tasks`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify(payload)
-        });
-        if (!res.ok) {
-          return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        }
-        const created = await res.json();
-        return {
-          content: [{
-            type: "text",
-            text: `✅ Задача #${created.id} "${created.title}" успешно создана в статусе \`${created.status}\` (workspace: ${created.workspace || 'default'}).`
-          }]
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка создания задачи: ${err.message}` }] };
+      const patch = {};
+      for (const key of ["status", "title", "description", "workspace", "agent_id"]) {
+        if (params[key] !== undefined) patch[key] = params[key];
       }
-    }
-  });
-
-  // 12. Custom Tool: update_task
-  pi.registerTool({
-    name: "update_task",
-    label: "Update Task",
-    description: "Update task description, title, or status (e.g. move to 'in_progress', 'cancelled', 'incoming').",
-    parameters: Type.Object({
-      task_id: Type.String({ description: "Task ID" }),
-      status: Type.Optional(Type.String({ description: "New status" })),
-      title: Type.Optional(Type.String({ description: "Updated title" })),
-      description: Type.Optional(Type.String({ description: "Updated description" }))
-    }),
-    async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        const headers = {
-          "Content-Type": "application/json",
-          ...(cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {})
-        };
-        const patchData = {};
-        if (params.status) patchData.status = params.status;
-        if (params.title) patchData.title = params.title;
-        if (params.description !== undefined) patchData.description = params.description;
-
-        const res = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify(patchData)
-        });
-        if (!res.ok) {
-          return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        }
-        const updated = await res.json();
-        return {
-          content: [{
-            type: "text",
-            text: `✅ Задача #${updated.id} обновлена: статус \`${updated.status}\`, название "${updated.title}".`
-          }]
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка обновления задачи: ${err.message}` }] };
+      let execution;
+      if (params.status === "in_progress" || params.workspace !== undefined || params.agent_id !== undefined) {
+        const stored = await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id)}`);
+        if (stored.status === "failed") return toolResult(stored);
+        const check = await executionPreflight({ ...stored.data, ...patch });
+        if (check.status === "failed") return toolResult(check);
+        execution = check.data;
+        patch.workspace = execution.host_path;
+        patch.agent_id = execution.agent_id;
       }
+      const result = await backendRequest("PATCH", `/tasks/${encodeURIComponent(params.task_id)}`, patch);
+      if (execution && result.status !== "failed") result.execution = execution;
+      return toolResult(result);
     }
   });
 
@@ -550,155 +480,45 @@ export default function policy(pi) {
     }
   });
 
-  // 15. Custom Tool: list_agents
   pi.registerTool({
-    name: "list_agents",
-    label: "List Agents",
-    description: "List all registered agent profiles in the system.",
+    name: "list_agents", label: "List Agents",
+    description: "Read registered profiles, with their stored revisions and complete runtime policies. Does not present pending session records as registered agents.",
     parameters: Type.Object({}),
+    async execute() { return toolResult(await backendRequest("GET", "/agents")); }
+  });
+  pi.registerTool({
+    name: "get_agent", label: "Get Agent Profile",
+    description: "Read the stored profile, revision and complete runner_config, including workspace and access policy.",
+    parameters: Type.Object({ agent_id: Type.String() }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
-        const res = await fetch(`${cfg.backend_url}/agents`, { headers });
-        if (!res.ok) return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        const agents = await res.json();
-        // Include agents created in current session
-        try {
-          if (fs.existsSync("/session/created_agents.json")) {
-            const pending = JSON.parse(fs.readFileSync("/session/created_agents.json", "utf-8")) || [];
-            const existingIds = new Set(agents.map(a => a.agent_id));
-            for (const p of pending) {
-              if (p.agent_id && !existingIds.has(p.agent_id)) {
-                agents.push({
-                  agent_id: p.agent_id,
-                  name: p.name || p.agent_id,
-                  role: p.role || "worker",
-                  revision: "новая (сохраняется)",
-                  runner_config: { tools: p.tools || [], skills: p.skills || [] },
-                  system_prompt: p.system_prompt || ""
-                });
-              }
-            }
-          }
-        } catch (e) {}
-
-        if (!agents.length) return { content: [{ type: "text", text: "Агенты не найдены." }] };
-        let out = `### 🤖 Зарегистрированные агенты (${agents.length}):\n\n`;
-        for (const ag of agents) {
-          out += `* **\`${ag.agent_id}\`** — **${ag.name}** [роль: \`${ag.role}\`, ревизия: ${ag.revision}]\n`;
-        }
-        return { content: [{ type: "text", text: out.trim() }] };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка получения списка агентов: ${err.message}` }] };
-      }
+      return toolResult(await backendRequest("GET", `/agents/${encodeURIComponent(params.agent_id)}`));
     }
   });
 
-  // 16. Custom Tool: get_agent
   pi.registerTool({
-    name: "get_agent",
-    label: "Get Agent Profile",
-    description: "Get complete configuration and system prompt of an agent profile.",
+    name: "update_agent", label: "Update Agent",
+    description: "Apply approved changes to an existing agent. Uses PATCH with revision checking and preserves omitted fields. Never retry writes to inspect their result.",
     parameters: Type.Object({
-      agent_id: Type.String({ description: "Unique agent identifier" })
+      agent_id: Type.String(), system_prompt: Type.Optional(Type.String()),
+      name: Type.Optional(Type.String()), role: Type.Optional(Type.String()),
+      tools: Type.Optional(Type.Array(Type.String())), skills: Type.Optional(Type.Array(Type.String())),
+      runner_config: Type.Optional(Type.Record(Type.String(), Type.Any()))
     }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      const targetId = (params.agent_id || "").trim();
-      try {
-        const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
-        const res = await fetch(`${cfg.backend_url}/agents/${encodeURIComponent(targetId)}`, { headers });
-        let ag = null;
-        if (res.ok) {
-          ag = await res.json();
-        } else {
-          // Check if agent was created in current session
-          try {
-            if (fs.existsSync("/session/created_agents.json")) {
-              const pending = JSON.parse(fs.readFileSync("/session/created_agents.json", "utf-8")) || [];
-              const found = pending.find(p => p.agent_id === targetId);
-              if (found) {
-                ag = {
-                  agent_id: found.agent_id,
-                  name: found.name || found.agent_id,
-                  role: found.role || "worker",
-                  revision: "новая (сохраняется в текущем ходе)",
-                  runner_config: { tools: found.tools || [], skills: found.skills || [] },
-                  system_prompt: found.system_prompt || ""
-                };
-              }
-            }
-          } catch (e) {}
-        }
-        if (!ag) return { content: [{ type: "text", text: `HTTP ${res.status}: агент "${targetId}" не найден.` }] };
-        const rcfg = ag.runner_config || {};
-        let out = `### 🤖 Профиль агента: \`${ag.agent_id}\`\n\n`;
-        out += `* **Имя:** ${ag.name}\n`;
-        out += `* **Роль:** \`${ag.role}\` (ревизия: ${ag.revision})\n`;
-        out += `* **Инструменты:** \`${JSON.stringify(rcfg.tools || [])}\`\n`;
-        out += `* **Скилы:** \`${JSON.stringify(rcfg.skills || ag.skills || [])}\`\n\n`;
-        out += `#### Системный промпт:\n\`\`\`markdown\n${ag.system_prompt}\n\`\`\`\n`;
-        return { content: [{ type: "text", text: out.trim() }] };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка получения агента: ${err.message}` }] };
+      const current = await backendRequest("GET", `/agents/${encodeURIComponent(params.agent_id)}`);
+      if (current.status === "failed") return toolResult(current);
+      const profile = current.data;
+      const patch = { expected_revision: profile.revision };
+      for (const key of ["system_prompt", "name", "role"]) {
+        if (params[key] !== undefined) patch[key] = params[key];
       }
-    }
-  });
-
-  // 17. Custom Tool: update_agent
-  pi.registerTool({
-    name: "update_agent",
-    label: "Update Agent",
-    description: "Update prompt, tools, skills, or settings of an existing agent profile.",
-    parameters: Type.Object({
-      agent_id: Type.String({ description: "Agent ID to update" }),
-      system_prompt: Type.Optional(Type.String({ description: "Updated system prompt" })),
-      tools: Type.Optional(Type.Array(Type.String(), { description: "Allowed tools" })),
-      skills: Type.Optional(Type.Array(Type.String(), { description: "Skills list" })),
-      name: Type.Optional(Type.String({ description: "Display name" })),
-      role: Type.Optional(Type.String({ description: "Role category" }))
-    }),
-    async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      try {
-        const headers = {
-          "Content-Type": "application/json",
-          ...(cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {})
-        };
-        // 1. Get current agent to find revision
-        const getRes = await fetch(`${cfg.backend_url}/agents/${encodeURIComponent(params.agent_id)}`, { headers });
-        if (!getRes.ok) return { content: [{ type: "text", text: `HTTP ${getRes.status}: ${await getRes.text()}` }] };
-        const current = await getRes.json();
-        const rcfg = { ...(current.runner_config || {}) };
-        if (params.tools) rcfg.tools = params.tools;
-        if (params.skills) rcfg.skills = params.skills;
-
-        const updatePayload = {
-          expected_revision: current.revision,
-          name: params.name || current.name,
-          role: params.role || current.role,
-          system_prompt: params.system_prompt || current.system_prompt,
-          runner_config: rcfg,
-          skills: params.skills ? params.skills.map(s => ({ skill: s })) : current.skills
-        };
-
-        const putRes = await fetch(`${cfg.backend_url}/agents/${encodeURIComponent(params.agent_id)}`, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify(updatePayload)
-        });
-        if (!putRes.ok) return { content: [{ type: "text", text: `HTTP ${putRes.status}: ${await putRes.text()}` }] };
-        const updated = await putRes.json();
-        return {
-          content: [{
-            type: "text",
-            text: `✅ Агент \`${updated.agent_id}\` успешно обновлён (новая ревизия: ${updated.revision}).`
-          }]
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка обновления агента: ${err.message}` }] };
+      if (params.runner_config !== undefined || params.tools !== undefined || params.skills !== undefined) {
+        patch.runner_config = { ...(profile.runner_config || {}), ...(params.runner_config || {}) };
+        if (params.tools !== undefined) patch.runner_config.tools = params.tools;
+        if (params.skills !== undefined) patch.runner_config.skills = params.skills;
       }
+      if (params.skills !== undefined) patch.skills = params.skills.map(skill => ({ skill }));
+      return toolResult(await backendRequest("PATCH", `/agents/${encodeURIComponent(params.agent_id)}`, patch));
     }
   });
 
@@ -834,6 +654,13 @@ export default function policy(pi) {
       content: Type.String({ description: "Complete markdown content" })
     }),
     async execute(toolCallId, params) {
+      if (path.join(params.category, params.name).split(path.sep)[0] === "agents") {
+        return { isError: true, content: [{ type: "text", text: "Use create_agent or update_agent for approved profiles. Store drafts under docs/drafts and attach them for approval." }] };
+      }
+      const relative = path.join(params.category, params.name);
+      if (path.isAbsolute(params.category) || path.isAbsolute(params.name) || path.isAbsolute(relative) || relative === ".." || relative.startsWith("../")) {
+        return { isError: true, content: [{ type: "text", text: "Document must stay within the knowledge base." }] };
+      }
       const sessionDir = "/session";
       const file = path.join(sessionDir, "written_knowledge.json");
       appendJsonArray(file, {
@@ -842,9 +669,8 @@ export default function policy(pi) {
         content: params.content.trim(),
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Документ "${params.category}/${params.name}" зафиксирован и будет записан в базу знаний.` }]
-      };
+      return toolResult({ status: "pending", operation: "write_knowledge", target: `${params.category}/${params.name}`,
+        instruction: "The document is queued and will be saved after this turn finishes. Do not repeat the write to check it." });
     }
   });
 

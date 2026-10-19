@@ -720,9 +720,9 @@ def test_migration_preserves_existing_rows_and_adds_turns(
 
     database = Database.from_path(db_path)
     try:
-        TaskRepository(database).create(
-            id="keep", title="keep me", workspace="proj-a"
-        )
+        # Prepare historical data using only columns present at this revision.
+        with database.engine.begin() as connection:
+            connection.exec_driver_sql("INSERT INTO tasks (id, title, workspace) VALUES ('keep', 'keep me', 'proj-a')")
         repository = ConversationRepository(database)
         repository.create_conversation(id="conv-keep")
         message = repository.append_message(

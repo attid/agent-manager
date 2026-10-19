@@ -266,6 +266,9 @@ class AgentManagerServices:
         app = create_app(
             self.config.database_url,
             api_tokens=self.config.api_tokens,
+            default_workspace=self.config.default_workspace,
+            default_agent_id=self.config.developer_agent_id,
+            knowledge_base=self.knowledge_base,
         )
         uvicorn_cfg = uvicorn.Config(
             app=app,

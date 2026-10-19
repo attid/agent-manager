@@ -16,6 +16,9 @@ from typing import Any, Callable, Mapping, Sequence
 import uuid
 
 from .logging import bind_log_context
+from .workspaces import resolve_workspace
+from .runtime_defaults import RuntimeDefaultsResolver
+from .profile_runtime import _build_role_config
 from .storage import (
     AgentProfileRepository,
     Database,
@@ -56,6 +59,7 @@ class TaskExecutionWorker:
         env: Mapping[str, str] | None = None,
         on_task_finished: Callable[[Task, TaskOutcome], None] | None = None,
         knowledge_base: Any | None = None,
+        runtime_defaults: RuntimeDefaultsResolver | None = None,
     ) -> None:
         self.database = database
         self.artifact_root = Path(artifact_root)
@@ -64,13 +68,14 @@ class TaskExecutionWorker:
         self.runner_argv_prefix = list(runner_argv_prefix)
         self.workspace_map = dict(workspace_map or {})
         self.default_workspace = (
-            Path(default_workspace).resolve() if default_workspace else None
+            Path(default_workspace).expanduser().resolve() if default_workspace else None
         )
         self.poll_interval_seconds = float(poll_interval_seconds)
         self.worker_id = worker_id or f"task-worker-{uuid.uuid4().hex[:8]}"
         self.env = dict(env) if env is not None else None
         self.on_task_finished = on_task_finished
         self.knowledge_base = knowledge_base
+        self.runtime_defaults = runtime_defaults or RuntimeDefaultsResolver()
 
         self._repository = TaskRepository(database)
         self._agent_repository = AgentProfileRepository(database)
@@ -89,23 +94,7 @@ class TaskExecutionWorker:
         )
 
     def _resolve_workspace(self, workspace_name: str | None) -> Path:
-        """Resolve a workspace name or path to an absolute filesystem Path."""
-        if workspace_name:
-            # 1. Exact path
-            p = Path(workspace_name).expanduser()
-            if p.is_dir():
-                return p.resolve()
-            # 2. Lookup in workspace_map
-            if workspace_name in self.workspace_map:
-                mapped = Path(self.workspace_map[workspace_name]).expanduser()
-                if mapped.is_dir():
-                    return mapped.resolve()
-
-        if self.default_workspace and self.default_workspace.is_dir():
-            return self.default_workspace.resolve()
-
-        # Fallback to current working directory
-        return Path.cwd().resolve()
+        return resolve_workspace(workspace_name, default_workspace=self.default_workspace, workspace_map=self.workspace_map)
 
     def step(self) -> TaskOutcome | None:
         """Claim and execute at most one in_progress task.
@@ -131,8 +120,17 @@ class TaskExecutionWorker:
                 extra={"workspace": ws_name, "event": "task_claim"},
             )
             try:
-                # 1. Resolve workspace
-                project_dir = self._resolve_workspace(task.workspace)
+                selected_agent_id = task.agent_id if task.agent_id is not None else self.agent_id
+                # Resolve the selected profile before choosing its default workspace.
+                if self.knowledge_base is not None and hasattr(self.knowledge_base, "sync_agent_from_file"):
+                    self.knowledge_base.sync_agent_from_file(selected_agent_id, self.database)
+                profile = self._agent_repository.get_current(selected_agent_id)
+                if profile is None:
+                    raise RuntimeError(f"Agent profile not found in registry: {selected_agent_id}")
+                if profile.runner_config.get("archived") or profile.role == "archived":
+                    raise RuntimeError(f"Agent is archived: {selected_agent_id}")
+                requested_workspace = task.workspace if task.workspace is not None else profile.runner_config.get("project")
+                project_dir = self._resolve_workspace(requested_workspace)
                 logger.info(
                     "Task %s workspace resolved to project_dir=%s",
                     task.id,
@@ -152,19 +150,7 @@ class TaskExecutionWorker:
                 )
                 task_file.write_text(task_text, encoding="utf-8")
 
-                # 3. Export agent profile (hot-reload from knowledge/agents/*.md if modified)
-                if self.knowledge_base is not None and hasattr(
-                    self.knowledge_base, "sync_agent_from_file"
-                ):
-                    try:
-                        self.knowledge_base.sync_agent_from_file(
-                            self.agent_id, self.database
-                        )
-                    except Exception as sync_err:
-                        logger.warning(
-                            "Could not hot-reload agent profile: %s", sync_err
-                        )
-
+                # 3. Prepare the selected execution configuration.
                 meta_data = dict(task.meta or {})
                 provenance_data = dict(meta_data.get("provenance") or {})
                 resume_session_id = (
@@ -177,12 +163,14 @@ class TaskExecutionWorker:
                     or provenance_data.get("runner_state_dir")
                 )
 
-                profile = self._agent_repository.get_current(self.agent_id)
-                if profile is None:
-                    raise RuntimeError(
-                        f"Agent profile not found in registry: {self.agent_id}"
-                    )
-
+                previous_context = meta_data.get("execution_context") or {}
+                previous_agent = previous_context.get("agent_id") or provenance_data.get("agent_id")
+                previous_project = previous_context.get("host_path") or provenance_data.get("project")
+                if (previous_agent is not None and previous_agent != selected_agent_id) or (previous_project is not None and previous_project != str(project_dir)):
+                    # A new executor or workspace must never inherit another native session.
+                    # Earlier state and artifacts are retained in their original directory.
+                    resume_session_id = None
+                    resume_state_dir = None
                 runner_config = dict(profile.runner_config or {})
                 runner_config["project"] = str(project_dir)
 
@@ -229,9 +217,32 @@ class TaskExecutionWorker:
 
                 prompt_file = exec_dir / "system_prompt.md"
                 prompt_file.write_text(profile.system_prompt, encoding="utf-8")
-                instructions.append(str(prompt_file))
+                workspace_file = exec_dir / "workspace.md"
+                workspace_file.write_text(
+                    f"# Execution workspace\nHost directory: {project_dir}\n"
+                    f"Sandbox root: /workspace\n"
+                    f"Working directory: /workspace/{runner_config.get('workdir', '.')}\n"
+                    f"Project read-only: {bool(runner_config.get('project_read_only', False))}\n"
+                    f"Sandbox network: {bool(runner_config.get('network', True))}\n"
+                    "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.\n",
+                    encoding="utf-8",
+                )
                 runner_config["instructions"] = instructions
-                runner_config["agent_id"] = self.agent_id
+                runner_config = _build_role_config(runner_config, agent_id=selected_agent_id, prompt_path=prompt_file)
+                runner_config["instructions"].append(str(workspace_file))
+                runtime_selection = self.runtime_defaults.resolve(runner_config)
+                runner_config = runtime_selection.role_config
+                execution_context = {
+                    "agent_id": selected_agent_id,
+                    "profile_revision": profile.revision,
+                    "host_path": str(project_dir),
+                    "sandbox_path": "/workspace",
+                    "project_read_only": bool(runner_config.get("project_read_only", False)),
+                    "network": bool(runner_config.get("network", True)),
+                    "provider": runtime_selection.provider,
+                    "model": runtime_selection.model,
+                }
+                self._repository.update(task.id, metadata={**(task.meta or {}), "execution_context": execution_context})
 
                 # Ensure knowledge directory is in readonly_paths if available
                 if (
