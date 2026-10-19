@@ -213,6 +213,60 @@ def test_task_execution_worker_runner_failed_status(
     assert reloaded.status == "failed"
 
 
+def test_task_worker_parses_pretty_printed_runner_result(
+    migrated_db: Path, tmp_path: Path
+) -> None:
+    """The real Runner CLI prints an indented multi-line JSON document.
+
+    A single-line scan used to mark a successful execution as an unparseable
+    failure. The worker must parse the whole document.
+    """
+    test_db = Database.from_path(migrated_db)
+    AgentProfileRepository(test_db).create(
+        agent_id="agent-manager-developer",
+        name="Developer",
+        role="developer",
+        system_prompt="Coding prompt.",
+        runner_config={"tools": ["read", "write"]},
+    )
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(
+        title="Update the file",
+        status="in_progress",
+        metadata={"task_type": "general"},
+    )
+    summary_path = tmp_path / "summary.md"
+    summary_path.write_text("Changed the file.", encoding="utf-8")
+    runner_stdout = json.dumps(
+        {
+            "status": "completed",
+            "changed_files": ["index.html"],
+            "summary_path": str(summary_path),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id="agent-manager-developer",
+        default_workspace=str(tmp_path),
+        runner_argv_prefix=["true"],
+    )
+
+    mock_run = MagicMock(
+        return_value=MagicMock(returncode=0, stdout=runner_stdout, stderr="")
+    )
+    with patch("subprocess.run", mock_run):
+        outcome = worker.step()
+
+    assert outcome is not None
+    assert outcome.status == "completed", outcome.error
+    assert outcome.changed_files == ["index.html"]
+    assert "Changed the file." in (outcome.summary or "")
+    assert task_repo.get(task.id).status == "done"
+
+
 def test_task_execution_worker_missing_agent_profile(
     migrated_db: Path,
     tmp_path: Path,

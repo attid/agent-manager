@@ -111,6 +111,21 @@ def test_parse_changes_requested_with_evidence_linked_finding() -> None:
     assert finding.evidence is not None
 
 
+def test_parse_changes_requested_accepts_backtick_wrapped_finding() -> None:
+    report = (
+        "`P1: index.html:2 — class primary has no CSS rule; "
+        "add .primary { color: green; }`\n"
+        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    verdict, findings = parse_review_report(report)
+    assert verdict == VERDICT_CHANGES_REQUESTED
+    assert len(findings) == 1
+    assert findings[0].severity == "P1"
+    assert findings[0].file == "index.html"
+    assert findings[0].line == 2
+    assert "no CSS rule" in findings[0].message
+
+
 def test_parse_structured_json_block_is_authoritative() -> None:
     report = (
         "Review body.\n"
@@ -228,6 +243,22 @@ def test_execute_changes_requested_round_keeps_findings(tmp_path: Path) -> None:
     assert result.findings[0].file == "src/app.py"
     assert result.findings[0].line == 9
     assert result.to_dict()["verdict"] == "changes_requested"
+
+
+def test_execute_parses_pretty_printed_runner_result(tmp_path: Path) -> None:
+    """The real Runner CLI emits indented multi-line JSON on stdout."""
+    summary = tmp_path / "summary.md"
+    stdout = json.dumps(
+        {"status": "completed", "summary_path": str(summary)}, indent=2
+    )
+    executor = _executor(
+        _fake_runner(summary, "ВЕРДИКТ: ОДОБРЕНО\n", stdout=stdout)
+    )
+
+    result = executor.execute(_request(tmp_path))
+
+    assert result.verdict == VERDICT_APPROVED
+    assert result.approved is True
 
 
 def test_execute_uses_default_prompt_when_profile_missing(tmp_path: Path) -> None:

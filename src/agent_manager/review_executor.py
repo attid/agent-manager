@@ -48,6 +48,7 @@ from typing import Any
 
 from .capabilities import write_handbook_discovery
 from .profile_runtime import _build_role_config
+from .runner_output import extract_runner_result
 from .runtime_defaults import RuntimeDefaultsResolver
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,8 @@ _FENCED_JSON_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _FINDING_RE = re.compile(
-    r"^\s*(P[1-3]|BLOCKER|CRITICAL|MAJOR|MINOR|INFO)\s*[:\-]\s*(.+?)\s*$",
+    r"^\s*(?:[-*+]\s+)?`?\s*(P[1-3]|BLOCKER|CRITICAL|MAJOR|MINOR|INFO)"
+    r"\s*[:\-]\s*(.+?)\s*`?\s*$",
     re.IGNORECASE,
 )
 _FILE_LINE_RE = re.compile(
@@ -232,17 +234,12 @@ def _utcnow_iso() -> str:
 
 
 def _extract_last_json_object(stdout: str) -> dict[str, Any] | None:
-    """Return the last complete JSON object line, or ``None``."""
-    for line in reversed(stdout.strip().splitlines()):
-        stripped = line.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            try:
-                payload = json.loads(stripped)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                return payload
-    return None
+    """Return the last JSON object emitted on ``stdout``, or ``None``.
+
+    The Runner CLI prints a single pretty-printed JSON document, so the whole
+    output is parsed before falling back to the last balanced object.
+    """
+    return extract_runner_result(stdout)
 
 
 def _normalize_verdict(value: Any) -> str:

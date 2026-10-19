@@ -24,6 +24,7 @@ from .permissions import (
 )
 from .workspaces import resolve_workspace
 from .runtime_defaults import RuntimeDefaultsResolver
+from .runner_output import extract_runner_result
 from .profile_runtime import _build_role_config
 from .review_executor import (
     VERDICT_APPROVED,
@@ -391,21 +392,12 @@ class TaskExecutionWorker:
                     raise RuntimeError(err_msg)
 
                 stdout_clean = result.stdout.strip()
-                last_json_line = ""
-                for line in reversed(stdout_clean.splitlines()):
-                    stripped = line.strip()
-                    if stripped.startswith("{") and stripped.endswith("}"):
-                        last_json_line = stripped
-                        break
-                if not last_json_line and stdout_clean:
-                    last_json_line = stdout_clean.splitlines()[-1]
-
-                try:
-                    runner_result = json.loads(last_json_line)
-                except Exception as parse_err:
+                runner_result = extract_runner_result(result.stdout)
+                if runner_result is None:
                     raise RuntimeError(
-                        f"Failed to parse runner JSON output: {parse_err}. Stdout: {stdout_clean[:1000]!r}"
-                    ) from parse_err
+                        "Failed to parse runner JSON output: no JSON object "
+                        f"found. Stdout: {stdout_clean[:1000]!r}"
+                    )
 
                 status = runner_result.get("status")
                 if status not in ("completed", "waiting_for_input"):
@@ -711,9 +703,8 @@ class TaskExecutionWorker:
                     f"{dev_proc.returncode}; review round {round_num} cannot be re-verified"
                 )
             try:
-                last_json = [l for l in dev_proc.stdout.strip().splitlines() if l.strip().startswith("{") and l.strip().endswith("}")]
-                if last_json:
-                    dev_res = json.loads(last_json[-1])
+                dev_res = extract_runner_result(dev_proc.stdout)
+                if dev_res is not None:
                     s_path = dev_res.get("summary_path")
                     if s_path and Path(s_path).is_file():
                         current_summary = Path(s_path).read_text(encoding="utf-8")
