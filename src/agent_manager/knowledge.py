@@ -27,6 +27,33 @@ SEND_FILE_PATTERN = re.compile(
     r"\[(?:SEND_FILE|ATTACH_FILE|FILE):\s*([^\]]+)\]", re.IGNORECASE
 )
 
+
+class KnowledgePathError(ValueError):
+    """A requested knowledge target would escape its instance-owned subtree."""
+
+
+def contained_target_path(
+    base_dir: str | os.PathLike[str],
+    target_id: str,
+    filename: str,
+) -> Path:
+    """Resolve ``base_dir/target_id/filename`` inside ``base_dir``.
+
+    ``target_id`` may be a broad nested name; it is accepted as long as the
+    resolved path stays inside ``base_dir``. Absolute paths, ``..``
+    traversal and symlinks that point outside the subtree are rejected with
+    :class:`KnowledgePathError`. This is the single resolver shared by
+    recommendation preview, evidence hashing and the final knowledge write.
+    """
+    base = Path(base_dir).expanduser().resolve()
+    candidate = (base / target_id.strip() / filename).resolve()
+    if not candidate.is_relative_to(base):
+        raise KnowledgePathError(
+            f"knowledge target {target_id!r} is outside {base}"
+        )
+    return candidate
+
+
 #: Repository ``docs/handbook`` directory copied into the knowledge root so a
 #: child execution can read the platform contract read-only at
 #: ``/knowledge/handbook``. Absent in an installed package: the sync is a
@@ -856,18 +883,20 @@ class KnowledgeBase:
         self, project_name: str, content: str
     ) -> Path:
         """Create or update a project's summary.md in the knowledge base and commit."""
-        project_dir = self.projects_dir / project_name
-        project_dir.mkdir(parents=True, exist_ok=True)
-        summary_file = project_dir / "summary.md"
+        summary_file = contained_target_path(
+            self.projects_dir, project_name, "summary.md"
+        )
+        summary_file.parent.mkdir(parents=True, exist_ok=True)
         summary_file.write_text(content.strip() + "\n", encoding="utf-8")
         self.git_commit(f"Update summary for project: {project_name}")
         return summary_file
 
     def update_component_rules(self, component: str, rules: str) -> Path:
         """Create or update a component's rules.md in the knowledge base and commit."""
-        component_dir = self.components_dir / component
-        component_dir.mkdir(parents=True, exist_ok=True)
-        rules_file = component_dir / "rules.md"
+        rules_file = contained_target_path(
+            self.components_dir, component, "rules.md"
+        )
+        rules_file.parent.mkdir(parents=True, exist_ok=True)
         rules_file.write_text(rules.strip() + "\n", encoding="utf-8")
         self.git_commit(f"Update rules for component: {component}")
         return rules_file

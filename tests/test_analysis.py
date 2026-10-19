@@ -982,3 +982,45 @@ def test_cmd_analyze_replays_pending_and_reads_existing_report(
     finally:
         database.dispose()
 
+
+
+def test_analysis_rejects_recommendation_target_outside_knowledge_base(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """A traversal/absolute target is rejected, never written or persisted."""
+    database = Database.from_path(migrated_db)
+    try:
+        TaskRepository(database).create(id="task-one", title="Task")
+        knowledge = KnowledgeBase(tmp_path / "knowledge")
+        knowledge.projects_dir.mkdir(parents=True, exist_ok=True)
+
+        for target_id in ("../../escape", "/tmp/agent-manager-escape"):
+            runner = _runner(
+                _report_text([_project_recommendation(target_id)])
+            )
+            worker = _worker(
+                database,
+                _instance(
+                    database,
+                    tmp_path,
+                    runner=runner,
+                    knowledge_base=knowledge,
+                ),
+            )
+            operation = _submit_analysis(database, "task-one")
+            outcome = worker.step()
+            assert outcome is not None
+            assert outcome.status == "failed", target_id
+            assert "outside the knowledge base" in (outcome.error or "")
+            # The malicious proposal is never persisted as a recommendation.
+            assert (
+                AnalysisRepository(database).list_recommendations(
+                    task_id="task-one"
+                )
+                == []
+            )
+
+        assert not (tmp_path / "escape").exists()
+        assert not pathlib.Path("/tmp/agent-manager-escape").exists()
+    finally:
+        database.dispose()

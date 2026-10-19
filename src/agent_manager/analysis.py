@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import write_handbook_discovery
-from .knowledge import KnowledgeBase
+from .knowledge import KnowledgeBase, KnowledgePathError, contained_target_path
 from .operation_worker import (
     OperationContext,
     OperationExecutionError,
@@ -666,6 +666,16 @@ def _persist_recommendation(
     """
     target_kind = str(recommendation["target_kind"])
     target_id = str(recommendation["target_id"]).strip()
+    if (
+        knowledge_base is not None
+        and target_kind in (TARGET_KIND_PROJECT, TARGET_KIND_COMPONENT)
+        and _knowledge_target_path(knowledge_base, target_kind, target_id) is None
+    ):
+        # Never persist a proposal whose target escapes the instance subtree:
+        # preview, evidence hash and apply must all use the same contained path.
+        raise OperationExecutionError(
+            f"recommendation target {target_id!r} is outside the knowledge base"
+        )
     revision, observed_hash, current_content = _current_target_state(
         database,
         knowledge_base,
@@ -761,10 +771,29 @@ def _current_target_state(
 def _knowledge_target_path(
     knowledge_base: KnowledgeBase, target_kind: str, target_id: str
 ) -> Path | None:
-    if target_kind == TARGET_KIND_PROJECT:
-        return knowledge_base.projects_dir / target_id / "summary.md"
-    if target_kind == TARGET_KIND_COMPONENT:
-        return knowledge_base.components_dir / target_id / "rules.md"
+    """Return the safe knowledge path for a target, or ``None`` when it escapes.
+
+    Uses the same containment resolver as the final write, so preview, the
+    observed evidence hash and the applied file can never disagree about
+    which path a target names.
+    """
+    try:
+        if target_kind == TARGET_KIND_PROJECT:
+            return contained_target_path(
+                knowledge_base.projects_dir, target_id, "summary.md"
+            )
+        if target_kind == TARGET_KIND_COMPONENT:
+            return contained_target_path(
+                knowledge_base.components_dir, target_id, "rules.md"
+            )
+    except KnowledgePathError as error:
+        logger.warning(
+            "rejected knowledge target kind=%s id=%r: %s",
+            target_kind,
+            target_id,
+            error,
+        )
+        return None
     return None
 
 
@@ -1004,12 +1033,16 @@ class RecommendationService:
                 "proposed_content must be a non-empty string"
             )
         if recommendation.target_kind == TARGET_KIND_PROJECT:
-            path = self._knowledge_base.create_or_update_project_summary(
-                recommendation.target_id, proposed
+            path = self._safe_knowledge_write(
+                recommendation.target_id,
+                proposed,
+                self._knowledge_base.create_or_update_project_summary,
             )
         elif recommendation.target_kind == TARGET_KIND_COMPONENT:
-            path = self._knowledge_base.update_component_rules(
-                recommendation.target_id, proposed
+            path = self._safe_knowledge_write(
+                recommendation.target_id,
+                proposed,
+                self._knowledge_base.update_component_rules,
             )
         else:
             raise AnalysisError(
@@ -1023,6 +1056,20 @@ class RecommendationService:
             "target_kind": recommendation.target_kind,
             "target_id": recommendation.target_id,
         }
+
+    def _safe_knowledge_write(
+        self,
+        target_id: str,
+        proposed: str,
+        writer: Callable[[str, str], Path],
+    ) -> Path:
+        """Run a knowledge writer, mapping a containment failure to a domain error."""
+        try:
+            return writer(target_id, proposed)
+        except KnowledgePathError as error:
+            raise AnalysisError(
+                f"invalid knowledge target {target_id!r}: {error}"
+            ) from error
 
 
 def _target_exists(

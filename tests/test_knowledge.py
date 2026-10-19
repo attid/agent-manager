@@ -10,6 +10,8 @@ from aiogram.types import FSInputFile
 from agent_manager.knowledge import (
     DEFAULT_KNOWLEDGE_DIR,
     KnowledgeBase,
+    KnowledgePathError,
+    contained_target_path,
     format_agent_profile_markdown,
 )
 from agent_manager.storage import (
@@ -327,3 +329,39 @@ def test_knowledge_base_file_deletion_archives_agent(tmp_path: Path, migrated_db
 
 
 
+
+
+def test_contained_target_path_rejects_escapes_and_allows_nested_names(
+    tmp_path: Path,
+) -> None:
+    kb = KnowledgeBase(tmp_path / "knowledge")
+    kb.projects_dir.mkdir(parents=True, exist_ok=True)
+
+    # Broad, nested names are allowed as long as they stay inside the subtree.
+    nested = contained_target_path(
+        kb.projects_dir, "team/platform", "summary.md"
+    )
+    assert nested == (
+        kb.projects_dir / "team" / "platform" / "summary.md"
+    ).resolve()
+    assert nested.is_relative_to(kb.projects_dir.resolve())
+    kb.create_or_update_project_summary("team/platform", "Nested content.")
+    assert nested.read_text(encoding="utf-8").strip() == "Nested content."
+
+    # Traversal and absolute paths are rejected by containment, not by an
+    # arbitrary name allowlist.
+    for target in ("../../escape", "/tmp/agent-manager-escape"):
+        with pytest.raises(KnowledgePathError):
+            contained_target_path(kb.projects_dir, target, "summary.md")
+
+    # A symlinked directory that points outside the subtree is rejected too.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (kb.projects_dir / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(KnowledgePathError):
+        contained_target_path(kb.projects_dir, "linked", "summary.md")
+
+    # The final write uses the same resolver and never creates the file.
+    with pytest.raises(KnowledgePathError):
+        kb.create_or_update_project_summary("../escape", "must not land")
+    assert not (tmp_path / "escape").exists()
