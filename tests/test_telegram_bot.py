@@ -31,6 +31,7 @@ from agent_manager.telegram.handlers import (
     cmd_talk,
     on_category_switch,
     on_select_task,
+    on_talk_task,
     on_set_status,
     on_cancel_queue,
     on_user_message,
@@ -354,6 +355,39 @@ async def test_task_selection_and_status_patch(
 
 
 # 7. FIFO Queue and Cancellation
+
+
+@sync_test
+async def test_task_card_escapes_html_from_task_content(
+    user_storage: UserStateStorage,
+    test_backend_client: BackendClient,
+) -> None:
+    from html.parser import HTMLParser
+
+    created = await test_backend_client.create_task(
+        title="Research <name> & <script>example</script>",
+        description="Inspect /tmp/<name> && compare a < b.",
+        status="incoming",
+    )
+    callback = _make_callback_query(f"select_task:{created['id']}")
+    await on_select_task(callback, storage=user_storage, client=test_backend_client)
+    text = callback.message.edit_text.call_args.args[0]
+    assert "Research &lt;name&gt; &amp; &lt;script&gt;example&lt;/script&gt;" in text
+    assert "Inspect /tmp/&lt;name&gt; &amp;&amp; compare a &lt; b." in text
+
+    class CardParser(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            assert tag in {"b", "code", "i"}
+
+    CardParser().feed(text)
+    callback.answer.assert_awaited_once()
+    state = user_storage.get_user_state(callback.from_user.id)
+    assert state.active_task_id == created["id"]
+    assert state.active_conversation_id is not None
+
+    talk = _make_callback_query(f"talk_task:{created['id']}")
+    await on_talk_task(talk, storage=user_storage, client=test_backend_client)
+    CardParser().feed(talk.message.answer.call_args.args[0])
 
 
 @sync_test

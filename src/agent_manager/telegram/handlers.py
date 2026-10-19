@@ -385,11 +385,11 @@ async def on_select_task(
         )
 
     card_text = (
-        f"📌 <b>Задача #{task['id']}</b>\n"
-        f"Название: <b>{task['title']}</b>\n"
-        f"Статус: <code>{task['status']}</code>\n"
-        f"Пространство: {task.get('workspace') or '—'}\n\n"
-        f"Описание:\n{task.get('description') or '<i>(без описания)</i>'}"
+        f"📌 <b>Задача #{html.escape(str(task['id']))}</b>\n"
+        f"Название: <b>{html.escape(task['title'])}</b>\n"
+        f"Статус: <code>{html.escape(task['status'])}</code>\n"
+        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
+        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}"
         f"{clar_info}\n\n"
         "<i>Контекст задачи выбран. Сообщения направляются по этой задаче.</i>"
     )
@@ -565,7 +565,7 @@ async def on_talk_task(
     )
     await callback.answer("Диалог привязан к задаче")
     await callback.message.answer(
-        f"💬 Напишите сообщение секретарю по задаче <b>{task['title']}</b>:",
+        f"💬 Напишите сообщение секретарю по задаче <b>{html.escape(task['title'])}</b>:",
         parse_mode="HTML",
     )
 
