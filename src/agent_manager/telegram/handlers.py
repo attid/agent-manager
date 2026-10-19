@@ -21,6 +21,7 @@ from .client import BackendClient
 from .config import TelegramConfig
 from .keyboards import (
     mode_keyboard,
+    task_display_number,
     talk_keyboard,
     task_card_keyboard,
     task_categories_keyboard,
@@ -176,7 +177,7 @@ async def _render_analysis_report(
     agent_id = report.get("agent_id") or "system-log-analyzer"
     revision = report.get("profile_revision")
     lines = [
-        f"📊 <b>Анализ задачи #{html.escape(task_id)}: {html.escape(task.get('title', ''))}</b>",
+        f"📊 <b>Анализ задачи #{html.escape(task_display_number(task))}: {html.escape(task.get('title', ''))}</b>",
         "",
         f"• <b>Анализатор:</b> <code>{html.escape(str(agent_id))}</code>"
         + (f" (rev {revision})" if revision is not None else ""),
@@ -253,6 +254,8 @@ async def cmd_analyze(
         await message.answer(f"❌ Задача <code>{html.escape(task_id)}</code> не найдена.", parse_mode="HTML")
         return
 
+    task_id = task["id"]
+
     # An existing report is a stored result: render it without a model call.
     try:
         reports = await client.list_analysis_reports(task_id)
@@ -298,7 +301,7 @@ async def cmd_analyze(
 
     if status in {"pending", "accepted", "running"}:
         await message.answer(
-            f"⏳ <b>Анализ задачи #{html.escape(task_id)} запущен</b>\n"
+            f"⏳ <b>Анализ задачи #{html.escape(task_display_number(task))} запущен</b>\n"
             f"Операция <code>{html.escape(str(operation_id))}</code> в статусе "
             f"<code>{html.escape(str(status))}</code>. Отчёт появится после "
             "завершения операции; повторный вызов читает ту же операцию и не "
@@ -311,7 +314,7 @@ async def cmd_analyze(
     if status != "succeeded" or not result.get("report_id"):
         error = operation.get("error") or "анализ не завершился успешно"
         await message.answer(
-            f"❌ <b>Анализ задачи #{html.escape(task_id)} не удался</b>\n"
+            f"❌ <b>Анализ задачи #{html.escape(task_display_number(task))} не удался</b>\n"
             f"<code>{html.escape(str(error))}</code>",
             parse_mode="HTML",
         )
@@ -385,7 +388,7 @@ async def on_select_task(
         )
 
     card_text = (
-        f"📌 <b>Задача #{html.escape(str(task['id']))}</b>\n"
+        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
         f"Название: <b>{html.escape(task['title'])}</b>\n"
         f"Статус: <code>{html.escape(task['status'])}</code>\n"
         f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
@@ -410,11 +413,11 @@ async def on_set_status(
     task = await client.patch_task(task_id, status=new_status)
 
     card_text = (
-        f"📌 <b>Задача #{task['id']}</b>\n"
-        f"Название: <b>{task['title']}</b>\n"
-        f"Статус: <code>{task['status']}</code>\n"
-        f"Пространство: {task.get('workspace') or '—'}\n\n"
-        f"Описание:\n{task.get('description') or '<i>(без описания)</i>'}\n\n"
+        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
+        f"Название: <b>{html.escape(task['title'])}</b>\n"
+        f"Статус: <code>{html.escape(task['status'])}</code>\n"
+        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
+        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}\n\n"
         f"✅ <i>Статус обновлен на: {new_status}</i>"
     )
     await callback.message.edit_text(
@@ -450,7 +453,7 @@ async def on_commit_local(
     if res.success:
         await client.patch_task(task_id, status="done")
         await callback.message.edit_text(
-            f"✅ <b>Задача #{task_id} закоммичена!</b>\n\n"
+            f"✅ <b>Задача #{html.escape(task_display_number(task))} закоммичена!</b>\n\n"
             f"Ветка: <code>{html.escape(res.branch or 'HEAD')}</code>\n"
             f"Коммит: <code>{html.escape(res.commit_hash or '—')}</code>\n\n"
             f"<i>{html.escape(res.message)}</i>",
@@ -458,7 +461,7 @@ async def on_commit_local(
         )
     else:
         await callback.message.answer(
-            f"⚠️ <b>Ошибка локального коммита по задаче #{task_id}:</b>\n\n{html.escape(res.message)}",
+            f"⚠️ <b>Ошибка локального коммита по задаче #{html.escape(task_display_number(task))}:</b>\n\n{html.escape(res.message)}",
             parse_mode="HTML",
         )
 
@@ -492,7 +495,7 @@ async def on_commit_push(
     if res.success:
         await client.patch_task(task_id, status="done")
         await status_msg.edit_text(
-            f"🎉 <b>Задача #{task_id} успешно закоммичена, запушена и прошла CI!</b>\n\n"
+            f"🎉 <b>Задача #{html.escape(task_display_number(task))} успешно закоммичена, запушена и прошла CI!</b>\n\n"
             f"Ветка: <code>{html.escape(res.branch or 'HEAD')}</code>\n"
             f"Коммит: <code>{html.escape(res.commit_hash or '—')}</code>\n\n"
             f"<i>{html.escape(res.message)}</i>",
@@ -511,7 +514,7 @@ async def on_commit_push(
             ]
         )
         await status_msg.edit_text(
-            f"❌ <b>Ошибка при пуше или в CI для задачи #{task_id}:</b>\n\n"
+            f"❌ <b>Ошибка при пуше или в CI для задачи #{html.escape(task_display_number(task))}:</b>\n\n"
             f"{html.escape(res.message)}"
             f"{ci_logs_part}",
             parse_mode="HTML",
@@ -538,7 +541,7 @@ async def on_rollback(
     if res.success:
         await client.patch_task(task_id, status="cancelled")
         await callback.message.edit_text(
-            f"❌ <b>Изменения по задаче #{task_id} откатаны.</b>\n\n"
+            f"❌ <b>Изменения по задаче #{html.escape(task_display_number(task))} откатаны.</b>\n\n"
             f"Задача переведена в статус <code>cancelled</code>.\n"
             f"Рабочая директория возвращена к исходному состоянию.",
             parse_mode="HTML",
@@ -780,7 +783,7 @@ async def on_user_message(
         )
         context_task_id = task["id"]
         conv = await client.create_conversation(
-            title=f"Задача #{context_task_id}: {title_summary}",
+            title=f"Задача #{task_display_number(task)}: {title_summary}",
             metadata={"task_id": context_task_id},
         )
         context_conversation_id = conv["id"]
@@ -842,7 +845,7 @@ async def on_user_message(
                     metadata=meta,
                 )
                 await message.answer(
-                    f"✅ <b>Ответ принят.</b>\n\n⚙️ <i>Агент возобновляет выполнение задачи #{context_task_id}...</i>",
+                    f"✅ <b>Ответ принят.</b>\n\n⚙️ <i>Агент возобновляет выполнение задачи #{task_display_number(task)}...</i>",
                     parse_mode="HTML",
                     reply_markup=task_card_keyboard(context_task_id, "in_progress"),
                 )

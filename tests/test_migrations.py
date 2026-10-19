@@ -30,6 +30,7 @@ def test_fresh_file_database_migrates_to_head(
         columns = {column["name"] for column in inspector.get_columns("tasks")}
         assert columns == {
             "id",
+            "number",
             "title",
             "description",
             "status",
@@ -145,7 +146,7 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
     # to 0009 when the analysis reports and recommendations tables were added;
     # the assertion that exactly one version row is stored, and that it is the
     # current head, is unchanged.
-    assert rows == [("0009_analysis",)]
+    assert rows == [("0010_task_numbers",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

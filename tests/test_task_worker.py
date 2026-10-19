@@ -366,7 +366,8 @@ def test_format_task_outcome_message_success(migrated_db: Path) -> None:
 
     msg = format_task_outcome_message(task, outcome)
     assert "✅" in msg
-    assert f"Задача #{task.id} завершена!" in msg
+    assert f"Задача #{task.number} завершена!" in msg
+    assert task.id not in msg
     assert "&lt;sanitized&gt;" in msg
     assert "&lt;b&gt;sanitized&lt;/b&gt;" in msg
     assert "<code>src/app.py</code>" in msg
@@ -392,7 +393,8 @@ def test_format_task_outcome_message_failure(migrated_db: Path) -> None:
 
     msg = format_task_outcome_message(task, outcome)
     assert "❌" in msg
-    assert f"Задача #{task.id} завершилась с ошибкой!" in msg
+    assert f"Задача #{task.number} завершилась с ошибкой!" in msg
+    assert task.id not in msg
     assert "&lt;8080&gt;" in msg
     assert "pre>" in msg
 
@@ -571,7 +573,7 @@ def test_format_task_outcome_message_ready_to_commit(migrated_db: Path) -> None:
 
     msg = format_task_outcome_message(task, outcome)
     assert "🔍" in msg
-    assert f"Задача #{task.id} ожидает подтверждения!" in msg
+    assert f"Задача #{task.number} ожидает подтверждения!" in msg
     assert "<code>src/main.py</code>" in msg
     assert "<code>src/utils.py</code>" in msg
     assert "Выберите действие ниже:" in msg

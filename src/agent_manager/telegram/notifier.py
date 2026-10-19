@@ -13,6 +13,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from agent_manager.storage import Task
 from agent_manager.task_worker import TaskOutcome
 
+from .keyboards import task_display_number
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +88,7 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
         clar_q = clar.get("question") or "Как поступить?"
 
         return (
-            f"⚠️ <b>Агенту требуется уточнение по задаче #{task.id}!</b>\n\n"
+            f"⚠️ <b>Агенту требуется уточнение по задаче #{html.escape(task_display_number(task))}!</b>\n\n"
             f"📌 <b>{html.escape(clar_title)}</b>\n\n"
             f"{html.escape(clar_desc)}\n\n"
             f"❓ <b>Вопрос:</b> {html.escape(clar_q)}\n\n"
@@ -106,7 +108,7 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
             files_part = "\n\n<b>Изменённые файлы:</b>\n" + "\n".join(file_lines)
 
         return (
-            f"🔍 <b>Задача #{task.id} ожидает подтверждения!</b>\n"
+            f"🔍 <b>Задача #{html.escape(task_display_number(task))} ожидает подтверждения!</b>\n"
             f"<b>Название:</b> {title_safe}\n"
             f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
             f"⏱ <b>Время:</b> {duration_str}\n\n"
@@ -128,7 +130,7 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
             files_part = "\n\n<b>Изменённые файлы:</b>\n" + "\n".join(file_lines)
 
         return (
-            f"✅ <b>Задача #{task.id} завершена!</b>\n"
+            f"✅ <b>Задача #{html.escape(task_display_number(task))} завершена!</b>\n"
             f"<b>Название:</b> {title_safe}\n"
             f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
             f"⏱ <b>Время:</b> {duration_str}\n\n"
@@ -142,7 +144,7 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
         error_safe = html.escape(error_raw)
 
         return (
-            f"❌ <b>Задача #{task.id} завершилась с ошибкой!</b>\n"
+            f"❌ <b>Задача #{html.escape(task_display_number(task))} завершилась с ошибкой!</b>\n"
             f"<b>Название:</b> {title_safe}\n"
             f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
             f"⏱ <b>Время:</b> {duration_str}\n\n"

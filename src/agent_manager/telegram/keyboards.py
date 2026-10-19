@@ -6,6 +6,15 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
+def task_display_number(task: Any) -> str:
+    """Human task number; tolerate older backends without this field."""
+    if isinstance(task, dict):
+        number = task.get("number")
+        return str(number if number is not None else task["id"])
+    number = getattr(task, "number", None)
+    return str(number if number is not None else task.id)
+
+
 def mode_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for selecting global mode when idle."""
     return InlineKeyboardMarkup(
@@ -146,7 +155,7 @@ def task_categories_keyboard(
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        text=f"{icon} {title}",
+                        text=f"{icon} #{task_display_number(t)} {title}",
                         callback_data=f"select_task:{t['id']}",
                     )
                 ]

@@ -1,5 +1,12 @@
 # Task lifecycle
 
+Tasks expose a stable human `number` (`#1`, `#2`, …) alongside their internal
+`id`. Display the number in Telegram and user conversations. `GET`/`PATCH
+/tasks/5` resolve a number; exact internal IDs remain supported. Read the
+returned `id` before submitting operations or accessing task-scoped resources.
+Existing tasks are numbered in creation order by migration `0010_task_numbers`;
+archival and status changes do not renumber them.
+
 A task is a durable request for work. `TaskExecutionWorker` claims
 `in_progress` tasks, runs the selected agent through the Pi Runner sandbox,
 optionally runs an internal review cycle, and writes the result back to the

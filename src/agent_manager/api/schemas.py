@@ -79,6 +79,7 @@ class TaskRead(BaseModel):
     """Task representation returned by the API."""
 
     id: str
+    number: int | None = None
     title: str
     description: str | None
     status: str
@@ -117,6 +118,7 @@ def task_to_read(task: Task) -> TaskRead:
     """
     return TaskRead(
         id=task.id,
+        number=task.number,
         title=task.title,
         description=task.description,
         status=task.status,

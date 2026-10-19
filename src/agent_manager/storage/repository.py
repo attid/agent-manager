@@ -271,9 +271,17 @@ class TaskRepository:
         return TaskImportResult(created=created, skipped=skipped)
 
     def get(self, task_id: str) -> Task | None:
-        """Return the task with ``task_id`` or ``None`` when absent."""
+        """Find an internal ID or human-readable number; exact IDs win."""
         with self._database.session() as session:
-            return session.get(Task, task_id)
+            return self._find(session, task_id)
+
+    @staticmethod
+    def _find(session: Any, task_id: str) -> Task | None:
+        task = session.get(Task, task_id)
+        reference = str(task_id).removeprefix("#")
+        if task is None and reference.isdecimal():
+            task = session.scalar(select(Task).where(Task.number == int(reference)))
+        return task
 
     def list(
         self,
@@ -329,7 +337,7 @@ class TaskRepository:
             TaskNotFoundError: when the task does not exist.
         """
         with self._database.session() as session:
-            task = session.get(Task, task_id)
+            task = self._find(session, task_id)
             if task is None:
                 raise TaskNotFoundError(task_id)
             if title is not _UNSET:

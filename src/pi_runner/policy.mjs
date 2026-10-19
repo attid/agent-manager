@@ -394,7 +394,7 @@ export default function policy(pi) {
   });
   pi.registerTool({
     name: "get_task", label: "Get Task",
-    description: "Read the complete task, assigned agent, workspace, execution context, error and provenance.",
+    description: "Read a task by its human number (e.g. task_id='5') or internal ID. Show number to the user; use the returned id for subsequent operations. Includes executor, workspace, errors and provenance.",
     parameters: Type.Object({ task_id: Type.String() }),
     async execute(toolCallId, params) {
       return toolResult(await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id)}`));
