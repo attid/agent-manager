@@ -348,3 +348,69 @@ def test_wildcard_scoped_grant_submits_all_mapped_kinds(
             headers=_bearer(grant.token),
         )
         assert first.json()["id"] != second.json()["id"]
+
+
+def test_analysis_and_recommendation_routes_enforce_action_and_resource(
+    migrated_db: Path,
+) -> None:
+    """Raw HTTP cannot widen an execution beyond its granted analysis scope."""
+    permissions = ExecutionPermissions()
+    # A task-scoped read grant: allowed on its own task's analysis list, but
+    # denied on report/recommendation ids that need wildcard authority.
+    read_token = _scoped(
+        permissions,
+        ["list_analysis_reports"],
+        agent_id="reviewer",
+        label="task:t1",
+        resources=frozenset({"task:t1"}),
+    )
+    # Approving is a management action requiring wildcard authority and the
+    # exact analysis.approve action, not the analysis.trigger action.
+    approve_token = _scoped(
+        permissions, ["approve_recommendation"], agent_id="secretary"
+    )
+    trigger_token = _scoped(
+        permissions, ["trigger_analysis"], agent_id="secretary"
+    )
+    with _client(migrated_db, permissions) as client:
+        allowed_read = client.get(
+            "/tasks/t1/analysis", headers=_bearer(read_token)
+        )
+        assert allowed_read.status_code == 200, allowed_read.text
+        # The same read grant cannot reach an unrelated report by id.
+        assert (
+            client.get(
+                "/analysis/other", headers=_bearer(read_token)
+            ).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                "/recommendations", headers=_bearer(read_token)
+            ).status_code
+            == 403
+        )
+        # analysis.trigger is not analysis.approve.
+        assert (
+            client.post(
+                "/recommendations/r1/approve", headers=_bearer(trigger_token)
+            ).status_code
+            == 403
+        )
+        # The approve grant passes authorization; the missing recommendation is
+        # a domain 404, never a 403.
+        assert client.post(
+            "/recommendations/r1/approve", headers=_bearer(approve_token)
+        ).status_code == 404
+        assert client.post(
+            "/recommendations/r1/apply", headers=_bearer(approve_token)
+        ).status_code == 404
+        # The same grant cannot smuggle a Git operation.
+        assert (
+            client.post(
+                "/operations",
+                json={"kind": "git.commit_push", "target_id": "t1"},
+                headers=_bearer(approve_token),
+            ).status_code
+            == 403
+        )

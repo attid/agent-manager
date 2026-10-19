@@ -31,6 +31,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .capabilities import write_handbook_discovery
 from .knowledge import KnowledgeBase
 from .operation_worker import (
     OperationContext,
@@ -56,6 +57,11 @@ logger = logging.getLogger(__name__)
 
 #: Core analyzer agent that owns session analysis.
 ANALYZER_AGENT_ID = "system-log-analyzer"
+
+#: The analyzer profile is strictly read-only; it never receives a tool that
+#: can mutate code, profiles or the knowledge base. Discovery is filtered
+#: against this list so no platform action is advertised as executable.
+ANALYZER_READ_ONLY_TOOLS = ("read", "bash")
 
 #: Recommendation target kinds. A profile target is a versioned agent profile;
 #: project/component targets are knowledge-base markdown files.
@@ -480,11 +486,21 @@ def default_analyzer_runner(instance: OperationInstanceContext) -> AnalyzerRunne
         from .secretary import TurnInput
 
         artifact_root = Path(instance.artifact_root) / "analysis"
+        discovery_dir = artifact_root / f"discovery_{request.operation_id}"
+        discovery_dir.mkdir(parents=True, exist_ok=True)
+        discovery_path = write_handbook_discovery(
+            discovery_dir,
+            agent_id=ANALYZER_AGENT_ID,
+            tools=list(ANALYZER_READ_ONLY_TOOLS),
+        )
         frozen = freeze_profile_handler(
             instance.database,
             ANALYZER_AGENT_ID,
             runner_argv_prefix=list(instance.runner_argv_prefix),
             artifact_root=artifact_root,
+            extra_instructions=(
+                [str(discovery_path)] if discovery_path is not None else None
+            ),
         )
         turn = TurnInput(
             turn_id=f"analysis:{request.operation_id}",
@@ -1024,6 +1040,7 @@ def _target_exists(
 
 __all__ = [
     "ANALYZER_AGENT_ID",
+    "ANALYZER_READ_ONLY_TOOLS",
     "ANALYZER_OUTPUT_CONTRACT",
     "AnalysisError",
     "AnalysisParseError",

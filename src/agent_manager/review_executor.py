@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .capabilities import write_handbook_discovery
 from .profile_runtime import _build_role_config
 from .runtime_defaults import RuntimeDefaultsResolver
 
@@ -534,6 +535,15 @@ class ReviewExecutor:
             agent_id=REVIEWER_AGENT_ID,
             prompt_path=system_prompt_path,
         )
+        discovery_path = write_handbook_discovery(
+            artifact_dir,
+            agent_id=REVIEWER_AGENT_ID,
+            tools=list(role_config.get("tools") or []),
+        )
+        if discovery_path is not None:
+            instructions = list(role_config.get("instructions") or [])
+            instructions.append(str(discovery_path))
+            role_config["instructions"] = instructions
         role_path = artifact_dir / f"role_r{round_number}.json"
         role_path.write_text(
             json.dumps(role_config, ensure_ascii=False, indent=2),

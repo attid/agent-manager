@@ -214,6 +214,7 @@ def freeze_profile_handler(
     artifact_root: str | os.PathLike[str],
     env: Mapping[str, str] | None = None,
     runtime_defaults: RuntimeDefaultsResolver | None = None,
+    extra_instructions: Sequence[str | os.PathLike[str]] | None = None,
 ) -> FrozenProfileHandler:
     """Load one profile snapshot once and freeze it into a handler.
 
@@ -237,6 +238,10 @@ def freeze_profile_handler(
             in the export and adapter provenance. ``None`` (the default)
             preserves the previous behaviour exactly and reads no host
             settings.
+        extra_instructions: Optional additional instruction document paths
+            appended to the exported role's ``instructions`` list. Used to
+            inject the read-only platform discovery into system agents
+            without touching the stored identity prompt.
 
     Returns:
         A callable :class:`FrozenProfileHandler` with the handler, immutable
@@ -289,6 +294,10 @@ def freeze_profile_handler(
         agent_id=snapshot.agent_id,
         prompt_path=prompt_path,
     )
+    if extra_instructions:
+        instructions = list(role_config.get("instructions") or [])
+        instructions.extend(str(item) for item in extra_instructions)
+        role_config["instructions"] = instructions
 
     export_dir.mkdir(parents=True, exist_ok=False)
     _write_text(prompt_path, snapshot.system_prompt)

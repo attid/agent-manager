@@ -242,6 +242,30 @@ def test_freeze_exports_snapshot_prompt_and_preserved_instructions(
 # -- freezing across registry updates ------------------------------------
 
 
+def test_freeze_appends_extra_instruction_documents(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    database = Database.from_path(migrated_db)
+    extra = tmp_path / "platform_discovery.md"
+    extra.write_text("# Discovery\n", encoding="utf-8")
+    try:
+        repository = AgentProfileRepository(database)
+        _profile(repository, prompt="identity", runner_config={})
+        frozen = freeze_profile_handler(
+            database,
+            "triage",
+            runner_argv_prefix=[sys.executable, str(FAKE_RUNNER)],
+            artifact_root=tmp_path / "exports",
+            extra_instructions=[extra],
+        )
+        role = json.loads(frozen.role_config_path.read_text(encoding="utf-8"))
+        assert role["instructions"] == [str(frozen.prompt_path), str(extra)]
+        # The stored snapshot never gains the injected discovery path.
+        assert frozen.profile.runner_config == {}
+    finally:
+        database.dispose()
+
+
 def test_old_handler_stays_revision_one_while_new_handler_gets_revision_two(
     tmp_path: pathlib.Path, migrated_db: pathlib.Path
 ) -> None:

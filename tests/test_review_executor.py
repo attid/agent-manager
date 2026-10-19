@@ -202,6 +202,15 @@ def test_execute_valid_approved_round_persists_report_and_metrics(
         str(tmp_path / "review" / "reviewer_system_prompt_r1.md") == entry
         for entry in role["instructions"]
     )
+    # System-agent discovery is injected as an extra instruction file without
+    # replacing the identity prompt.
+    discovery = [
+        entry
+        for entry in role["instructions"]
+        if Path(entry).name == "platform_discovery.md"
+    ]
+    assert discovery
+    assert "docs/handbook/README.md" in Path(discovery[0]).read_text(encoding="utf-8")
 
 
 def test_execute_changes_requested_round_keeps_findings(tmp_path: Path) -> None:
