@@ -331,6 +331,7 @@ class _PreparedExecution:
     handler: PiReplyHandler
     execution_role_path: pathlib.Path
     runtime_defaults: Mapping[str, Any]
+    grant_token: str | None = None
 
 
 def _stored_provenance(
@@ -528,6 +529,12 @@ class PersistentConversationHandler:
                 turn_input, ownership_token, error
             )
             raise
+        finally:
+            # The execution-scoped credential lives exactly as long as the
+            # child call. Revoking it never reopens anonymous access because
+            # authentication mode is fixed at application construction.
+            if prepared.grant_token and self._permissions is not None:
+                self._permissions.revoke(prepared.grant_token)
 
     # -- cached ----------------------------------------------------------
 
@@ -694,6 +701,7 @@ class PersistentConversationHandler:
         # Capture provenance before the per-instance additions so the scoped
         # backend credential is never written into the stored provenance.
         runtime_defaults = resolved.to_provenance()
+        grant_token: str | None = None
         # Explicit per-instance mounts and an execution-scoped backend token.
         if self._instance is not None:
             resolved_role = resolved.role_config
@@ -713,6 +721,7 @@ class PersistentConversationHandler:
                     resources=resources_for_execution(exec_actions),
                     label=f"conversation:{context.binding.conversation_id}",
                 )
+                grant_token = grant.token
                 resolved_role["backend"] = self._instance.child_backend(
                     grant.token
                 )
@@ -736,6 +745,7 @@ class PersistentConversationHandler:
             handler=handler,
             execution_role_path=execution_role_path,
             runtime_defaults=runtime_defaults,
+            grant_token=grant_token,
         )
 
     def _build_runtime_handler(

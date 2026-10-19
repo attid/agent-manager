@@ -8,11 +8,14 @@ from fastapi.testclient import TestClient
 import httpx
 
 from agent_manager.api import create_app
+from agent_manager.permissions import ExecutionPermissions
 from agent_manager.telegram.client import BackendClient, BackendError
 
 
 def test_api_auth_open_mode_when_no_tokens(migrated_db: Path) -> None:
     app = create_app(f"sqlite:///{migrated_db}", api_tokens=[])
+    # Open mode is now explicit: neither a registry nor admin tokens exist.
+    assert app.state.require_auth is False
     with TestClient(app) as client:
         # /health is 200
         res = client.get("/health")
@@ -21,6 +24,47 @@ def test_api_auth_open_mode_when_no_tokens(migrated_db: Path) -> None:
         # /tasks is 200 without token
         res = client.get("/tasks")
         assert res.status_code == 200
+        # The deliberate development choice also allows anonymous mutation.
+        created = client.post("/tasks", json={"title": "dev task"})
+        assert created.status_code == 201
+
+
+def test_registry_auth_mode_stays_protected_across_grants(
+    migrated_db: Path,
+) -> None:
+    """Auth mode is a stable per-instance decision, not a grant count."""
+    permissions = ExecutionPermissions()
+    app = create_app(f"sqlite:///{migrated_db}", permissions=permissions)
+    assert app.state.require_auth is True
+    with TestClient(app) as client:
+        # (1) Before any grant the protected API denies anonymous mutation.
+        assert client.get("/tasks").status_code == 401
+        assert client.post("/tasks", json={"title": "anon"}).status_code == 401
+
+        grant = permissions.issue(
+            agent_id="developer",
+            actions=["tasks.read"],
+            resources=["task:t1"],
+        )
+        assert permissions.resolve(grant.token) is not None
+        permissions.revoke(grant.token)
+        assert len(permissions) == 0
+        assert permissions.resolve(grant.token) is None
+
+        # (2) Revoking the last grant must not reopen anonymous access.
+        assert client.get("/tasks").status_code == 401
+        assert client.post("/tasks", json={"title": "anon"}).status_code == 401
+
+
+def test_admin_token_alone_protects_without_registry(migrated_db: Path) -> None:
+    app = create_app(
+        f"sqlite:///{migrated_db}", api_tokens={"admin-token"}
+    )
+    assert app.state.require_auth is True
+    with TestClient(app) as client:
+        assert client.get("/tasks").status_code == 401
+        admin = {"Authorization": "Bearer admin-token"}
+        assert client.get("/tasks", headers=admin).status_code == 200
 
 
 def test_api_auth_enforced_with_multiple_tokens(migrated_db: Path) -> None:

@@ -129,6 +129,7 @@ class TaskExecutionWorker:
                 ws_name,
                 extra={"workspace": ws_name, "event": "task_claim"},
             )
+            execution_grant = None
             try:
                 selected_agent_id = task.agent_id if task.agent_id is not None else self.agent_id
                 # Resolve the selected profile before choosing its default workspace.
@@ -285,14 +286,14 @@ class TaskExecutionWorker:
                             task_id=task.id,
                             agent_id=selected_agent_id,
                         )
-                        grant = self.permissions.issue(
+                        execution_grant = self.permissions.issue(
                             agent_id=selected_agent_id,
                             actions=exec_actions,
                             resources=resources,
                             label=f"task:{task.id}",
                         )
                         runner_config["backend"] = self.instance.child_backend(
-                            grant.token
+                            execution_grant.token
                         )
 
                 role_file = exec_dir / "role.json"
@@ -524,6 +525,12 @@ class TaskExecutionWorker:
                             exc_info=cb_err,
                         )
                 return outcome
+            finally:
+                # The execution-scoped credential lives exactly as long as
+                # the child execution. Revoking it must not affect the
+                # service's stable authentication mode.
+                if execution_grant is not None and self.permissions is not None:
+                    self.permissions.revoke(execution_grant.token)
 
     def _run_review_cycle(
         self,

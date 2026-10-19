@@ -11,6 +11,7 @@ import dataclasses
 import logging
 import os
 from pathlib import Path
+import secrets
 import shlex
 import signal
 import sys
@@ -241,13 +242,48 @@ class AgentManagerServices:
         self.operation_worker: OperationWorker | None = None
         self.bot = None
         self.dp = None
+        self.queue_processor = None
         self.telegram_notifier: TelegramNotifier | None = None
         self.uvicorn_server: uvicorn.Server | None = None
+        # Ephemeral in-memory administrative principal for the host Telegram
+        # client. Never written to a file, child configuration or log.
+        self.internal_token: str | None = None
         self._stop_event = asyncio.Event()
+
+    def resolve_host_auth(
+        self,
+    ) -> tuple[tuple[str, ...], TelegramConfig | None]:
+        """Resolve administrative credentials and the host Telegram client.
+
+        The Telegram bot calls this same process over HTTP and is a host
+        principal, not a child execution. When a bot is configured the
+        service mints an ephemeral in-memory internal token and registers it
+        as an administrative credential, so the internal client keeps
+        working before, during and after execution-scoped grants. The token
+        is never written to a file, child configuration or log.
+        Caller-supplied administrative tokens remain valid alongside it.
+        """
+        admin_tokens = list(self.config.api_tokens)
+        telegram_config = self.config.telegram_config
+        if telegram_config is not None and telegram_config.bot_token:
+            self.internal_token = secrets.token_urlsafe(32)
+            admin_tokens.append(self.internal_token)
+            telegram_config = dataclasses.replace(
+                telegram_config,
+                backend_url=(
+                    self.config.backend_url or telegram_config.backend_url
+                ),
+                api_token=self.internal_token,
+            )
+        return tuple(admin_tokens), telegram_config
 
     def setup(self, loop: asyncio.AbstractEventLoop) -> None:
         """Initialize all subsystems and wire callbacks."""
         logger.info("Initializing AgentManagerServices...")
+
+        # Administrative credentials for this instance. The Telegram client
+        # gets an ephemeral host-only token; children never do.
+        admin_tokens, telegram_config = self.resolve_host_auth()
 
         # 1. Run migrations if enabled
         if self.config.auto_migrate:
@@ -271,22 +307,23 @@ class AgentManagerServices:
             logger.warning("Error initializing KnowledgeBase: %s", e)
 
         # 4. Telegram & Notifier
-        if self.config.telegram_config and self.config.telegram_config.bot_token:
+        if telegram_config and telegram_config.bot_token:
             try:
-                bot, dp, _ = create_bot(
-                    self.config.telegram_config,
+                bot, dp, queue_processor = create_bot(
+                    telegram_config,
                     knowledge_base=self.knowledge_base,
                 )
                 self.bot = bot
                 self.dp = dp
+                self.queue_processor = queue_processor
                 self.telegram_notifier = TelegramNotifier(
                     bot=self.bot,
                     loop=loop,
-                    default_chat_id=self.config.telegram_config.allowed_user_id,
+                    default_chat_id=telegram_config.allowed_user_id,
                 )
                 logger.info(
                     "Telegram Bot initialized for user %s",
-                    self.config.telegram_config.allowed_user_id,
+                    telegram_config.allowed_user_id,
                 )
             except Exception as e:
                 logger.error("Failed to setup Telegram Bot: %s", e, exc_info=e)
@@ -352,7 +389,7 @@ class AgentManagerServices:
         # 7. FastAPI Uvicorn Server
         app = create_app(
             self.config.database_url,
-            api_tokens=self.config.api_tokens,
+            api_tokens=admin_tokens,
             default_workspace=self.config.default_workspace,
             default_agent_id=self.config.developer_agent_id,
             knowledge_base=self.knowledge_base,

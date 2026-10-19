@@ -18,6 +18,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import update
 
+from agent_manager.instance import InstanceContext
+from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.secretary import TurnInput, TurnProcessor
@@ -1727,5 +1729,75 @@ def test_session_actions_become_durable_operations_and_are_not_replayed(
         turn3 = processor.claim_next(conversation_id="conv-2")
         assert turn3 is not None
         assert handler(_turn_input(turn3)) == "Actions queued."
+    finally:
+        database.dispose()
+
+
+class _RecordingPermissions(ExecutionPermissions):
+    """ExecutionPermissions that records every issued grant for assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.issued: list = []
+
+    def issue(self, **kwargs):  # type: ignore[no-untyped-def]
+        grant = super().issue(**kwargs)
+        self.issued.append(grant)
+        return grant
+
+
+def test_conversation_execution_grant_is_scoped_and_revoked(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A secretary turn gets a scoped backend token that is revoked at end."""
+    artifact_root = tmp_path / "exports"
+    database = Database.from_path(migrated_db)
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                state_dir=tmp_path / "configured-runner-state",
+                stateful_session=True,
+            ),
+        )
+        processor = TurnProcessor(database)
+        message = _append_user(database, text="hello")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+
+        instance = InstanceContext(
+            state_root=tmp_path / "state",
+            workspaces_root=tmp_path / "workspaces",
+            skills_root=tmp_path / "skills",
+            knowledge_root=tmp_path / "knowledge",
+            artifact_root=artifact_root,
+            backend_url="http://127.0.0.1:19998",
+        )
+        permissions = _RecordingPermissions()
+        handler = PersistentConversationHandler(
+            database,
+            "triage",
+            runner_argv_prefix=[sys.executable, str(FAKE_RUNNER)],
+            artifact_root=artifact_root,
+            runtime_defaults=_defaults_source(artifact_root),
+            instance=instance,
+            permissions=permissions,
+        )
+        result = processor.run_once(handler, conversation_id="conv-1")
+        assert result.status == "completed"
+
+        # Exactly one scoped grant is issued for the conversation turn and it
+        # is revoked when the turn finishes.
+        assert len(permissions.issued) == 1
+        grant = permissions.issued[0]
+        assert grant.label == "conversation:conv-1"
+        assert permissions.resolve(grant.token) is None
+
+        # The child role document carried that scoped token, never admin.
+        roles = list(artifact_root.rglob("executions/*/runner_role.json"))
+        assert roles
+        role_config = json.loads(roles[-1].read_text(encoding="utf-8"))
+        assert role_config["backend"]["api_token"] == grant.token
+        assert role_config["backend"]["backend_url"] == instance.backend_url
     finally:
         database.dispose()

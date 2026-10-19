@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -30,6 +31,19 @@ from agent_manager.storage import AgentProfileRepository, Database, TaskReposito
 from agent_manager.task_worker import TaskExecutionWorker
 
 from .conftest import upgrade_to_head
+
+
+class _RecordingPermissions(ExecutionPermissions):
+    """ExecutionPermissions that records every issued grant for assertions."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.issued: list[Any] = []
+
+    def issue(self, **kwargs: Any) -> Any:
+        grant = super().issue(**kwargs)
+        self.issued.append(grant)
+        return grant
 
 
 def _admin_client(migrated_db: Path, permissions: ExecutionPermissions) -> TestClient:
@@ -288,7 +302,7 @@ def test_worker_issues_scoped_backend_and_never_admin_token(
             workspace=str(tmp_path),
             agent_id="scout",
         )
-        permissions = ExecutionPermissions()
+        permissions = _RecordingPermissions()
         worker = TaskExecutionWorker(
             db,
             tmp_path / "artifacts",
@@ -313,11 +327,15 @@ def test_worker_issues_scoped_backend_and_never_admin_token(
         backend = config["backend"]
         assert backend["backend_url"] == instance.backend_url
         scoped_token = backend["api_token"]
-        grant = permissions.resolve(scoped_token)
-        assert grant is not None
+        assert permissions.issued, "worker must issue a scoped execution grant"
+        grant = permissions.issued[-1]
+        assert grant.token == scoped_token
         assert grant.agent_id == "scout"
         assert grant.actions == frozenset({"tasks.read"})
         assert f"task:{task.id}" in grant.resources
+        # The grant is revoked when the execution finishes; revocation never
+        # reopens the protected API because auth mode is fixed at startup.
+        assert permissions.resolve(scoped_token) is None
         # The administrative token value was never embedded in the child
         # role configuration or credential document.
         assert "administrative-token" not in role_text

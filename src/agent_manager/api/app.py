@@ -293,10 +293,14 @@ class BearerAuthMiddleware:
       the granted scope. The exact grant is stored in
       ``scope['state']['execution_grant']`` for downstream handlers.
 
-    ``/health`` and OPTIONS requests are always public. When neither an
-    administrative token nor any execution grant is configured the
-    middleware stays in open mode so existing development and test setups
-    keep working.
+    ``/health`` and OPTIONS requests are always public.
+
+    The authenticated/``require_auth`` decision is fixed when the middleware
+    is built and never changes with the number of live execution grants.
+    Issuing the first execution token must not silently switch a running
+    service from anonymous to protected, and revoking the last token must not
+    reopen it. Callers that pass neither administrative tokens nor an
+    execution registry stay in explicit open development mode.
     """
 
     def __init__(
@@ -304,10 +308,18 @@ class BearerAuthMiddleware:
         app: ASGIApp,
         allowed_tokens: set[str],
         permissions: ExecutionPermissions | None = None,
+        *,
+        require_auth: bool | None = None,
     ) -> None:
         self.app = app
-        self.allowed_tokens = allowed_tokens
+        self.allowed_tokens = set(allowed_tokens)
         self.permissions = permissions
+        # A stable per-instance decision, independent of the current grant
+        # count. Callers may pass it explicitly; otherwise authentication is
+        # on whenever any credential source is configured.
+        if require_auth is None:
+            require_auth = bool(self.allowed_tokens) or permissions is not None
+        self.require_auth = bool(require_auth)
 
     async def __call__(
         self,
@@ -319,10 +331,10 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Open mode only while nothing is configured to authenticate against.
-        if not self.allowed_tokens and not (
-            self.permissions is not None and self.permissions.enabled
-        ):
+        # Explicit open development mode: no administrative token and no
+        # execution registry were configured. The decision is fixed for the
+        # lifetime of the middleware, so it never depends on grant count.
+        if not self.require_auth:
             await self.app(scope, receive, send)
             return
 
@@ -650,20 +662,33 @@ def create_app(
             supplied or configured via ``AGENT_MANAGER_API_TOKENS``, all
             endpoints except ``/health`` require a valid Bearer token.
         permissions: Optional execution-scope registry shared with the
-            runtime. When omitted a fresh registry is created and exposed as
-            ``app.state.permissions``. Execution tokens are accepted only
-            inside their granted action/resource scope.
+            runtime. Supplying a registry also protects the API from
+            startup, before any execution token has been issued; when
+            omitted a fresh registry is created and exposed as
+            ``app.state.permissions`` but the app stays in explicit open
+            development mode unless administrative tokens are configured.
+            Execution tokens are accepted only inside their granted
+            action/resource scope.
     """
     url = _resolve_database_url(database_url)
     resolved_tokens = _resolve_api_tokens(api_tokens)
+    permissions_provided = permissions is not None
     resolved_permissions = (
         permissions if permissions is not None else ExecutionPermissions()
     )
+    # Stable per-instance auth decision. An explicitly supplied execution
+    # registry (the unified service always supplies one) protects the API
+    # from startup through grant revocation, even before any scoped token
+    # exists and after the last one is gone. Only a standalone app with no
+    # registry and no administrative token remains in explicit open
+    # development mode.
+    require_auth = bool(resolved_tokens) or permissions_provided
 
     app = FastAPI(title="Agent Manager", version="0.1.0", lifespan=_lifespan)
     app.state.database_url = url
     app.state.api_tokens = resolved_tokens
     app.state.permissions = resolved_permissions
+    app.state.require_auth = require_auth
     app.state.knowledge_base = knowledge_base
 
     # Added inner-to-outer: BearerAuth is inner to RequestCorrelation
@@ -671,6 +696,7 @@ def create_app(
         BearerAuthMiddleware,
         allowed_tokens=resolved_tokens,
         permissions=resolved_permissions,
+        require_auth=require_auth,
     )
     app.add_middleware(RequestCorrelationMiddleware)
     app.add_middleware(UnhandledExceptionMiddleware)
