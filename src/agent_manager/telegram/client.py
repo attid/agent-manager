@@ -236,3 +236,96 @@ class BackendClient:
 
     async def get_turn(self, turn_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/turns/{turn_id}")
+
+    # -- Operations and analysis --
+
+    async def submit_operation(
+        self,
+        kind: str,
+        *,
+        target_id: str | None = None,
+        input: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a durable operation and return its record.
+
+        Submission alone is not a result: the returned ``status`` may still be
+        ``pending``. Callers inspect ``get_operation`` for the outcome.
+        """
+        payload: dict[str, Any] = {
+            "kind": kind,
+            "input": input or {},
+            "metadata": metadata or {},
+        }
+        if target_id is not None:
+            payload["target_id"] = target_id
+        if idempotency_key is not None:
+            payload["idempotency_key"] = idempotency_key
+        return await self._request("POST", "/operations", json=payload)
+
+    async def trigger_analysis(
+        self, task_id: str, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        """Submit the durable ``analysis`` operation for a task."""
+        return await self.submit_operation(
+            "analysis",
+            target_id=task_id,
+            input={},
+            idempotency_key=idempotency_key,
+        )
+
+    async def get_operation(self, operation_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/operations/{operation_id}")
+
+    async def list_analysis_reports(
+        self, task_id: str
+    ) -> list[dict[str, Any]]:
+        return await self._request("GET", f"/tasks/{task_id}/analysis")
+
+    async def get_analysis_report(self, report_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/analysis/{report_id}")
+
+    async def list_report_recommendations(
+        self, report_id: str
+    ) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET", f"/analysis/{report_id}/recommendations"
+        )
+
+    async def list_recommendations(
+        self,
+        *,
+        task_id: str | None = None,
+        status: str | None = None,
+        target_kind: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if task_id is not None:
+            params["task_id"] = task_id
+        if status is not None:
+            params["status"] = status
+        if target_kind is not None:
+            params["target_kind"] = target_kind
+        return await self._request("GET", "/recommendations", params=params)
+
+    async def preview_recommendation(
+        self, recommendation_id: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET", f"/recommendations/{recommendation_id}"
+        )
+
+    async def approve_recommendation(
+        self, recommendation_id: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", f"/recommendations/{recommendation_id}/approve"
+        )
+
+    async def apply_recommendation(
+        self, recommendation_id: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", f"/recommendations/{recommendation_id}/apply"
+        )

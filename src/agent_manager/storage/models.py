@@ -437,3 +437,141 @@ class Operation(Base):
     meta: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSON, nullable=False, default=dict, server_default="{}"
     )
+
+
+class AnalysisReport(Base):
+    """A structured, read-only analysis of one task's execution evidence.
+
+    The report is produced by the ``analysis`` operation executor after it
+    runs the analyzer profile against a bounded evidence package. It stores
+    the analyzer identity and pinned revision, a human-readable ``summary``,
+    the full structured ``report`` JSON and the ``evidence`` package the
+    analyzer was given. Recommendations reference evidence ids from that
+    package, so every proposal stays traceable to observed facts.
+
+    A report is only written when the analyzer returned a well-formed
+    structured document. A failed analyzer run fails the owning operation and
+    writes no report, so a missing report is never mistaken for a clean one.
+    """
+
+    __tablename__ = "analysis_reports"
+    __table_args__ = (
+        UniqueConstraint("id", name="uq_analysis_reports_id"),
+        Index("ix_analysis_reports_task", "task_id"),
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id: Mapped[str] = mapped_column(String, nullable=False)
+    task_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    profile_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report: Mapped[dict[str, Any]] = mapped_column(
+        "report", JSON, nullable=False, default=dict, server_default="{}"
+    )
+    evidence: Mapped[dict[str, Any]] = mapped_column(
+        "evidence", JSON, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )
+
+
+#: Recommendation statuses are protocol values for the approve/apply workflow.
+#: ``proposed`` -> ``approved`` -> ``applied`` is the only successful path.
+#: ``conflict`` and ``failed`` are terminal until an operator regenerates the
+#: recommendation; they are never silently retried into ``applied``.
+RECOMMENDATION_STATUS_PROPOSED = "proposed"
+RECOMMENDATION_STATUS_APPROVED = "approved"
+RECOMMENDATION_STATUS_APPLIED = "applied"
+RECOMMENDATION_STATUS_CONFLICT = "conflict"
+RECOMMENDATION_STATUS_FAILED = "failed"
+RECOMMENDATION_STATUSES = frozenset(
+    {
+        RECOMMENDATION_STATUS_PROPOSED,
+        RECOMMENDATION_STATUS_APPROVED,
+        RECOMMENDATION_STATUS_APPLIED,
+        RECOMMENDATION_STATUS_CONFLICT,
+        RECOMMENDATION_STATUS_FAILED,
+    }
+)
+
+
+class Recommendation(Base):
+    """An evidence-linked, approval-gated change proposal.
+
+    A recommendation names the exact target (an agent profile, a knowledge
+    project summary or knowledge component rules) and the revision or content
+    hash the analyzer observed. Generation never mutates a target: the
+    proposal is durable data until a separate explicit approval and apply call
+    re-checks the target and surfaces a stale conflict instead of overwriting
+    newer content.
+    """
+
+    __tablename__ = "recommendations"
+    __table_args__ = (
+        UniqueConstraint("id", name="uq_recommendations_id"),
+        Index("ix_recommendations_report", "report_id"),
+        Index("ix_recommendations_task", "task_id"),
+        Index("ix_recommendations_status", "status"),
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id: Mapped[str] = mapped_column(String, nullable=False)
+    report_id: Mapped[str] = mapped_column(
+        String, ForeignKey("analysis_reports.id"), nullable=False
+    )
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    target_kind: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    target_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_content_hash: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    proposed_content: Mapped[Any] = mapped_column(JSON, nullable=False)
+    diff: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        default=RECOMMENDATION_STATUS_PROPOSED,
+        server_default=RECOMMENDATION_STATUS_PROPOSED,
+    )
+    applied_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    applied_content_hash: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    apply_detail: Mapped[dict[str, Any] | None] = mapped_column(
+        "apply_detail", JSON, nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )

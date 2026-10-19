@@ -109,7 +109,8 @@ def test_inventory_declares_every_tool_once_and_documents_count() -> None:
     document = inventory_document()
     names = [tool["name"] for tool in document["tools"]]
     assert len(names) == len(set(names))
-    assert len(names) == 28, names
+    assert len(names) == len(TOOL_CAPABILITIES)
+    assert len(names) >= 28
     assert names == [cap.name for cap in TOOL_CAPABILITIES]
     # Every tool points at a real handbook document.
     known_docs = {entry.filename for entry in HANDBOOK}

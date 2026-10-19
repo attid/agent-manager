@@ -676,9 +676,13 @@ async def test_cmd_analyze(
 
     assert msg.answer.called
     text = msg.answer.call_args[0][0]
-    assert "Анализ сессии задачи" in text
-    assert "Token verified successfully." in text
-    assert "system-log-analyzer" in text
+    # /analyze now submits a durable analysis operation and reports its real
+    # status. With no worker running in this test it is pending, so the reply
+    # must not fabricate analyzer findings or reuse the developer summary.
+    assert "Анализ задачи" in text
+    assert "запущен" in text
+    assert "Сессия выполнена успешно" not in text
+    assert "Token verified successfully." not in text
 
 
 @sync_test

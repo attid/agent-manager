@@ -11,6 +11,11 @@ The ``review`` executor (T03) launches the independent, read-only
 :mod:`agent_manager.review_executor` path. It never reruns the developer and
 never approves by absence of findings: a nonzero exit, a failed Runner status,
 an empty/malformed report or an absent verdict fails the operation.
+
+The ``analysis`` executor (T04) is registered here through the durable worker
+seam and delegates to :mod:`agent_manager.analysis`. Until an executor is
+registered such operations fail visibly with an unknown-executor diagnostic
+rather than pretending to succeed.
 """
 
 from __future__ import annotations
@@ -20,8 +25,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from .analysis import analysis_operation_handler
 from .git_engine import GitEngine
 from .operation_worker import (
+    OPERATION_KIND_ANALYSIS,
     OPERATION_KIND_GIT_COMMIT_PUSH,
     OPERATION_KIND_GIT_ROLLBACK,
     OPERATION_KIND_REVIEW,
@@ -256,18 +263,19 @@ def review_operation_handler(context: OperationContext) -> dict[str, Any]:
 
 
 def register_default_operation_handlers(worker: OperationWorker) -> None:
-    """Register the built-in executors on ``worker``.
+    """Register the built-in Git, review and analysis executors on ``worker``.
 
-    Called from the runner composition root. Review is registered here; the
-    analysis executor remains an explicit T04 seam so an unregistered
-    analysis operation still fails visibly.
+    Called from the runner composition root. A kind with no registered
+    executor still fails visibly with an unknown-executor diagnostic.
     """
     worker.register(OPERATION_KIND_GIT_COMMIT_PUSH, git_commit_push_handler)
     worker.register(OPERATION_KIND_GIT_ROLLBACK, git_rollback_handler)
     worker.register(OPERATION_KIND_REVIEW, review_operation_handler)
+    worker.register(OPERATION_KIND_ANALYSIS, analysis_operation_handler)
 
 
 __all__ = [
+    "analysis_operation_handler",
     "git_commit_push_handler",
     "git_rollback_handler",
     "register_default_operation_handlers",

@@ -48,6 +48,11 @@ from sqlalchemy.engine import make_url
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import bind_log_context
+from ..analysis import (
+    AnalysisError,
+    RecommendationConflictError,
+    RecommendationService,
+)
 from ..permissions import (
     ExecutionGrant,
     ExecutionPermissions,
@@ -67,6 +72,7 @@ from ..storage import (
     AgentProfileNotFoundError,
     AgentProfileRepository,
     AgentProfileRevisionConflictError,
+    AnalysisRepository,
     ConversationNotFoundError,
     ConversationRepository,
     Database,
@@ -76,6 +82,8 @@ from ..storage import (
     MessageConflictError,
     OperationConflictError,
     OperationRepository,
+    RecommendationNotFoundError,
+    RecommendationStateError,
     TaskNotFoundError,
     TaskRepository,
 )
@@ -83,6 +91,7 @@ from .schemas import (
     AgentCreate,
     AgentPatch,
     AgentRead,
+    AnalysisReportRead,
     ConversationCreate,
     ConversationRead,
     MessageAppendResponse,
@@ -90,6 +99,8 @@ from .schemas import (
     MessageRead,
     OperationRead,
     OperationSubmit,
+    RecommendationPreviewRead,
+    RecommendationRead,
     TaskCreate,
     TaskImportRequest,
     TaskImportResponse,
@@ -98,11 +109,14 @@ from .schemas import (
     TurnCreate,
     TurnRead,
     agent_to_read,
+    analysis_report_to_read,
     conversation_to_read,
     import_item_to_record,
     message_append_to_response,
     message_to_read,
     operation_to_read,
+    recommendation_preview_to_read,
+    recommendation_to_read,
     task_to_read,
     turn_to_read,
 )
@@ -134,6 +148,9 @@ _REQUIRED_TABLES = (
 # assignment-migration guard so a database at 0005 still reports the specific
 # missing ``tasks.agent_id`` column instead of the new table.
 _REQUIRED_OPERATION_TABLES = ("operations",)
+
+# Analysis reports and recommendations arrived after the operations table.
+_REQUIRED_ANALYSIS_TABLES = ("analysis_reports", "recommendations")
 
 _MIGRATION_HINT = (
     "Run the migration first: "
@@ -645,11 +662,24 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             f"{', '.join(sorted(missing_operations))}. "
             + _MIGRATION_HINT.format(url=url)
         )
+    missing_analysis = {
+        name
+        for name in _REQUIRED_ANALYSIS_TABLES
+        if name not in existing_tables
+    }
+    if missing_analysis:
+        database.dispose()
+        raise RuntimeError(
+            f"Database {url} is missing required tables: "
+            f"{', '.join(sorted(missing_analysis))}. "
+            + _MIGRATION_HINT.format(url=url)
+        )
     app.state.database = database
     app.state.repository = TaskRepository(database)
     app.state.conversation_repository = ConversationRepository(database)
     app.state.agent_repository = AgentProfileRepository(database)
     app.state.operation_repository = OperationRepository(database)
+    app.state.analysis_repository = AnalysisRepository(database)
     app.state.turn_processor = TurnProcessor(database)
     try:
         # A killed or restarted process leaves turns ``running`` with no live
@@ -782,6 +812,17 @@ def create_app(
 
     def get_operation_repository(request: Request) -> OperationRepository:
         return request.app.state.operation_repository
+
+    def get_analysis_repository(request: Request) -> AnalysisRepository:
+        return request.app.state.analysis_repository
+
+    def get_recommendation_service(
+        request: Request,
+    ) -> RecommendationService:
+        return RecommendationService(
+            request.app.state.database,
+            knowledge_base=getattr(request.app.state, "knowledge_base", None),
+        )
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -1174,6 +1215,151 @@ def create_app(
                 detail=f"operation not found: {operation_id}",
             )
         return operation_to_read(operation)
+
+    @app.get(
+        "/tasks/{task_id}/analysis",
+        response_model=list[AnalysisReportRead],
+    )
+    def list_task_analysis(
+        task_id: str,
+        repository: AnalysisRepository = Depends(get_analysis_repository),
+    ) -> list[AnalysisReportRead]:
+        """Return the task's analysis reports, newest first."""
+        return [
+            analysis_report_to_read(report)
+            for report in repository.list_reports(task_id=task_id)
+        ]
+
+    @app.get("/analysis/{report_id}", response_model=AnalysisReportRead)
+    def get_analysis_report(
+        report_id: str,
+        repository: AnalysisRepository = Depends(get_analysis_repository),
+    ) -> AnalysisReportRead:
+        """Return one persisted analysis report, including its evidence."""
+        report = repository.get_report(report_id)
+        if report is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"analysis report not found: {report_id}",
+            )
+        return analysis_report_to_read(report)
+
+    @app.get(
+        "/analysis/{report_id}/recommendations",
+        response_model=list[RecommendationRead],
+    )
+    def list_report_recommendations(
+        report_id: str,
+        repository: AnalysisRepository = Depends(get_analysis_repository),
+    ) -> list[RecommendationRead]:
+        """Return the evidence-linked recommendations of one report."""
+        if repository.get_report(report_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"analysis report not found: {report_id}",
+            )
+        return [
+            recommendation_to_read(item)
+            for item in repository.list_recommendations(report_id=report_id)
+        ]
+
+    @app.get(
+        "/recommendations", response_model=list[RecommendationRead]
+    )
+    def list_recommendations(
+        task_id: str | None = Query(default=None),
+        status_filter: str | None = Query(default=None, alias="status"),
+        target_kind: str | None = Query(default=None),
+        limit: int | None = Query(default=None),
+        offset: int = Query(default=0),
+        repository: AnalysisRepository = Depends(get_analysis_repository),
+    ) -> list[RecommendationRead]:
+        """List recommendations, optionally filtered by task/status/kind."""
+        items = repository.list_recommendations(
+            task_id=task_id,
+            status=status_filter,
+            target_kind=target_kind,
+            limit=limit,
+            offset=offset,
+        )
+        return [recommendation_to_read(item) for item in items]
+
+    @app.get(
+        "/recommendations/{recommendation_id}",
+        response_model=RecommendationPreviewRead,
+    )
+    def preview_recommendation(
+        recommendation_id: str,
+        service: RecommendationService = Depends(get_recommendation_service),
+    ) -> RecommendationPreviewRead:
+        """Preview a recommendation and its current target state.
+
+        ``would_conflict`` reports whether the observed revision/content hash
+        still matches; a stale proposal is never applied by this read.
+        """
+        try:
+            preview = service.preview(recommendation_id)
+        except RecommendationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        return recommendation_preview_to_read(preview)
+
+    @app.post(
+        "/recommendations/{recommendation_id}/approve",
+        response_model=RecommendationRead,
+    )
+    def approve_recommendation(
+        recommendation_id: str,
+        service: RecommendationService = Depends(get_recommendation_service),
+    ) -> RecommendationRead:
+        """Explicitly approve a ``proposed`` recommendation.
+
+        Approval records intent only; it never mutates the target. Applying is
+        a separate call that re-checks the observed revision/content hash.
+        """
+        try:
+            recommendation = service.approve(recommendation_id)
+        except RecommendationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except RecommendationStateError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(error)
+            ) from error
+        return recommendation_to_read(recommendation)
+
+    @app.post(
+        "/recommendations/{recommendation_id}/apply",
+        response_model=RecommendationRead,
+    )
+    def apply_recommendation(
+        recommendation_id: str,
+        service: RecommendationService = Depends(get_recommendation_service),
+    ) -> RecommendationRead:
+        """Apply an approved recommendation after re-checking the target.
+
+        A stale target returns ``409 Conflict`` and is persisted ``conflict``;
+        newer content is never overwritten. A non-approved recommendation is
+        also a ``409`` state error.
+        """
+        try:
+            recommendation = service.apply(recommendation_id)
+        except RecommendationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except (RecommendationConflictError, RecommendationStateError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(error)
+            ) from error
+        except AnalysisError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(error),
+            ) from error
+        return recommendation_to_read(recommendation)
 
     @app.post(
         "/agents",

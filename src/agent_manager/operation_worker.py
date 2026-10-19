@@ -100,6 +100,10 @@ class OperationInstanceContext:
     instance: InstanceContext | None = None
     permissions: ExecutionPermissions | None = None
     runtime_defaults: Any | None = None
+    #: Optional injected analyzer runner for the ``analysis`` executor. When
+    #: ``None`` the executor builds the production Pi-backed runner from this
+    #: context. The runner itself stays read-only.
+    analyzer_runner: Any | None = None
 
 
 @dataclasses.dataclass(frozen=True)

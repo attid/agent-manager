@@ -12,7 +12,17 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..storage.models import AgentProfile, Conversation, Message, Operation, Task, Turn
+from ..analysis import RecommendationPreview
+from ..storage.models import (
+    AgentProfile,
+    AnalysisReport,
+    Conversation,
+    Message,
+    Operation,
+    Recommendation,
+    Task,
+    Turn,
+)
 
 
 class TaskCreate(BaseModel):
@@ -471,3 +481,117 @@ def operation_to_read(operation: Operation) -> OperationRead:
         metadata=operation.meta or {},
     )
 
+
+
+class AnalysisReportRead(BaseModel):
+    """A structured, read-only analysis report returned by the API.
+
+    ``report`` is the validated analyzer document; ``evidence`` is the exact
+    bounded-by-relevance package the analyzer was given, so a reader can trace
+    every finding back to observed task data.
+    """
+
+    id: str
+    task_id: str
+    agent_id: str
+    profile_revision: int | None = None
+    summary: str | None = None
+    report: dict[str, Any]
+    evidence: dict[str, Any]
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+def analysis_report_to_read(report: AnalysisReport) -> AnalysisReportRead:
+    """Convert a storage :class:`AnalysisReport` into the API representation."""
+    return AnalysisReportRead(
+        id=report.id,
+        task_id=report.task_id,
+        agent_id=report.agent_id,
+        profile_revision=report.profile_revision,
+        summary=report.summary,
+        report=report.report,
+        evidence=report.evidence,
+        created_at=report.created_at,
+        updated_at=report.updated_at,
+    )
+
+
+class RecommendationRead(BaseModel):
+    """An evidence-linked recommendation and its workflow status.
+
+    ``status`` is a workflow value (proposed/approved/applied/conflict/
+    failed), separate from the owning operation's execution status.
+    ``target_revision``/``target_content_hash`` are the observed state at
+    proposal time; ``applied_*`` describe the state an apply wrote.
+    """
+
+    id: str
+    report_id: str
+    task_id: str | None = None
+    target_kind: str
+    target_id: str
+    target_revision: int | None = None
+    target_content_hash: str | None = None
+    title: str
+    rationale: str
+    evidence: list[Any]
+    proposed_content: Any
+    diff: str | None = None
+    status: str
+    applied_revision: int | None = None
+    applied_content_hash: str | None = None
+    apply_detail: dict[str, Any] | None = None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+def recommendation_to_read(recommendation: Recommendation) -> RecommendationRead:
+    """Convert a storage :class:`Recommendation` into the API representation."""
+    return RecommendationRead(
+        id=recommendation.id,
+        report_id=recommendation.report_id,
+        task_id=recommendation.task_id,
+        target_kind=recommendation.target_kind,
+        target_id=recommendation.target_id,
+        target_revision=recommendation.target_revision,
+        target_content_hash=recommendation.target_content_hash,
+        title=recommendation.title,
+        rationale=recommendation.rationale,
+        evidence=recommendation.evidence,
+        proposed_content=recommendation.proposed_content,
+        diff=recommendation.diff,
+        status=recommendation.status,
+        applied_revision=recommendation.applied_revision,
+        applied_content_hash=recommendation.applied_content_hash,
+        apply_detail=recommendation.apply_detail,
+        created_at=recommendation.created_at,
+        updated_at=recommendation.updated_at,
+    )
+
+
+class RecommendationPreviewRead(BaseModel):
+    """A recommendation plus its current target state and conflict check."""
+
+    recommendation: RecommendationRead
+    target_exists: bool
+    current_revision: int | None = None
+    current_content_hash: str | None = None
+    current_content: str | None = None
+    would_conflict: bool
+    conflict_reason: str | None = None
+
+
+def recommendation_preview_to_read(
+    preview: RecommendationPreview,
+) -> RecommendationPreviewRead:
+    """Convert an analysis preview into the API representation."""
+    return RecommendationPreviewRead(
+        recommendation=recommendation_to_read(preview.recommendation),
+        target_exists=preview.target_exists,
+        current_revision=preview.current_revision,
+        current_content_hash=preview.current_content_hash,
+        current_content=preview.current_content,
+        would_conflict=preview.would_conflict,
+        conflict_reason=preview.conflict_reason,
+    )

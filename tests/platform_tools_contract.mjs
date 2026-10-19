@@ -91,4 +91,24 @@ assert.notEqual(analysis.data.id, review.data.id);
 const fetchedOperation = await fetch(`${backend}/operations/${review.data.id}`).then(r => r.json());
 assert.equal(fetchedOperation.status, 'pending');
 assert.equal(fetchedOperation.result, null);
+
+// Analysis/recommendation workflow tools route through the analysis API.
+const emptyReports = await call('list_analysis_reports', { task_id: task.data.id });
+assert.equal(emptyReports.status, 'ok', JSON.stringify(emptyReports));
+assert.deepEqual(emptyReports.data, []);
+const emptyRecommendations = await call('list_recommendations', { task_id: task.data.id });
+assert.equal(emptyRecommendations.status, 'ok', JSON.stringify(emptyRecommendations));
+assert.deepEqual(emptyRecommendations.data, []);
+const missingReport = await call('get_analysis_report', { report_id: 'missing' });
+assert.equal(missingReport.status, 'failed');
+assert.equal(missingReport.http_status, 404);
+const missingPreview = await call('preview_recommendation', { recommendation_id: 'missing' });
+assert.equal(missingPreview.status, 'failed');
+assert.equal(missingPreview.http_status, 404);
+const missingApprove = await call('approve_recommendation', { recommendation_id: 'missing' });
+assert.equal(missingApprove.status, 'failed');
+assert.equal(missingApprove.http_status, 404);
+const missingApply = await call('apply_recommendation', { recommendation_id: 'missing' });
+assert.equal(missingApply.status, 'failed');
+assert.equal(missingApply.http_status, 404);
 console.log('Synchronous profile create/update, revision conflict, task routing, workspace preflight, durable trigger submission: passed.');

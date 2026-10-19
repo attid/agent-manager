@@ -360,7 +360,9 @@ class KnowledgeBase:
             "update_component_rules", "openviking_search", "openviking_read",
             "resolve_workspace", "list_tasks", "get_task", "create_task", "update_task", "get_task_logs", "resume_task_session",
             "list_skills", "install_skill", "create_skill",
-            "trigger_review", "trigger_commit_push", "trigger_rollback", "trigger_analysis"
+            "trigger_review", "trigger_commit_push", "trigger_rollback", "trigger_analysis",
+            "list_analysis_reports", "get_analysis_report", "list_recommendations",
+            "preview_recommendation", "approve_recommendation", "apply_recommendation",
         ]
 
         secretary_prompt = (
@@ -860,6 +862,15 @@ class KnowledgeBase:
         summary_file.write_text(content.strip() + "\n", encoding="utf-8")
         self.git_commit(f"Update summary for project: {project_name}")
         return summary_file
+
+    def update_component_rules(self, component: str, rules: str) -> Path:
+        """Create or update a component's rules.md in the knowledge base and commit."""
+        component_dir = self.components_dir / component
+        component_dir.mkdir(parents=True, exist_ok=True)
+        rules_file = component_dir / "rules.md"
+        rules_file.write_text(rules.strip() + "\n", encoding="utf-8")
+        self.git_commit(f"Update rules for component: {component}")
+        return rules_file
 
     def resolve_file(self, query_or_path: str) -> Path | None:
         """Resolve a query or file path to an existing file in knowledge base.

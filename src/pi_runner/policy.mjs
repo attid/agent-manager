@@ -758,5 +758,87 @@ export default function policy(pi) {
       return toolResult(await submitOperation("analysis", params.task_id.trim(), {}, params.idempotency_key, toolCallId));
     }
   });
+
+  // 28. Custom Tool: list_analysis_reports
+  pi.registerTool({
+    name: "list_analysis_reports",
+    label: "List Analysis Reports",
+    description: "List persisted analysis reports for a task, newest first. Read the report to see its evidence and recommendations.",
+    parameters: Type.Object({
+      task_id: Type.String({ description: "Task ID whose analysis reports are listed" })
+    }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id.trim())}/analysis`));
+    }
+  });
+
+  // 29. Custom Tool: get_analysis_report
+  pi.registerTool({
+    name: "get_analysis_report",
+    label: "Get Analysis Report",
+    description: "Read one persisted analysis report, including its evidence package and structured findings.",
+    parameters: Type.Object({
+      report_id: Type.String({ description: "Analysis report ID from trigger_analysis or list_analysis_reports" })
+    }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("GET", `/analysis/${encodeURIComponent(params.report_id.trim())}`));
+    }
+  });
+
+  // 30. Custom Tool: list_recommendations
+  pi.registerTool({
+    name: "list_recommendations",
+    label: "List Recommendations",
+    description: "List evidence-linked recommendations, optionally filtered by task and status. Statuses: proposed, approved, applied, conflict, failed.",
+    parameters: Type.Object({
+      task_id: Type.Optional(Type.String({ description: "Only recommendations for this task" })),
+      status: Type.Optional(Type.String({ description: "Only this workflow status" }))
+    }),
+    async execute(toolCallId, params) {
+      const query = new URLSearchParams();
+      if (params.task_id) query.set("task_id", params.task_id.trim());
+      if (params.status) query.set("status", params.status.trim());
+      return toolResult(await backendRequest("GET", `/recommendations?${query.toString()}`));
+    }
+  });
+
+  // 31. Custom Tool: preview_recommendation
+  pi.registerTool({
+    name: "preview_recommendation",
+    label: "Preview Recommendation",
+    description: "Read a recommendation with its current target state and whether applying it would conflict. Read-only; never mutates the target.",
+    parameters: Type.Object({
+      recommendation_id: Type.String({ description: "Recommendation ID" })
+    }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("GET", `/recommendations/${encodeURIComponent(params.recommendation_id.trim())}`));
+    }
+  });
+
+  // 32. Custom Tool: approve_recommendation
+  pi.registerTool({
+    name: "approve_recommendation",
+    label: "Approve Recommendation",
+    description: "Explicitly approve a proposed recommendation after the user agreed. Approval records intent only and never changes the target; apply is a separate call.",
+    parameters: Type.Object({
+      recommendation_id: Type.String({ description: "Recommendation ID" })
+    }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("POST", `/recommendations/${encodeURIComponent(params.recommendation_id.trim())}/approve`));
+    }
+  });
+
+  // 33. Custom Tool: apply_recommendation
+  pi.registerTool({
+    name: "apply_recommendation",
+    label: "Apply Recommendation",
+    description: "Apply an approved recommendation. The server re-checks the observed revision/content hash and returns conflict instead of overwriting newer content.",
+    parameters: Type.Object({
+      recommendation_id: Type.String({ description: "Recommendation ID previously approved" })
+    }),
+    async execute(toolCallId, params) {
+      return toolResult(await backendRequest("POST", `/recommendations/${encodeURIComponent(params.recommendation_id.trim())}/apply`));
+    }
+  });
 }
 

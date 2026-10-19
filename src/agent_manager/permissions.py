@@ -76,6 +76,8 @@ SKILLS_READ = "skills.read"
 SKILLS_WRITE = "skills.write"
 REVIEW_TRIGGER = "review.trigger"
 ANALYSIS_TRIGGER = "analysis.trigger"
+ANALYSIS_READ = "analysis.read"
+ANALYSIS_APPROVE = "analysis.approve"
 GIT_ACTIONS = "git.actions"
 
 #: Action required to submit each durable operation kind. The generic
@@ -143,6 +145,12 @@ ACTIONS_FOR_TOOLS: Mapping[str, str] = {
     "trigger_analysis": ANALYSIS_TRIGGER,
     "trigger_commit_push": GIT_ACTIONS,
     "trigger_rollback": GIT_ACTIONS,
+    "list_analysis_reports": ANALYSIS_READ,
+    "get_analysis_report": ANALYSIS_READ,
+    "list_recommendations": ANALYSIS_READ,
+    "preview_recommendation": ANALYSIS_READ,
+    "approve_recommendation": ANALYSIS_APPROVE,
+    "apply_recommendation": ANALYSIS_APPROVE,
 }
 
 #: Actions that require broad (wildcard-resource) authority because they
@@ -156,6 +164,7 @@ MANAGEMENT_ACTIONS: frozenset[str] = frozenset(
         GIT_ACTIONS,
         REVIEW_TRIGGER,
         ANALYSIS_TRIGGER,
+        ANALYSIS_APPROVE,
     }
 )
 
@@ -275,6 +284,13 @@ _ROUTE_RULES: tuple[tuple[str, str, str, str | None], ...] = (
         "conversation",
     ),
     ("GET", "/turns/{turn_id}", TURNS_READ, "turn"),
+    ("GET", "/tasks/{task_id}/analysis", ANALYSIS_READ, "task"),
+    ("GET", "/analysis/{report_id}", ANALYSIS_READ, None),
+    ("GET", "/analysis/{report_id}/recommendations", ANALYSIS_READ, None),
+    ("GET", "/recommendations", ANALYSIS_READ, None),
+    ("GET", "/recommendations/{recommendation_id}", ANALYSIS_READ, None),
+    ("POST", "/recommendations/{recommendation_id}/approve", ANALYSIS_APPROVE, None),
+    ("POST", "/recommendations/{recommendation_id}/apply", ANALYSIS_APPROVE, None),
     ("POST", "/agents", AGENTS_WRITE, None),
     ("GET", "/agents", AGENTS_READ, None),
     ("GET", "/agents/{agent_id}", AGENTS_READ, "agent"),

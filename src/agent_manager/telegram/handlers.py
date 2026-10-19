@@ -157,6 +157,13 @@ async def cmd_analyze(
     message: Message,
     client: BackendClient,
 ) -> None:
+    """Submit a real analysis operation and show its actual report.
+
+    The command never invents findings: it submits the durable ``analysis``
+    operation, reads its stored status, and, when it succeeded, renders the
+    persisted report and its evidence-linked recommendations. Pending and
+    failed outcomes are shown truthfully.
+    """
     parts = (message.text or "").split(maxsplit=1)
     task_id = parts[1].strip() if len(parts) > 1 else None
 
@@ -175,22 +182,88 @@ async def cmd_analyze(
         await message.answer(f"❌ Задача <code>{html.escape(task_id)}</code> не найдена.", parse_mode="HTML")
         return
 
-    title = task.get("title", "")
-    meta = task.get("meta") or task.get("metadata") or {}
-    summary = task.get("summary") or meta.get("summary", "")
-    prov = meta.get("provenance") or {}
-    changed_files = task.get("changed_files") or meta.get("changed_files") or []
+    try:
+        operation = await client.trigger_analysis(task_id)
+        operation_id = operation.get("id")
+        if operation_id:
+            # Submission alone is not a result; read the stored status.
+            operation = await client.get_operation(operation_id)
+    except Exception as error:
+        await message.answer(
+            f"❌ Не удалось запустить анализ задачи "
+            f"<code>{html.escape(task_id)}</code>: "
+            f"<code>{html.escape(str(error))}</code>",
+            parse_mode="HTML",
+        )
+        return
 
-    findings = (
-        f"📊 <b>Анализ сессии задачи #{task_id}: {html.escape(title)}</b>\n\n"
-        f"• <b>Статус:</b> <code>{html.escape(task.get('status', ''))}</code>\n"
-        f"• <b>Изменено файлов:</b> {len(changed_files)}\n"
-        f"• <b>Модель:</b> <code>{html.escape(prov.get('model', 'pi-default'))}</code>\n"
-        f"• <b>Резюме разработчика:</b>\n<i>{html.escape(summary[:400])}</i>\n\n"
-        "💡 <b>Выводы анализатора (system-log-analyzer):</b>\n"
-        "Сессия выполнена успешно. Проверены затронутые компоненты. "
-        "Критического дефицита документации не выявлено."
+    title = task.get("title", "")
+    status = operation.get("status")
+    result = operation.get("result") or {}
+    operation_id = operation.get("id", operation_id)
+
+    if status in {"pending", "accepted", "running"}:
+        await message.answer(
+            f"⏳ <b>Анализ задачи #{html.escape(task_id)} запущен</b>\n"
+            f"Операция <code>{html.escape(str(operation_id))}</code> в статусе "
+            f"<code>{html.escape(str(status))}</code>. Отчёт появится после "
+            "завершения операции; повторный просмотр не запускает модель.",
+            parse_mode="HTML",
+        )
+        return
+
+    if status != "succeeded" or not result.get("report_id"):
+        error = operation.get("error") or "анализ не завершился успешно"
+        await message.answer(
+            f"❌ <b>Анализ задачи #{html.escape(task_id)} не удался</b>\n"
+            f"<code>{html.escape(str(error))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    report_id = str(result["report_id"])
+    try:
+        report = await client.get_analysis_report(report_id)
+        recommendations = await client.list_report_recommendations(report_id)
+    except Exception as error:
+        await message.answer(
+            f"❌ Не удалось прочитать отчёт анализа "
+            f"<code>{html.escape(report_id)}</code>: "
+            f"<code>{html.escape(str(error))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    summary = report.get("summary") or ""
+    agent_id = report.get("agent_id") or "system-log-analyzer"
+    revision = report.get("profile_revision")
+    lines = [
+        f"📊 <b>Анализ задачи #{html.escape(task_id)}: {html.escape(title)}</b>",
+        "",
+        f"• <b>Анализатор:</b> <code>{html.escape(str(agent_id))}</code>"
+        + (f" (rev {revision})" if revision is not None else ""),
+        f"• <b>Статус:</b> <code>{html.escape(str(task.get('status', '')))}</code>",
+        f"• <b>Резюме:</b>\n<i>{html.escape(summary[:800])}</i>",
+    ]
+    if recommendations:
+        lines.append("")
+        lines.append(f"💡 <b>Рекомендации ({len(recommendations)}):</b>")
+        for item in recommendations[:10]:
+            lines.append(
+                f"• <code>{html.escape(str(item.get('status', '')))}</code> "
+                f"{html.escape(str(item.get('target_kind', '')))}"
+                f":{html.escape(str(item.get('target_id', '')))}\n"
+                f"  {html.escape(str(item.get('title', '')))}"
+            )
+    else:
+        lines.append("")
+        lines.append("Без рекомендаций.")
+    lines.append("")
+    lines.append(
+        "Одобрение и применение — отдельные явные действия; "
+        f"отчёт <code>{html.escape(report_id)}</code>."
     )
+
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -201,7 +274,7 @@ async def cmd_analyze(
             ]
         ]
     )
-    await message.answer(findings, parse_mode="HTML", reply_markup=kb)
+    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
 
 
 # -- Callbacks --

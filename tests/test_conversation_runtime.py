@@ -176,8 +176,10 @@ def test_upgrade_from_0004_preserves_rows_and_adds_runtime(
         ).fetchall()
     finally:
         connection.close()
-    # The single head is 0007 after the durable operations table was added.
-    assert version == [("0007_operations",)]
+    # The single head moved to 0009 after analysis reports and
+    # recommendations were added; the assertion still verifies exactly one
+    # head row records the current schema.
+    assert version == [("0009_analysis",)]
 
     database = Database.from_path(db_path)
     try:
