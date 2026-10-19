@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from typing import Any
 
@@ -16,6 +17,14 @@ from .state import QueuedMessage, UserStateStorage
 from .transcription import DeepgramTranscriber
 
 logger = logging.getLogger(__name__)
+
+
+def secretary_error_summary(error: str) -> str:
+    """Keep technical tracebacks in the journal, not in the chat bubble."""
+    if "model_connection_error" in error:
+        return "Не удалось связаться с провайдером модели. Попробуйте повторить сообщение."
+    lines = error.strip().splitlines()
+    return html.escape(lines[-1] if lines else "Неизвестная ошибка выполнения.")
 
 
 class QueueProcessor:
@@ -321,11 +330,12 @@ class QueueProcessor:
                     state = self.storage.get_user_state(queued_msg.user_id)
                     if state.active_conversation_id == queued_msg.context_conversation_id:
                         self.storage.set_user_mode(queued_msg.user_id, "talk", conversation_id=None)
+                summary = secretary_error_summary(turn_error)
                 err_msg = (
-                    f"❌ <b>Ошибка секретаря:</b>\n{turn_error}\n\n"
+                    f"❌ <b>Ошибка секретаря:</b>\n{summary}\n\n"
                     "<i>Контекст диалога сброшен. Следующее сообщение начнёт новый разговор.</i>"
                     if is_talk
-                    else f"❌ Ошибка секретаря:\n{turn_error}"
+                    else f"❌ Ошибка секретаря:\n{summary}"
                 )
                 markup = talk_keyboard() if is_talk else None
                 if status_msg_id:

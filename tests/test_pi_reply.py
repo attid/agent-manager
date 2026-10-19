@@ -320,6 +320,25 @@ def test_nonzero_exit_raises_command_error(tmp_path: pathlib.Path) -> None:
     assert record.stderr_path.exists()
 
 
+def test_failed_process_exposes_safe_connection_error_category(tmp_path: pathlib.Path) -> None:
+    handler = _handler(tmp_path, mode="connection_error")
+    with pytest.raises(PiReplyCommandError) as caught:
+        handler(_turn_input())
+    assert caught.value.connection_error is True
+    assert "model_connection_error" in str(caught.value)
+    assert handler.last_execution.runner_status == "failed"
+    assert handler.last_execution.outcome == "command_error"
+
+
+def test_telegram_error_summary_hides_traceback_and_escapes_diagnostics() -> None:
+    from agent_manager.telegram.worker import secretary_error_summary
+
+    assert secretary_error_summary(
+        'Traceback\nFile "/private/artifacts"\nPiReplyCommandError: model_connection_error; see artifacts in /private'
+    ) == "Не удалось связаться с провайдером модели. Попробуйте повторить сообщение."
+    assert secretary_error_summary('Traceback\nValueError: invalid <name> & value') == "ValueError: invalid &lt;name&gt; &amp; value"
+
+
 def test_malformed_json_raises_protocol_error(
     tmp_path: pathlib.Path,
 ) -> None:

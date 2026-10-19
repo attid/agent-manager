@@ -219,14 +219,16 @@ class PiReplyCommandError(PiReplyError):
         artifact_dir: pathlib.Path,
         exit_code: int,
         turn_id: str | None = None,
+        connection_error: bool = False,
     ) -> None:
+        reason = "model_connection_error; " if connection_error else ""
         super().__init__(
-            f"pi runner exited with code {exit_code}; "
-            f"see artifacts in {artifact_dir}",
+            f"pi runner exited with code {exit_code}; {reason}see artifacts in {artifact_dir}",
             artifact_dir=artifact_dir,
             turn_id=turn_id,
         )
         self.exit_code = exit_code
+        self.connection_error = connection_error
 
 
 class PiReplyProtocolError(PiReplyError):
@@ -506,6 +508,13 @@ class PiReplyHandler:
         _write_text(stderr_path, stderr_text)
 
         if completed.returncode != 0:
+            try:
+                failed_result = _extract_result(stdout_text)
+            except ValueError:
+                failed_result = {}
+            # Classify the protocol error without copying raw output or
+            # potentially sensitive provider diagnostics into exceptions.
+            connection_error = "connection error" in str(failed_result.get("error", "")).lower()
             self._record(
                 run_id=run_id,
                 turn_input=turn_input,
@@ -519,13 +528,14 @@ class PiReplyHandler:
                 argv=argv,
                 started_at=started_at,
                 exit_code=completed.returncode,
-                runner_status=None,
+                runner_status=failed_result.get("status"),
                 outcome=OUTCOME_COMMAND_ERROR,
             )
             raise PiReplyCommandError(
                 artifact_dir=artifact_dir,
                 exit_code=completed.returncode,
                 turn_id=turn_input.turn_id,
+                connection_error=connection_error,
             )
 
         try:
