@@ -175,3 +175,12 @@ untracked; it is not part of this commit.
 - All `pending`/`partial` items above await T02I, T03, T04 and T05.
 - The handbook is English while several existing docs are Russian; no existing
   doc was rewritten, so the two coexist by design.
+
+## Integration note (T05I)
+
+The pending/partial items this snapshot labelled are implemented: T02I scoped
+execution permissions and stable auth, T03 review executor, T04
+analysis/recommendation lifecycle, and T05 machine-readable inventory, parity
+checks and discovery injection (now `src/agent_manager/capabilities.py` and
+`tests/test_capabilities.py`). `docs/handbook/*` and `llms.txt` were reconciled
+to the integrated behaviour. See `T05I-result.md`.

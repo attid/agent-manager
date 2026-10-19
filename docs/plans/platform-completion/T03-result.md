@@ -146,3 +146,11 @@ architecture-boundary violation (the 7 pre-existing violations are unchanged).
 - `OperationInstanceContext.runtime_defaults` is additive and read with
   `getattr`; T02I's permission integration must preserve or replace it when it
   reworks the instance context.
+
+## Integration note (T05I)
+
+T03 was integrated after T02I. `OperationInstanceContext` preserves
+`instance`, `permissions`, `runtime_defaults` and `analyzer_runner`
+together. The review executor now appends the read-only handbook discovery to
+the reviewer role, and its operation is registered alongside git and analysis
+in `register_default_operation_handlers`. See `T05I-result.md`.

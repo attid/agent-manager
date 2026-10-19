@@ -144,3 +144,12 @@ after the structural change also pass.
   `fake_pi_runner.py` fixture and the profile-freeze path.
 - As the README and the worker docstring already note, abandoned-running
   recovery remains explicit and manual.
+
+## Integration note (T05I)
+
+T04 was integrated after T02I. The additive migration was linearized as
+`0009_analysis` with `down_revision = 0008_operation_owner` (the tables and
+repository are unchanged). The analysis/recommendation routes are mapped to
+`analysis.read` / `analysis.approve` resources, the six tools are exposed
+through the secretary profile only, and the analyzer receives the handbook
+discovery as an extra instruction. See `T05I-result.md`.
