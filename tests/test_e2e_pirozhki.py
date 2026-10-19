@@ -408,6 +408,50 @@ def test_restart_preserves_state_and_replays_operations_idempotently(
         assert recovered is not None and recovered.status == "interrupted"
 
 
+def test_review_without_verdict_fails_strictly(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """A review that produces no explicit verdict never approves by absence."""
+    with pirozhki_instance(migrated_db, tmp_path / "strict") as instance:
+        submitted = instance.run_js_tool("submit")
+        assert submitted["ok"], submitted
+        task_id = submitted["task_id"]
+        assert instance.task_worker.step().status == "ready_to_commit"
+
+        reviewer = instance.agents.get_current("system-code-reviewer")
+        assert reviewer is not None
+        config = dict(reviewer.runner_config or {})
+        config["summary_text"] = (
+            "Изменения выглядят нормально, критичных замечаний нет."
+        )
+        instance.agents.update(
+            agent_id="system-code-reviewer",
+            expected_revision=reviewer.revision,
+            runner_config=config,
+        )
+
+        submitted_review = instance.post(
+            "/operations",
+            json={
+                "kind": "review",
+                "target_id": task_id,
+                "idempotency_key": "strict-review",
+            },
+        )
+        assert submitted_review.status_code == 202, submitted_review.text
+        outcomes = instance.run_until_idle()
+        review_outcome = next(
+            o for o in outcomes if o.operation.kind == "review"
+        )
+        assert review_outcome.status == "failed", review_outcome.result
+        stored = instance.operations.get(submitted_review.json()["id"])
+        assert stored is not None
+        assert "invalid_report" in (stored.error or "")
+        # The task is not approved by the absence of a verdict.
+        task = instance.get(f"/tasks/{task_id}").json()
+        assert task["metadata"]["review"]["verdict"] is None
+
+
 def test_negative_scoped_api_permissions_on_populated_state(
     migrated_db: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
