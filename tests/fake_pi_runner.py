@@ -66,6 +66,12 @@ The role JSON is a plain local test control file. Recognised fields:
     ``project/inbox`` fallback, and files in the read-only
     ``attachments_dir`` store. This lets acceptance tests prove which files
     were actually presented as current attachments.
+``attachment_requests_path``
+    Optional path to a JSON array of outgoing attachment records. When set,
+    the fake Runner appends them to the real session artifact
+    ``<state-dir>/sessions/<session>/pi/attachments.json``. A record without
+    ``turn_id`` inherits the ``--turn-id`` launch argument, matching the real
+    policy's turn-scoped request identity.
 """
 
 from __future__ import annotations
@@ -91,7 +97,7 @@ def _parse_argv(argv: list[str]) -> dict[str, str]:
         )
     command = argv[0]
     parsed: dict[str, str] = {"command": command}
-    allowed = {"--agent", "--task"}
+    allowed = {"--agent", "--task", "--turn-id"}
     if command == "resume":
         allowed |= {"--state-dir", "--session"}
     index = 1
@@ -264,6 +270,49 @@ def main() -> None:
 
     task_path = parsed["task"]
     run_dir = os.path.dirname(task_path)
+
+    attachment_source = role.get("attachment_requests_path")
+    if attachment_source:
+        if not isinstance(attachment_source, str):
+            _failure("attachment_requests_path must be a string")
+        with open(attachment_source, encoding="utf-8") as handle:
+            requests = json.load(handle)
+        if not isinstance(requests, list):
+            _failure("attachment_requests_path must contain a JSON array")
+        if requests:
+            if parsed["command"] == "resume":
+                attachment_state = parsed.get("state-dir")
+                session_id = parsed.get("session")
+            else:
+                attachment_state = role.get("state_dir")
+                session_id = role.get("session_id_value")
+            if not isinstance(attachment_state, str) or not attachment_state:
+                _failure("attachment_requests_path requires a state directory")
+            if not isinstance(session_id, str) or not session_id:
+                _failure("attachment_requests_path requires a session id")
+            pi_dir = os.path.join(
+                attachment_state, "sessions", session_id, "pi"
+            )
+            os.makedirs(pi_dir, exist_ok=True)
+            attachments_path = os.path.join(pi_dir, "attachments.json")
+            existing: list[Any] = []
+            if os.path.isfile(attachments_path):
+                with open(attachments_path, encoding="utf-8") as handle:
+                    existing = json.load(handle)
+                if not isinstance(existing, list):
+                    _failure("attachments.json must be a JSON array")
+            launch_turn = parsed.get("turn-id")
+            for request in requests:
+                if not isinstance(request, dict):
+                    _failure("attachment requests must be JSON objects")
+                record = dict(request)
+                if "turn_id" not in record and launch_turn:
+                    record["turn_id"] = launch_turn
+                existing.append(record)
+            _write_text(
+                attachments_path,
+                json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+            )
 
     if role.get("stateful_session"):
         role_state_dir = role.get("state_dir")

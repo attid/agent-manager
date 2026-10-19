@@ -146,7 +146,11 @@ from .permissions import (
     execution_owner,
     resources_for_execution,
 )
-from .session_operations import unapplied_items
+from .session_operations import (
+    acknowledge_items,
+    pending_items,
+    unapplied_items,
+)
 from .secretary_contract import SECRETARY_CONTRACT
 from .pi_reply import (
     LAUNCH_MODE_RESUME,
@@ -843,19 +847,26 @@ class PersistentConversationHandler:
 
         session_pi_dir = context.state_dir / "sessions" / returned_session_id / "pi"
 
-        # Check for attachments requested by attach_document tool
+        # The tool writes one record per explicit invocation, tagged with the
+        # turn identity the Runner exposed in /session/turn.json. Only the
+        # current turn may deliver them: a resumed turn must not replay a
+        # record that an earlier turn already requested. Legacy records
+        # without a turn identity are left untouched and never replayed.
+        attachment_items: list[tuple[int, dict]] = []
         attachments_file = session_pi_dir / "attachments.json"
         if attachments_file.is_file():
             try:
-                import json as _json
-                attach_data = _json.loads(attachments_file.read_text(encoding="utf-8"))
-                if isinstance(attach_data, list):
-                    for att in attach_data:
-                        target = att.get("target")
-                        if target:
-                            file_tag = f"[SEND_FILE: {target}]"
-                            if file_tag not in reply_text:
-                                reply_text += f"\n\n{file_tag}"
+                attachment_items = pending_items(
+                    attachments_file,
+                    match=lambda record: isinstance(record, dict)
+                    and record.get("turn_id") == turn_input.turn_id,
+                )
+                for _, att in attachment_items:
+                    target = att.get("target")
+                    if isinstance(target, str) and target:
+                        file_tag = f"[SEND_FILE: {target}]"
+                        if file_tag not in reply_text:
+                            reply_text += f"\n\n{file_tag}"
             except Exception as e:
                 logger.warning("Failed to process attachments: %s", e)
 
@@ -871,6 +882,16 @@ class PersistentConversationHandler:
             ),
         )
         self._last_execution = execution
+        # Acknowledge only after the reply is durable. If finish_call or the
+        # ownership check fails, the records stay pending so a retry of the
+        # same turn can still deliver them.
+        if attachment_items:
+            try:
+                acknowledge_items(attachments_file, attachment_items)
+            except Exception as e:
+                logger.warning(
+                    "Failed to acknowledge delivered attachments: %s", e
+                )
 
         # If Pi session created new agents, persist them into repository and knowledge base
         created_agents_file = session_pi_dir / "created_agents.json"

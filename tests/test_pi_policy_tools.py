@@ -67,6 +67,22 @@ class PolicyToolsTests(unittest.TestCase):
             self.assertEqual(api_data["openviking_url"], "http://viking.example:1933")
             self.assertEqual(api_data["openviking_token"], "viking-instance-token")
 
+    def test_turn_identity_is_exposed_to_policy_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file, task_file = self._write_config(
+                root, {"tools": ["attach_document"]}
+            )
+
+            result = execute(config_file, task_file, turn_id="turn-77")
+            session_id = result["session_id"]
+            session_dir = root / "state" / "sessions" / session_id
+            turn_file = session_dir / "pi" / "turn.json"
+            self.assertTrue(turn_file.exists())
+            self.assertEqual(
+                json.loads(turn_file.read_text()), {"turn_id": "turn-77"}
+            )
+
     def test_no_backend_document_and_no_production_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

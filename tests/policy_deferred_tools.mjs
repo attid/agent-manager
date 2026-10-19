@@ -17,11 +17,12 @@ fs.readFileSync = (name, ...args) => originalRead(redirect(name), ...args);
 fs.existsSync = name => originalExists(redirect(name));
 fs.writeFileSync = (name, ...args) => originalWrite(redirect(name), ...args);
 
+fs.writeFileSync('/session/turn.json', JSON.stringify({ turn_id: 'turn-42' }));
 const { default: policy } = await import(pathToFileURL(policyPath));
 const tools = new Map();
 policy({ on() {}, registerTool(tool) { tools.set(tool.name, tool); } });
-const call = async (name, params) => {
-  const raw = await tools.get(name).execute(`call-${name}`, params);
+const call = async (name, params, invocationId = `call-${name}`) => {
+  const raw = await tools.get(name).execute(invocationId, params);
   const parsed = JSON.parse(raw.content[0].text);
   return { ...parsed, isError: raw.isError };
 };
@@ -42,6 +43,33 @@ for (const [name, params, receipt] of deferred) {
   assert.ok(result.instruction, `${name} must instruct the caller`);
   assert.ok(fs.existsSync(redirect(`/session/${receipt}`)), `${name} wrote no receipt`);
 }
+
+// An outgoing request carries the invocation and turn identity, not just a
+// target, so the host can scope it to the turn that actually asked for it.
+const attachPath = redirect('/session/attachments.json');
+const readAttachments = () => JSON.parse(originalRead(attachPath, 'utf-8'));
+let attachments = readAttachments();
+assert.equal(attachments.length, 1, JSON.stringify(attachments));
+assert.equal(attachments[0].target, 'projects/demo/summary.md');
+assert.equal(attachments[0].invocation_id, 'call-attach_document');
+assert.equal(attachments[0].turn_id, 'turn-42');
+assert.ok(attachments[0].timestamp);
+// A retry of the same tool invocation is stable: it does not append a
+// second request for the same delivery.
+const attachRetry = await call('attach_document', { target: 'projects/demo/summary.md' });
+assert.equal(attachRetry.status, 'pending');
+assert.equal(readAttachments().length, 1);
+// A later intentional invocation for the same target is a new request.
+const attachAgain = await call(
+  'attach_document',
+  { target: 'projects/demo/summary.md' },
+  'call-attach-document-2',
+);
+assert.equal(attachAgain.status, 'pending');
+attachments = readAttachments();
+assert.equal(attachments.length, 2);
+assert.equal(attachments[1].invocation_id, 'call-attach-document-2');
+assert.equal(attachments[1].turn_id, 'turn-42');
 
 const clarification = await call('ask_clarification', {
   title: 'Ambiguous scope', description: 'Two projects match.', question: 'Which project?',

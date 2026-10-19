@@ -248,6 +248,8 @@ def test_paths_are_literal_argv_without_shell_expansion(
     record = handler.last_execution
     assert record is not None
     assert logged[5] == str(record.task_path)
+    assert logged[6] == "--turn-id"
+    assert logged[7] == record.turn_id
     assert record.task_path.parent == record.artifact_dir
 
     # If a shell had interpreted the role path, it would have created this.
@@ -442,6 +444,8 @@ def test_resume_argv_is_exact_literal_with_special_chars(
         str(role_path),
         "--task",
         str(record.task_path),
+        "--turn-id",
+        record.turn_id,
     ]
     assert record.argv == (
         sys.executable,
@@ -455,6 +459,8 @@ def test_resume_argv_is_exact_literal_with_special_chars(
         str(role_path),
         "--task",
         str(record.task_path),
+        "--turn-id",
+        record.turn_id,
     )
 
     assert (

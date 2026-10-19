@@ -130,7 +130,7 @@ def acquire(stack, path, directory=False):
         raise RunnerError('Another Runner is active for this state directory or project') from None
 
 
-def execute(config_path, task=None, resume=None):
+def execute(config_path, task=None, resume=None, turn_id=None):
     config_path = config_path.resolve()
     c = Config.load(config_path)
     c.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -162,6 +162,14 @@ def execute(config_path, task=None, resume=None):
         # Only transcript storage, not runner metadata, is writable inside Pi.
         pi_dir = directory / 'pi'
         pi_dir.mkdir(mode=0o700, exist_ok=True)
+        # The policy extension scopes deferred outgoing requests with this
+        # identity. A resumed session must never inherit the previous turn's
+        # identity, so an absent value removes the marker.
+        turn_file = pi_dir / 'turn.json'
+        if turn_id:
+            save(turn_file, {'turn_id': str(turn_id)})
+        else:
+            turn_file.unlink(missing_ok=True)
         result = dict(session_id=session_id, agent_id=c.agent_id, status='running',
                       started_at=now(), ended_at=None, session_path=str(pi_dir / 'session.jsonl'),
                       summary_path=str(directory / 'summary.md'), exit_code=None, usage=None,
@@ -348,6 +356,7 @@ def main(argv=None):
     run = sub.add_parser('run')
     run.add_argument('--agent', required=True, type=Path, help='Role configuration JSON path')
     run.add_argument('--task', required=True, type=Path)
+    run.add_argument('--turn-id', help='Conversation turn identity for deferred requests')
     for name in ('resume', 'inspect', 'stop'):
         p = sub.add_parser(name)
         p.add_argument('--session', required=True)
@@ -355,17 +364,18 @@ def main(argv=None):
         if name == 'resume':
             p.add_argument('--agent', type=Path, help='Override original role config (e.g. change model)')
             p.add_argument('--task', type=Path, help='Optional continuation task')
+            p.add_argument('--turn-id', help='Conversation turn identity for deferred requests')
     args = parser.parse_args(argv)
     try:
         if args.command == 'run':
-            result = execute(args.agent, args.task)
+            result = execute(args.agent, args.task, turn_id=args.turn_id)
         else:
             directory = session_dir(args.state_dir.expanduser().resolve(), args.session)
             if args.command == 'resume':
                 config = args.agent or Path((directory / 'config-path.txt').read_text())
                 if Config.load(config).state_dir != args.state_dir.expanduser().resolve():
                     raise RunnerError('Resume state directory does not match configuration')
-                result = execute(config, args.task, args.session)
+                result = execute(config, args.task, args.session, turn_id=args.turn_id)
             else:
                 result = inspect(directory)
                 if args.command == 'stop' and result['status'] == 'running':

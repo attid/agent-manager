@@ -13,18 +13,50 @@ export function blockedCommand(command, allowCommit = false) {
   return /(?:^|[\s;&|()])(?:[^\s;&|()]*\/)?git\s+(?:(?:(?:-C|-c|--git-dir|--work-tree)\s+[^\s;&|()]+|-[^\s;&|()]+)\s+)*(?:commit|push)\b/.test(command);
 }
 
-function appendJsonArray(filePath, item) {
-  let list = [];
+function readJsonArray(filePath) {
   try {
     if (fs.existsSync(filePath)) {
-      list = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-      if (!Array.isArray(list)) list = [];
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+      if (Array.isArray(parsed)) return parsed;
     }
-  } catch (e) {
-    list = [];
+  } catch (e) {}
+  return [];
+}
+
+function writeJsonArray(filePath, list) {
+  fs.writeFileSync(filePath, JSON.stringify(list, null, 2) + "\n", "utf-8");
+}
+
+function appendJsonArray(filePath, item) {
+  const list = readJsonArray(filePath);
+  list.push(item);
+  writeJsonArray(filePath, list);
+}
+
+// One explicit tool invocation may be retried after a lost tool result. The
+// invocation id keeps that retry stable while a later call for the same target
+// remains a new, intentional request.
+function appendInvocationRecord(filePath, item, invocationId) {
+  const list = readJsonArray(filePath);
+  if (invocationId) {
+    const existing = list.find(record => record && record.invocation_id === invocationId);
+    if (existing) return existing;
   }
   list.push(item);
-  fs.writeFileSync(filePath, JSON.stringify(list, null, 2) + "\n", "utf-8");
+  writeJsonArray(filePath, list);
+  return item;
+}
+
+// The Runner writes the turn identity for the current launch. It scopes
+// deferred outgoing requests so a resumed unrelated turn cannot replay them.
+function readTurnId() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync("/session/turn.json", "utf-8"));
+    const value = parsed && parsed.turn_id;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 export default function policy(pi) {
@@ -105,11 +137,18 @@ export default function policy(pi) {
       }
       const sessionDir = "/session";
       const attachFile = path.join(sessionDir, "attachments.json");
-      appendJsonArray(attachFile, {
+      const invocationId = typeof toolCallId === "string" && toolCallId ? toolCallId : null;
+      const turnId = readTurnId();
+      const record = {
         target,
-        timestamp: new Date().toISOString()
-      });
+        timestamp: new Date().toISOString(),
+        ...(invocationId ? { invocation_id: invocationId } : {}),
+        ...(turnId ? { turn_id: turnId } : {})
+      };
+      appendInvocationRecord(attachFile, record, invocationId);
       return toolResult({ status: "pending", operation: "attach_document", target,
+        ...(invocationId ? { invocation_id: invocationId } : {}),
+        ...(turnId ? { turn_id: turnId } : {}),
         instruction: "The document will be attached after this turn finishes." });
     }
   });

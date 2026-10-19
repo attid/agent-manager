@@ -463,7 +463,7 @@ class PiReplyHandler:
 
         _write_text(task_path, _render_task_text(turn_input))
 
-        argv = self._build_argv(task_path)
+        argv = self._build_argv(task_path, turn_input.turn_id)
         started_at = _utcnow_iso()
 
         try:
@@ -780,14 +780,20 @@ class PiReplyHandler:
         self._last_execution = record
         return record
 
-    def _build_argv(self, task_path: pathlib.Path) -> tuple[str, ...]:
+    def _build_argv(
+        self, task_path: pathlib.Path, turn_id: str | None = None
+    ) -> tuple[str, ...]:
         """Return the literal Runner argv for this handler's launch mode.
 
         Resume mode emits ``resume --state-dir <dir> --session <id>`` before
-        the always-present ``--agent``/``--task`` pair; fresh mode emits
-        ``run``. Every value is a separate argv entry, so no shell ever sees
-        spaces or metacharacters.
+        the always-present ``--agent``/``--task``/``--turn-id`` triplet;
+        fresh mode emits ``run``. Every value is a separate argv entry, so no
+        shell ever sees spaces or metacharacters. The turn identity lets the
+        Runner scope deferred outgoing requests to the current turn.
         """
+        turn_arguments = (
+            ("--turn-id", str(turn_id)) if turn_id is not None else ()
+        )
         if self._launch_mode == LAUNCH_MODE_RESUME:
             return (
                 *self._runner_argv_prefix,
@@ -800,6 +806,7 @@ class PiReplyHandler:
                 str(self._role_config_path),
                 "--task",
                 str(task_path),
+                *turn_arguments,
             )
         return (
             *self._runner_argv_prefix,
@@ -808,6 +815,7 @@ class PiReplyHandler:
             str(self._role_config_path),
             "--task",
             str(task_path),
+            *turn_arguments,
         )
 
 

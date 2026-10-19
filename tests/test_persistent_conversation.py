@@ -23,10 +23,12 @@ from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.secretary import TurnInput, TurnProcessor
+from agent_manager.session_operations import pending_items
 from agent_manager.storage import (
     AgentProfileRepository,
     ConversationRepository,
     ConversationRuntimeBusyError,
+    ConversationRuntimeOwnershipError,
     ConversationRuntimeRepository,
     Database,
     OperationRepository,
@@ -48,6 +50,7 @@ def _base_runner_config(
     state_dir: pathlib.Path | None = None,
     stateful_session: bool = False,
     media_probe: pathlib.Path | None = None,
+    attachment_requests_path: pathlib.Path | None = None,
 ) -> dict[str, object]:
     config: dict[str, object] = {
         "mode": mode,
@@ -67,6 +70,8 @@ def _base_runner_config(
         config["stateful_session"] = True
     if media_probe is not None:
         config["media_probe"] = str(media_probe)
+    if attachment_requests_path is not None:
+        config["attachment_requests_path"] = str(attachment_requests_path)
     return config
 
 
@@ -2094,5 +2099,253 @@ def test_attachment_retry_after_prelaunch_failure_reuses_staged_bytes(
             b"retry-stable-ogg".hex()
         )
         assert "/workspace/inbox/" in probe["task_text"]
+    finally:
+        database.dispose()
+
+
+def test_attachment_requests_are_scoped_to_the_current_turn(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """An earlier attach_document request must not replay on a later turn."""
+    database = Database.from_path(migrated_db)
+    artifact_root = tmp_path / "artifacts"
+    state_dir = tmp_path / "state"
+    requests = tmp_path / "attachment-requests.json"
+    requests.write_text("[]", encoding="utf-8")
+    session_id = "attachment-session"
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                session_id=session_id,
+                summary="Turn reply.",
+                state_dir=state_dir,
+                stateful_session=True,
+                attachment_requests_path=requests,
+            ),
+        )
+        processor = TurnProcessor(database)
+        handler = _handler(database, artifact_root)
+
+        requests.write_text(
+            json.dumps(
+                [
+                    {
+                        "target": "system-scout",
+                        "invocation_id": "call-1",
+                        "timestamp": "t1",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        message = _append_user(database, text="send the profile")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        turn = processor.claim_next(conversation_id="conv-1")
+        assert turn is not None
+        reply = handler(_turn_input(turn))
+        assert reply.count("[SEND_FILE: system-scout]") == 1
+
+        # A retry of the same turn returns the stored reply instead of
+        # appending the attachment marker again or launching another child.
+        assert handler(_turn_input(turn)) == reply
+        processor.complete(turn.id, turn.claim_token, text=reply)
+        pi_dir = state_dir / "sessions" / session_id / "pi"
+        assert (pi_dir / "attachments.applied.json").is_file()
+
+        # The next resumed turn has no current request: this is the reported
+        # production regression, where the old array entry was replayed.
+        requests.write_text("[]", encoding="utf-8")
+        message = _append_user(database, text="what is on the picture?")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        result = processor.run_once(handler, conversation_id="conv-1")
+        assert result.status == "completed"
+        assert result.reply is not None
+        assert "[SEND_FILE:" not in result.reply.text
+
+        # A new deliberate request for the same target still sends again.
+        requests.write_text(
+            json.dumps(
+                [
+                    {
+                        "target": "system-scout",
+                        "invocation_id": "call-3",
+                        "timestamp": "t3",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        message = _append_user(database, text="send the profile again")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        result = processor.run_once(handler, conversation_id="conv-1")
+        assert result.status == "completed"
+        assert result.reply is not None
+        assert result.reply.text.count("[SEND_FILE: system-scout]") == 1
+    finally:
+        database.dispose()
+
+
+def test_legacy_attachments_do_not_replay_but_current_request_sends(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """Pre-upgrade records are audit history, not a request for this turn."""
+    database = Database.from_path(migrated_db)
+    artifact_root = tmp_path / "artifacts"
+    state_dir = tmp_path / "state"
+    requests = tmp_path / "attachment-requests.json"
+    requests.write_text("[]", encoding="utf-8")
+    session_id = "legacy-attachment-session"
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                session_id=session_id,
+                summary="Turn reply.",
+                state_dir=state_dir,
+                stateful_session=True,
+                attachment_requests_path=requests,
+            ),
+        )
+        processor = TurnProcessor(database)
+        handler = _handler(database, artifact_root)
+
+        message = _append_user(database, text="first")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        first = processor.run_once(handler, conversation_id="conv-1")
+        assert first.status == "completed"
+        assert first.reply is not None
+        assert "[SEND_FILE:" not in first.reply.text
+
+        # Simulate the pre-upgrade artifact: an attachment that was already
+        # fulfilled and has no invocation or turn identity.
+        pi_dir = state_dir / "sessions" / session_id / "pi"
+        pi_dir.mkdir(parents=True, exist_ok=True)
+        attachments_file = pi_dir / "attachments.json"
+        legacy = [{"target": "system-scout", "timestamp": "legacy"}]
+        attachments_file.write_text(json.dumps(legacy), encoding="utf-8")
+
+        message = _append_user(database, text="unrelated question")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        second = processor.run_once(handler, conversation_id="conv-1")
+        assert second.status == "completed"
+        assert second.reply is not None
+        assert "[SEND_FILE:" not in second.reply.text
+
+        # A fresh request made during the current turn is delivered even when
+        # the legacy record is still present in the same array.
+        requests.write_text(
+            json.dumps(
+                [
+                    {
+                        "target": "system-scout",
+                        "invocation_id": "call-current",
+                        "timestamp": "t-current",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        message = _append_user(database, text="send the profile now")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        third = processor.run_once(handler, conversation_id="conv-1")
+        assert third.status == "completed"
+        assert third.reply is not None
+        assert third.reply.text.count("[SEND_FILE: system-scout]") == 1
+        stored = json.loads(attachments_file.read_text(encoding="utf-8"))
+        assert legacy[0] in stored
+        assert any(
+            record.get("invocation_id") == "call-current" for record in stored
+        )
+    finally:
+        database.dispose()
+
+
+@pytest.mark.parametrize("failure", ["database", "ownership"])
+def test_attachment_request_stays_pending_when_finish_call_fails(
+    tmp_path: pathlib.Path,
+    migrated_db: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """A failed reply persistence must not consume the outgoing request."""
+    database = Database.from_path(migrated_db)
+    artifact_root = tmp_path / "artifacts"
+    state_dir = tmp_path / "state"
+    requests = tmp_path / "attachment-requests.json"
+    requests.write_text("[]", encoding="utf-8")
+    session_id = "failed-finish-session"
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                session_id=session_id,
+                summary="Turn reply.",
+                state_dir=state_dir,
+                stateful_session=True,
+                attachment_requests_path=requests,
+            ),
+        )
+        processor = TurnProcessor(database)
+        handler = _handler(database, artifact_root)
+        message = _append_user(database, text="first")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        first = processor.run_once(handler, conversation_id="conv-1")
+        assert first.status == "completed"
+
+        requests.write_text(
+            json.dumps(
+                [
+                    {
+                        "target": "system-scout",
+                        "invocation_id": "call-unfinished",
+                        "timestamp": "t-unfinished",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        message = _append_user(database, text="send the profile")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        turn = processor.claim_next(conversation_id="conv-1")
+        assert turn is not None
+
+        repository = handler._repository
+        original_finish = repository.finish_call
+        if failure == "ownership":
+
+            def broken_finish(**kwargs: object):
+                kwargs["ownership_token"] = "not-the-owner"
+                return original_finish(**kwargs)
+
+            expected_error: type[BaseException] = (
+                ConversationRuntimeOwnershipError
+            )
+        else:
+
+            def broken_finish(**kwargs: object):
+                raise RuntimeError("database unavailable")
+
+            expected_error = RuntimeError
+        monkeypatch.setattr(repository, "finish_call", broken_finish)
+
+        with pytest.raises(expected_error):
+            handler(_turn_input(turn))
+
+        pi_dir = state_dir / "sessions" / session_id / "pi"
+        attachments_file = pi_dir / "attachments.json"
+        pending = pending_items(
+            attachments_file,
+            match=lambda record: record.get("turn_id") == turn.id,
+        )
+        assert [record["target"] for _, record in pending] == [
+            "system-scout"
+        ]
+        assert not attachments_file.with_name(
+            "attachments.applied.json"
+        ).exists()
     finally:
         database.dispose()

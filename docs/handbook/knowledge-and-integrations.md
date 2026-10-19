@@ -48,6 +48,18 @@ so consumers must be idempotent. This is why a deferred tool reports
 `pending`: the effect has not been applied yet. Do not repeat the tool call to
 "check" it.
 
+`attach_document` is the exception to the plain receipt rule: its record
+belongs to one explicit tool invocation and one conversation turn. The Runner
+writes the current turn identity to `/session/turn.json` for each launch, and
+the policy stores it together with the `toolCallId` in `attachments.json`.
+`PersistentConversationHandler` drains only records whose `turn_id` matches
+the current turn, appends the `[SEND_FILE: <target>]` marker, and acknowledges
+them with `pending_items`/`acknowledge_items` only after the reply is durable.
+A resumed unrelated turn therefore cannot replay an earlier request; a retry
+of the same invocation is stable; and a later deliberate request for the same
+target still sends again. Legacy records without a `turn_id` are preserved as
+audit history and never replayed.
+
 Drain targets:
 
 | Session file | Applied as |
@@ -58,7 +70,7 @@ Drain targets:
 | `created_skills.json` | Create `<skills>/<name>/SKILL.md` and scripts. |
 | `archived_agents.json` | Archive a non-core agent. |
 | `created_agents.json` | Legacy compatibility; never overwrites an existing profile. |
-| `attachments.json` | Append `[SEND_FILE: <target>]` to the reply. |
+| `attachments.json` | Append `[SEND_FILE: <target>]` to the reply; only records tagged with the current turn identity are drained, and acknowledgement follows reply persistence. |
 | `clarification.json` | Signals `waiting_user_input`. |
 | `actions.json` | Legacy `trigger_*` records; submitted as durable operations. |
 
@@ -88,9 +100,11 @@ Drain targets:
 
 ## Files and documents
 
-- `attach_document(target)` writes a session record; the reply handler appends
-  `[SEND_FILE: <target>]`, which the Telegram layer interprets to send the
-  file.
+- `attach_document(target)` writes a session record tagged with the
+  invocation and turn identity; the reply handler appends
+  `[SEND_FILE: <target>]` for that turn only, which the Telegram layer
+  interprets to send the file. Legacy records without a turn identity remain
+  audit history and are never replayed.
 - Inbound Telegram media is owned by the Telegram media directory and then
   staged once, by `PersistentConversationHandler`, into a server-owned
   conversation/turn store under `<artifact_root>/attachments/`. Directory
