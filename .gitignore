@@ -1,21 +1,70 @@
-# Python-generated files
+# Python runtime & bytecode
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
+
+# Build & packaging
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+*.egg
 
 # Virtual environments
-.venv
+.venv/
+venv/
+env/
+ENV/
 
-.belief_map.sexp
-belief_map.sexp
-.belief_map_cache.json
-.belief-map/
-.codespaces/
-.codespaces-cache/
-.local/
+# Testing & quality tools
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Local databases & state
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+
+# Environment variables, secrets & local configs
+.env
+.env.*
+*.env
+!*.env.example
+
+# Logs & temporary runtime artifacts
+*.log
+logs/
+artifacts/
+media/
+tmp/
+.local/
+
+# Backups & local document scratchpads
+localdoc/
+backups/
+*.bak
+*~
+
+# IDEs & editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node.js
+node_modules/
+
+# Codespaces & Belief Map caches
+.belief_map*
+belief_map.sexp
+.belief-map/
+.codespaces/
+.codespaces-cache/
