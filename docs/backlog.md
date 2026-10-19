@@ -25,10 +25,12 @@ For the next approximately one hour, the user requested direct coordinator edits
 - Provider connection failures: the production secretary run at
   `20261019T145052073358Z-e85e8c0127aa42a186c9ec40ce697608` ended with
   `Connection error.` after Pi's automatic retry. Safe diagnosis and concise
-  Telegram error display are fixed in source. Automatic recovery of the same
-  dialogue/failed turn needs separate work: Telegram currently resets the
-  active talk binding after failure, and simply preserving it would leave a
-  failed turn blocking the normal FIFO. Do not add blind model retries.
+  Telegram error display are fixed in source. Follow-up source changes remove
+  terminal failed turns as FIFO blockers and preserve the same native session
+  after a confirmed terminated connection failure on resume. Unknown outcomes
+  remain fail-closed. Validate this recovery with a real provider after an
+  explicitly authorized rollout; no blind model retries were added. Existing
+  production blocked conversations are not repaired by a source-only fix.
 
 - Investigate the separate production execution failure for internal task
   `154b7a1d4bed467689cfd6f59981fcc3` (Runner exited 1 on 2026-10-19).

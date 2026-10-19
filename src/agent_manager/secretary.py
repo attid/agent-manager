@@ -24,9 +24,9 @@ A :class:`~agent_manager.storage.Turn` links one existing inbound user
 Ordering and concurrency
 ------------------------
 
-Within a conversation, an earlier ``running`` or ``failed`` turn blocks every
-later turn so enqueue/input order is preserved. A later turn is only claimed
-after the blocker completes, or after an explicit retry/recovery resolves it.
+Within a conversation, earlier ``pending`` and ``running`` turns block later
+turns. Failed turns retain their diagnostics but do not stall new input.
+An explicit retry is allowed only before any later turn has started.
 Different conversations are independent and can proceed in parallel.
 
 Claim and completion use short, atomic, conditional SQL updates. The handler
@@ -321,7 +321,7 @@ class TurnProcessor:
         """Atomically claim the next eligible pending turn.
 
         A turn is eligible when it is ``pending`` and every earlier turn in
-        the same conversation (by ``sequence``) is ``completed``. This keeps
+        the same conversation (by ``sequence``) is terminal. This keeps
         at most one running turn per conversation while allowing other
         conversations to proceed. ``conversation_id`` optionally restricts
         the search to one conversation.
@@ -335,10 +335,16 @@ class TurnProcessor:
                 if candidate is None:
                     return None
 
+                earlier = aliased(Turn)
+                blocked = exists().where(
+                    earlier.conversation_id == Turn.conversation_id,
+                    earlier.sequence < Turn.sequence,
+                    earlier.status.in_(("pending", "running")),
+                )
                 claim_token = uuid.uuid4().hex
                 result = session.execute(
                     update(Turn)
-                    .where(Turn.id == candidate.id, Turn.status == "pending")
+                    .where(Turn.id == candidate.id, Turn.status == "pending", ~blocked)
                     .values(
                         status="running",
                         claim_token=claim_token,
@@ -364,7 +370,7 @@ class TurnProcessor:
         blocked = exists().where(
             earlier.conversation_id == Turn.conversation_id,
             earlier.sequence < Turn.sequence,
-            earlier.status != "completed",
+            earlier.status.in_(("pending", "running")),
         )
         statement = (
             select(Turn)
@@ -506,6 +512,9 @@ class TurnProcessor:
     def retry_failed(self, turn_id: str) -> Turn:
         """Explicitly reopen a failed turn as ``pending``.
 
+        Retrying is refused once any later turn has started, preserving
+        execution order even when retry races a new claim.
+
         The previous error and claim token are cleared; the attempt count and
         timestamps are retained as history. The transition is a single atomic
         compare-and-set (``failed -> pending``), so a concurrent retry or
@@ -519,10 +528,16 @@ class TurnProcessor:
         so the reopened turn can acquire a new reservation. A fail-closed
         block recorded for an uncertain model call is never cleared here.
         """
+        later = aliased(Turn)
+        later_started = exists().where(
+            later.conversation_id == Turn.conversation_id,
+            later.sequence > Turn.sequence,
+            later.attempt_count > 0,
+        )
         with self._database.session() as session:
             result = session.execute(
                 update(Turn)
-                .where(Turn.id == turn_id, Turn.status == "failed")
+                .where(Turn.id == turn_id, Turn.status == "failed", ~later_started)
                 .values(
                     status="pending",
                     claim_token=None,
@@ -537,7 +552,10 @@ class TurnProcessor:
                 ).one_or_none()
                 if current is None:
                     raise TurnNotFoundError(turn_id)
-                raise TurnStateError(turn_id, current.status, "retry")
+                raise TurnStateError(
+                    turn_id, current.status,
+                    "retry after later work started" if current.status == "failed" else "retry",
+                )
             reopened = session.scalars(
                 select(Turn).where(Turn.id == turn_id)
             ).one()

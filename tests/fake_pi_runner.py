@@ -420,7 +420,7 @@ def main() -> None:
         raise SystemExit(0)
 
     if mode == "connection_error":
-        print(json.dumps({"status": "failed", "error": "Connection error."}, indent=2))
+        print(json.dumps({"status": "failed", "error": "Connection error.", **session_payload}, indent=2))
         raise SystemExit(1)
     if mode == "nonzero":
         _write_text(summary_path, summary_text)

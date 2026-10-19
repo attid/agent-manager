@@ -514,7 +514,10 @@ class PiReplyHandler:
                 failed_result = {}
             # Classify the protocol error without copying raw output or
             # potentially sensitive provider diagnostics into exceptions.
-            connection_error = "connection error" in str(failed_result.get("error", "")).lower()
+            connection_error = (
+                failed_result.get("status") == "failed"
+                and "connection error" in str(failed_result.get("error", "")).lower()
+            )
             self._record(
                 run_id=run_id,
                 turn_input=turn_input,
@@ -529,6 +532,7 @@ class PiReplyHandler:
                 started_at=started_at,
                 exit_code=completed.returncode,
                 runner_status=failed_result.get("status"),
+                returned_session_id=_session_id_or_none(failed_result.get("session_id")),
                 outcome=OUTCOME_COMMAND_ERROR,
             )
             raise PiReplyCommandError(

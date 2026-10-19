@@ -156,6 +156,7 @@ from .pi_reply import (
     LAUNCH_MODE_RESUME,
     LAUNCH_MODE_RUN,
     PiReplyHandler,
+    PiReplyCommandError,
     PiRunProvenance,
 )
 from .profile_runtime import freeze_profile_handler
@@ -543,9 +544,28 @@ class PersistentConversationHandler:
                 turn_input, context, prepared, ownership_token
             )
         except BaseException as error:
-            self._block_failed_reservation(
-                turn_input, ownership_token, error
-            )
+            execution = prepared.handler.last_execution
+            if (
+                isinstance(error, PiReplyCommandError)
+                and error.connection_error
+                and execution is not None
+                and execution.runner_status == "failed"
+                and context.launch_mode == LAUNCH_MODE_RESUME
+                and execution.returned_session_id == context.session_id
+            ):
+                # The child ended and identified the pinned native session.
+                # Continue only with new input; never replay the failed call.
+                self._repository.release_finished_failed_call(
+                    conversation_id=turn_input.conversation_id,
+                    ownership_token=ownership_token,
+                    turn_id=turn_input.turn_id,
+                    attempt_count=turn_input.attempt_count,
+                )
+                error.args = (f"{error}; conversation_continuation_available;",)
+            else:
+                self._block_failed_reservation(
+                    turn_input, ownership_token, error
+                )
             raise
         finally:
             # The execution-scoped credential lives exactly as long as the

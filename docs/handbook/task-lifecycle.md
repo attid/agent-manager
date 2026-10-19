@@ -124,7 +124,14 @@ Secretary conversations use a separate durable protocol
 - `QueueDispatcher` claims one eligible turn at a time per conversation
   (`claim_next`), runs the handler outside any transaction, then completes or
   fails with the claim token.
-- `TurnProcessor.retry_failed` reopens a `failed` turn to `pending`.
+- A terminal `failed` turn retains its error and does not block later input.
+  Pending and running predecessors still enforce FIFO. Failed input is never
+  replayed automatically; `TurnProcessor.retry_failed` may reopen it only before
+  any later turn has started.
+- A terminated Runner reporting a connection failure for the pinned resumed
+  session releases its reservation for new input in that same session. Unknown
+  child failures and session mismatches retain the fail-closed runtime latch;
+  later input receives an error rather than waiting behind a failed turn.
 - `TurnProcessor.recover_abandoned(turn_id, claim_token=...)` reopens an
   abandoned `running` turn; recovery is caller-authorized, never guessed.
 - `reconcile_startup_orphans` fails `running` turns left by a terminated

@@ -941,3 +941,39 @@ async def test_queue_processor_does_not_copy_media_to_shared_inbox(
 
 
 
+
+
+@pytest.mark.parametrize("recoverable", [True, False])
+@sync_test
+async def test_worker_preserves_talk_only_for_confirmed_recoverable_failure(
+    user_storage: UserStateStorage, recoverable: bool,
+) -> None:
+    conversation_id = "connection-test"
+    user_storage.set_talk_conversation(12345, conversation_id)
+    user_storage.set_user_mode(12345, "talk", conversation_id=conversation_id)
+    queued = user_storage.enqueue_message(
+        user_id=12345, chat_id=12345, telegram_message_id=1,
+        context_mode="talk", context_task_id=None,
+        context_conversation_id=conversation_id, text="hello",
+    )
+    client = MagicMock()
+    client.append_message = AsyncMock(return_value={"id": "input"})
+    client.create_turn = AsyncMock(return_value={"id": "turn"})
+    error = "PiReplyCommandError: model_connection_error;"
+    if recoverable:
+        error += " conversation_continuation_available;"
+    client.get_turn = AsyncMock(return_value={"status": "failed", "error": error})
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    processor = QueueProcessor(
+        bot=bot, backend_client=client, storage=user_storage,
+        transcriber=DeepgramTranscriber(mock_transcript="test"),
+        poll_interval_seconds=0.001, turn_timeout_seconds=1,
+    )
+    await processor.process_message(queued)
+    state = user_storage.get_user_state(12345)
+    assert state.active_conversation_id == (conversation_id if recoverable else None)
+    text = bot.send_message.call_args.kwargs["text"]
+    assert "Не удалось связаться" in text
+    assert ("Контекст диалога сброшен" in text) is (not recoverable)
+    assert "Время ожидания" not in text

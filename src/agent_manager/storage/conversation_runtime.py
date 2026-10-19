@@ -1092,6 +1092,29 @@ class ConversationRuntimeRepository:
             )
         )
 
+    def release_finished_failed_call(
+        self,
+        *,
+        conversation_id: str,
+        ownership_token: str,
+        turn_id: str,
+        attempt_count: int,
+    ) -> ConversationRuntime:
+        """Release an owned, definitively terminated failed child call.
+
+        Preserve the pinned native session and prior successful result. This
+        never clears a blocked latch or retries the failed input. The caller
+        must verify a terminal Runner result with the expected session id.
+        """
+        return _run_with_retry(
+            lambda: self._release_prelaunch_once(
+                conversation_id=conversation_id,
+                ownership_token=ownership_token,
+                turn_id=turn_id,
+                attempt_count=attempt_count,
+            )
+        )
+
     def _release_prelaunch_once(
         self,
         *,

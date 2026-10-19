@@ -324,7 +324,10 @@ class QueueProcessor:
                         )
             elif turn_error is not None:
                 self.storage.set_message_status(queued_msg.id, "failed")
-                is_talk = queued_msg.context_mode == "talk"
+                is_talk = (
+                    queued_msg.context_mode == "talk"
+                    and "conversation_continuation_available;" not in turn_error
+                )
                 if is_talk:
                     self.storage.set_talk_conversation(queued_msg.user_id, None)
                     state = self.storage.get_user_state(queued_msg.user_id)

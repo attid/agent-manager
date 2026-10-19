@@ -458,7 +458,7 @@ def test_handler_exception_is_retained_and_retryable(
             )
         ] == ["user"]
 
-        # The failed earlier turn blocks later work until explicitly retried.
+        # No pending input exists; the failed input is never replayed automatically.
         assert processor.claim_next(conversation_id="conv-1") is None
 
         retried = processor.retry_failed(turn.id)
@@ -751,5 +751,40 @@ def test_migration_preserves_existing_rows_and_adds_turns(
         )
         assert result.created is True
         assert result.turn.conversation_id == "conv-keep"
+    finally:
+        database.dispose()
+
+
+def test_failed_turn_does_not_stall_later_input_or_allow_late_retry(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        first = _enqueue(database, text="first")
+        second = _enqueue(database, text="second")
+        third = _enqueue(database, text="third")
+        processor = TurnProcessor(database)
+        failed = processor.run_once(
+            lambda _: (_ for _ in ()).throw(RuntimeError("Connection error."))
+        )
+        assert failed.status == "failed"
+        calls = []
+
+        def handler(turn_input):
+            calls.append(turn_input.text)
+            assert processor.claim_next(conversation_id="conv-1") is None
+            with pytest.raises(TurnStateError):
+                processor.retry_failed(first.turn.id)
+            return "reply:" + turn_input.text
+
+        assert processor.run_once(handler).turn.id == second.turn.id
+        assert processor.run_once(lambda turn_input: "reply:" + turn_input.text).turn.id == third.turn.id
+        assert calls == ["second"]
+        stored = processor.get_turn(first.turn.id)
+        assert stored.status == "failed"
+        assert stored.attempt_count == 1
+        assert stored.reply_message_id is None
+        with pytest.raises(TurnStateError):
+            processor.retry_failed(first.turn.id)
     finally:
         database.dispose()

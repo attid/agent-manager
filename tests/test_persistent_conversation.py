@@ -2349,3 +2349,61 @@ def test_attachment_request_stays_pending_when_finish_call_fails(
         ).exists()
     finally:
         database.dispose()
+
+
+@pytest.mark.parametrize("returned_session", ["s1", "wrong-session", None])
+def test_connection_failure_allows_new_input_in_same_native_session(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path, returned_session: str | None
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        _create_conversation(database)
+        _profile(database, runner_config=_base_runner_config(
+            session_id="s1", state_dir=tmp_path / "state", stateful_session=True,
+        ))
+        processor = TurnProcessor(database)
+        artifact_root = tmp_path / "exports"
+        handler = _handler(database, artifact_root)
+
+        def enqueue(text):
+            message = _append_user(database, text=text)
+            return _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+
+        enqueue("first")
+        assert processor.run_once(handler).status == "completed"
+        repository = ConversationRuntimeRepository(database)
+        binding = repository.get_binding("conv-1")
+        role_path = pathlib.Path(binding.role_export_path)
+        config = json.loads(role_path.read_text())
+        config["mode"] = "connection_error"
+        config["omit_session_id"] = returned_session is None
+        config["session_id_value"] = returned_session
+        role_path.write_text(json.dumps(config))
+        enqueue("second")
+        failed = processor.run_once(handler)
+        assert failed.status == "failed"
+        if returned_session != "s1":
+            assert "conversation_continuation_available;" not in failed.error
+            assert repository.get_binding("conv-1").blocked_reason is not None
+            enqueue("third")
+            assert processor.run_once(handler).status == "failed"
+            assert _assistant_count(database) == 1
+            assert len(list(artifact_root.rglob("task.txt"))) == 2
+            return
+        assert "conversation_continuation_available;" in failed.error
+        binding = repository.get_binding("conv-1")
+        assert binding.blocked_reason is None
+        assert binding.reservation_token is None
+        assert binding.runner_session_id == "s1"
+        assert _assistant_count(database) == 1
+
+        config["mode"] = "success"
+        role_path.write_text(json.dumps(config))
+        enqueue("third")
+        result = processor.run_once(handler)
+        assert result.status == "completed"
+        assert repository.get_binding("conv-1").runner_session_id == "s1"
+        assert processor.get_turn(failed.turn.id).attempt_count == 1
+        assert _assistant_count(database) == 2
+    finally:
+        database.dispose()
