@@ -358,6 +358,28 @@ async def test_task_selection_and_status_patch(
 
 
 @sync_test
+async def test_failed_tasks_are_accessible_from_task_list(
+    test_backend_client: BackendClient,
+) -> None:
+    failed = await test_backend_client.create_task(title="Failed research", status="failed")
+    await test_backend_client.create_task(title="Active research", status="in_progress")
+    message = _make_message(text="/list")
+    await cmd_list(message, client=test_backend_client)
+    keyboard = message.answer.call_args.kwargs["reply_markup"]
+    tabs = [b for row in keyboard.inline_keyboard for b in row]
+    assert any(b.callback_data == "cat:failed:1" and "Ошибки" in b.text for b in tabs)
+
+    callback = _make_callback_query("cat:failed:1")
+    await on_category_switch(callback, client=test_backend_client)
+    keyboard = callback.message.edit_reply_markup.call_args.kwargs["reply_markup"]
+    buttons = [b for row in keyboard.inline_keyboard for b in row]
+    task_buttons = [b for b in buttons if b.callback_data.startswith("select_task:")]
+    assert len(task_buttons) == 1
+    assert task_buttons[0].callback_data == f"select_task:{failed['id']}"
+    assert f"#{failed['number']}" in task_buttons[0].text
+
+
+@sync_test
 async def test_task_card_escapes_html_from_task_content(
     user_storage: UserStateStorage,
     test_backend_client: BackendClient,

@@ -11,5 +11,13 @@ For the next approximately one hour, the user requested direct coordinator edits
 
 ## Confirmed follow-ups
 
+- Investigate the separate production execution failure for internal task
+  `154b7a1d4bed467689cfd6f59981fcc3` (Runner exited 1 on 2026-10-19).
+  The discussion-button HTML error is fixed independently; it is not the
+  Runner failure. No production state was changed during the sprint fixes.
+- Include human-number lookup in later scoped-permission review. Telegram and
+  secretary operations resolve the number to the internal ID; numeric aliases
+  must never bypass resource checks. Broad review remains deferred for sprint.
+
 - Per-task read-only execution: currently project access is inherited from the agent profile. Add an explicit task restriction through API/tools, effective sandbox policy and preflight/provenance without editing the shared profile. A task restriction must not broaden a read-only profile's privileges. Not implemented yet.
 - Skills capability reporting: freeze handler hardcodes `skills_connected=False`, while explicit `runner_config.skills` is passed to Pi with `--skill` and the instance skills directory is mounted. Reconcile reporting/docs and normalize declarative `AgentProfile.skills` consistently across execution paths. Scout revision 34 was observed with `codespaces` selected and installed; actual skill use in an execution was not verified. Do not describe all skills as nonfunctional.

@@ -121,6 +121,7 @@ def task_categories_keyboard(
     categories = [
         ("incoming", "📥 Входящие"),
         ("in_progress", "⚙️ В работе"),
+        ("failed", "❌ Ошибки"),
         ("waiting_for_input", "⚠️ Уточнение"),
         ("done", "✅ Завершённые"),
         ("archived", "📦 Архив"),
