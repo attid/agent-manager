@@ -343,6 +343,7 @@ def build_pirozhki_instance(
     *,
     runner_argv_prefix: tuple[str, ...] | None = None,
     seed_deterministic_configs: bool = True,
+    runtime_defaults: RuntimeDefaultsResolver | None = None,
 ) -> PirozhkiInstance:
     """Build and start one isolated acceptance instance.
 
@@ -350,6 +351,11 @@ def build_pirozhki_instance(
     opt-in real-model acceptance passes the production ``pi_runner`` prefix
     and disables the deterministic profile overrides so the real system
     profiles and host runtime selection are exercised.
+
+    ``runtime_defaults`` overrides the model/provider/auth resolver. The
+    deterministic tests pass an explicitly absent settings path so the host
+    Pi settings can never influence them; the real-model acceptance supplies
+    the real host resolution (or an explicitly selected provider/model).
     """
     runner_prefix = (
         tuple(runner_argv_prefix)
@@ -407,7 +413,7 @@ def build_pirozhki_instance(
         if seed_deterministic_configs:
             _seed_deterministic_runner_configs(database, knowledge_base)
 
-        defaults = RuntimeDefaultsResolver(
+        defaults = runtime_defaults or RuntimeDefaultsResolver(
             global_settings_path=root / "absent-pi-settings.json"
         )
         secretary_handler = PersistentConversationHandler(
@@ -503,12 +509,14 @@ def pirozhki_instance(
     *,
     runner_argv_prefix: tuple[str, ...] | None = None,
     seed_deterministic_configs: bool = True,
+    runtime_defaults: RuntimeDefaultsResolver | None = None,
 ) -> Iterator[PirozhkiInstance]:
     instance = build_pirozhki_instance(
         migrated_db,
         root,
         runner_argv_prefix=runner_argv_prefix,
         seed_deterministic_configs=seed_deterministic_configs,
+        runtime_defaults=runtime_defaults,
     )
     try:
         yield instance
