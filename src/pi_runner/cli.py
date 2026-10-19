@@ -81,6 +81,30 @@ def session_dir(state, session_id):
     return directory
 
 
+def inbox_file_args(directory):
+    """Return file arguments and archive candidates for one inbox view.
+
+    The size limits are the existing Runner compatibility rule, not a new
+    policy: larger files still remain visible in the mounted inbox but are
+    not inlined as arguments. The function is pure filesystem inspection so
+    the explicit-inbox selection can be tested without starting a sandbox.
+    """
+    file_args = []
+    files_to_archive = []
+    if not directory.is_dir():
+        return file_args, files_to_archive
+    for item in sorted(directory.iterdir()):
+        if not item.is_file():
+            continue
+        ext = item.suffix.lower()
+        size = item.stat().st_size
+        is_image = ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+        if (is_image and size <= 15_000_000) or (not is_image and size <= 500_000):
+            file_args.append(f'@/workspace/inbox/{item.name}')
+        files_to_archive.append(item)
+    return file_args, files_to_archive
+
+
 def inspect(directory):
     result = json.loads((directory / 'result.json').read_text())
     if result['status'] == 'running' and process_stamp(result['runner_pid']) != result['runner_stamp']:
@@ -196,18 +220,15 @@ def execute(config_path, task=None, resume=None):
             if c.backend:
                 (pi_dir / "backend_api.json").write_text(json.dumps(c.backend, indent=2))
             command = build_pi_command(c, instruction_text=instruction_text)
-            inbox_dir = c.project / 'inbox'
-            file_args = []
-            files_to_archive = []
-            if inbox_dir.is_dir():
-                for item in sorted(inbox_dir.iterdir()):
-                    if item.is_file():
-                        ext = item.suffix.lower()
-                        size = item.stat().st_size
-                        is_image = ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif')
-                        if (is_image and size <= 15_000_000) or (not is_image and size <= 500_000):
-                            file_args.append(f'@/workspace/inbox/{item.name}')
-                        files_to_archive.append(item)
+            # An explicit inbox_dir is the conversation/turn-scoped view. It
+            # replaces the legacy shared ``<project>/inbox`` scan; a text-only
+            # turn therefore passes no stale files. The disposable view is
+            # never archived here.
+            explicit_inbox = c.inbox_dir is not None
+            inbox_dir = c.inbox_dir if explicit_inbox else c.project / 'inbox'
+            file_args, files_to_archive = inbox_file_args(inbox_dir)
+            if explicit_inbox:
+                files_to_archive = []
 
             command += ['--', *file_args, task_text]
             os.write(fd, b'\0'.join(s.encode() for s in arguments) + b'\0')

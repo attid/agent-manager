@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
-import shutil
 from typing import Any
 
 from aiogram import Bot
@@ -158,28 +156,10 @@ class QueueProcessor:
                         chat_id, status_msg_id, "⏳ Жду ответ секретаря..."
                     )
 
-            # 1.5 Copy incoming media to secretary workspace inbox
-            if queued_msg.media_path:
-                try:
-                    src_file = Path(queued_msg.media_path)
-                    if src_file.is_file() and self.knowledge_base is not None:
-                        # Explicit instance root, never the host HOME directory.
-                        sec_inbox = (
-                            self.knowledge_base.workspaces_root
-                            / "secretary"
-                            / "inbox"
-                        )
-                        sec_inbox.mkdir(parents=True, exist_ok=True)
-                        dest_file = sec_inbox / src_file.name
-                        shutil.copy2(src_file, dest_file)
-                    elif src_file.is_file():
-                        logger.warning(
-                            "Ignoring inbound media: no instance knowledge base configured"
-                        )
-                except Exception as e:
-                    logger.warning("Failed to copy media to secretary inbox: %s", e)
-
-            # 2. Append user message to backend
+            # 2. Append user message to backend. Inbound media stays in the
+            # explicit Telegram media directory; the persistent conversation
+            # handler is the single owner that stages it into the
+            # conversation/turn-scoped attachment store.
             append_res = await self.client.append_message(
                 conv_id,
                 text=text,

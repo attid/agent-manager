@@ -136,6 +136,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .attachments import ConversationAttachmentStore
 from .capabilities import is_platform_agent, render_handbook_discovery
 from .instance import InstanceContext
 from .operation_worker import SESSION_ACTION_KINDS
@@ -334,6 +335,8 @@ class _PreparedExecution:
     execution_role_path: pathlib.Path
     runtime_defaults: Mapping[str, Any]
     grant_token: str | None = None
+    attachment_context: str | None = None
+    attachment_manifest: Mapping[str, Any] | None = None
 
 
 def _stored_provenance(
@@ -389,6 +392,9 @@ class PersistentConversationHandler:
             expanded with ``expanduser``. The per-conversation Runner state
             directory is never invented here: it is read from the generated
             pinned role configuration and only then persisted.
+        attachments_root: Optional explicit root for the conversation/turn
+            attachment store. When omitted it is
+            ``<artifact_root>/attachments``; no host HOME path is used.
         env: Optional child environment; ``None`` inherits the caller's
             process environment unchanged.
         runtime_defaults: Optional injected
@@ -415,6 +421,7 @@ class PersistentConversationHandler:
         *,
         runner_argv_prefix: Sequence[str],
         artifact_root: str | os.PathLike[str],
+        attachments_root: str | os.PathLike[str] | None = None,
         env: Mapping[str, str] | None = None,
         runtime_defaults: RuntimeDefaultsResolver | None = None,
         defaults_config_path: str | os.PathLike[str] | None = None,
@@ -441,6 +448,11 @@ class PersistentConversationHandler:
         self._agent_id = agent_id
         self._runner_argv_prefix = prefix
         self._artifact_root = pathlib.Path(artifact_root).expanduser()
+        self._attachments = ConversationAttachmentStore(
+            attachments_root
+            if attachments_root is not None
+            else self._artifact_root / "attachments"
+        )
         self._env = dict(env) if env is not None else None
         self._knowledge_base = knowledge_base
         self._instance = instance
@@ -516,7 +528,7 @@ class PersistentConversationHandler:
         # so the reservation is released for an explicit retry instead of
         # permanently blocking the conversation.
         try:
-            prepared = self._prepare_execution(context)
+            prepared = self._prepare_execution(context, turn_input)
         except BaseException as error:
             self._release_prelaunch(turn_input, ownership_token, error)
             raise
@@ -683,23 +695,37 @@ class PersistentConversationHandler:
     # -- per-call runtime selection --------------------------------------
 
     def _prepare_execution(
-        self, context: _ExecutionContext
+        self, context: _ExecutionContext, turn_input: TurnInput
     ) -> _PreparedExecution:
-        """Resolve the current defaults and build the child adapter.
+        """Resolve defaults, stage attachments and build the child adapter.
 
         This is the proven pre-launch boundary: reading the pinned base
-        policy, resolving the injected defaults and writing the unique
-        execution role all happen before any child exists. The pinned base
-        role file and the profile snapshot are never modified. Resume uses
-        the execution role path with ``--agent`` while keeping the same
-        native session and state directory.
+        policy, resolving the injected defaults, staging the current turn's
+        attachments and writing the unique execution role all happen before
+        any child exists. The pinned base role file and the profile snapshot
+        are never modified. Resume uses the execution role path with
+        ``--agent`` while keeping the same native session and state directory.
         """
+        attachments = self._attachments.prepare_turn(
+            conversation_id=turn_input.conversation_id,
+            turn_id=turn_input.turn_id,
+            input_message_id=turn_input.input_message_id,
+            metadata=turn_input.metadata,
+        )
         base_role_config = _read_role_config(context.base_role_path)
         tools = list(base_role_config.get("tools") or [])
         platform_secretary = "create_task" in tools
         if platform_secretary and "resolve_workspace" not in tools:
             base_role_config["tools"] = [*tools, "resolve_workspace"]
         resolved = self._runtime_defaults.resolve(base_role_config)
+        # The generated execution role points the Runner at the disposable
+        # current-turn inbox view and the read-only conversation store. This
+        # intentionally overrides any shared ``project/inbox`` fallback, so a
+        # new conversation cannot inherit legacy workspace files.
+        resolved.role_config["inbox_dir"] = str(attachments.inbox_dir)
+        resolved.role_config["attachments_dir"] = str(
+            attachments.store_root
+        )
         # Capture provenance before the per-instance additions so the scoped
         # backend credential is never written into the stored provenance.
         runtime_defaults = resolved.to_provenance()
@@ -754,6 +780,8 @@ class PersistentConversationHandler:
             execution_role_path=execution_role_path,
             runtime_defaults=runtime_defaults,
             grant_token=grant_token,
+            attachment_context=attachments.prompt(),
+            attachment_manifest=attachments.metadata(),
         )
 
     def _build_runtime_handler(
@@ -786,23 +814,18 @@ class PersistentConversationHandler:
     ) -> str:
         """Invoke the child once, then store the successful native session."""
         handler = prepared.handler
-        media_path_val = turn_input.metadata.get("media_path")
-        if media_path_val:
-            try:
-                src_media = pathlib.Path(media_path_val)
-                if src_media.is_file():
-                    base_cfg = _read_role_config(context.base_role_path)
-                    ws_dir = pathlib.Path(base_cfg.get("project", ""))
-                    if ws_dir.is_dir():
-                        ws_inbox = ws_dir / "inbox"
-                        ws_inbox.mkdir(parents=True, exist_ok=True)
-                        import shutil as _shutil
-                        _shutil.copy2(src_media, ws_inbox / src_media.name)
-            except Exception as e:
-                logger.warning("Failed to copy inbound media to agent inbox: %s", e)
+        effective_input = turn_input
+        if prepared.attachment_context is not None:
+            metadata = dict(turn_input.metadata)
+            metadata["attachment_context"] = prepared.attachment_context
+            if prepared.attachment_manifest is not None:
+                metadata["attachment_manifest"] = prepared.attachment_manifest
+            effective_input = dataclasses.replace(
+                turn_input, metadata=metadata
+            )
 
         try:
-            reply_text = handler(turn_input)
+            reply_text = handler(effective_input)
         finally:
             # The adapter records provenance for failures too; expose the
             # actual record instead of ``None`` or an earlier success.

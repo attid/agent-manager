@@ -60,10 +60,17 @@ The role JSON is a plain local test control file. Recognised fields:
     matches ``--session``. This makes an invented state path fail loudly.
 ``state_dir``
     The trusted state directory used by ``stateful_session``.
+``media_probe``
+    Optional path for a JSON probe of the role's explicit media mounts. It
+    records the task text, files in ``inbox_dir``, files in the profile
+    ``project/inbox`` fallback, and files in the read-only
+    ``attachments_dir`` store. This lets acceptance tests prove which files
+    were actually presented as current attachments.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -115,6 +122,30 @@ def _load_json(path: str) -> dict[str, Any]:
 def _write_text(path: str, text: str) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def _list_files(directory: str) -> list[dict[str, Any]]:
+    """Return deterministic file facts below ``directory`` for test probes."""
+    listed: list[dict[str, Any]] = []
+    if not os.path.isdir(directory):
+        return listed
+    for root, dirnames, filenames in os.walk(directory):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "rb") as handle:
+                content = handle.read()
+            listed.append(
+                {
+                    "relative": os.path.relpath(path, directory),
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "bytes_hex": content.hex(),
+                }
+            )
+    return listed
 
 
 def _emit(payload: dict[str, Any], log_line: str | None) -> None:
@@ -193,6 +224,43 @@ def main() -> None:
     if env_probe:
         env_var = role.get("env_var", "")
         _write_text(env_probe, json.dumps({env_var: os.environ.get(env_var)}))
+
+    media_probe = role.get("media_probe")
+    if media_probe:
+        task_text = ""
+        try:
+            with open(parsed["task"], encoding="utf-8") as handle:
+                task_text = handle.read()
+        except OSError:
+            pass
+        inbox_dir = role.get("inbox_dir")
+        if not isinstance(inbox_dir, str):
+            inbox_dir = ""
+        project = role.get("project")
+        project_inbox = (
+            os.path.join(project, "inbox")
+            if isinstance(project, str)
+            else ""
+        )
+        attachments_dir = role.get("attachments_dir")
+        if not isinstance(attachments_dir, str):
+            attachments_dir = ""
+        _write_text(
+            media_probe,
+            json.dumps(
+                {
+                    "task_text": task_text,
+                    "inbox_dir": inbox_dir,
+                    "inbox_files": _list_files(inbox_dir),
+                    "project_inbox": project_inbox,
+                    "project_inbox_files": _list_files(project_inbox),
+                    "attachments_dir": attachments_dir,
+                    "attachments_files": _list_files(attachments_dir),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
 
     task_path = parsed["task"]
     run_dir = os.path.dirname(task_path)

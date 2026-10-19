@@ -91,8 +91,22 @@ Drain targets:
 - `attach_document(target)` writes a session record; the reply handler appends
   `[SEND_FILE: <target>]`, which the Telegram layer interprets to send the
   file.
-- Inbound media paths are copied into `<project>/inbox/` before the child run
-  (`PersistentConversationHandler._execute`).
+- Inbound Telegram media is owned by the Telegram media directory and then
+  staged once, by `PersistentConversationHandler`, into a server-owned
+  conversation/turn store under `<artifact_root>/attachments/`. Directory
+  keys are hashes of server-side ids; raw inbound basenames and paths are
+  never used for storage.
+- The child Runner receives only the current turn's files as
+  `/workspace/inbox` (`runner_config.inbox_dir`). The profile's shared
+  `project/inbox` is never scanned for a persistent conversation, so a new or
+  reset conversation cannot inherit legacy files. Earlier attachments from
+  the same conversation are mounted read-only at `/attachments`
+  (`runner_config.attachments_dir`) and are labelled as prior, not current.
+- The turn prompt carries a generated `attachment_context`: an explicit
+  `Current message attachments: none` for text-only messages, current
+  attachment paths with hashes, and prior same-conversation assets. Prompt
+  and metadata agree, and retry of the same turn reuses the canonical staged
+  bytes even if the Telegram source file is gone.
 
 ## Telegram
 

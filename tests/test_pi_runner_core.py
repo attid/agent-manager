@@ -82,6 +82,48 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(argv[i-1], '--bind')
         self.assertEqual(argv[i+1], '/workspace/.git')
 
+    def test_explicit_inbox_and_attachment_mounts(self):
+        legacy = self.repo / 'inbox'
+        legacy.mkdir()
+        (legacy / 'photo_photo_xyz.jpg').write_bytes(b'legacy')
+        view = self.root / 'turn-view'
+        view.mkdir()
+        store = self.root / 'conversation-store'
+        store.mkdir()
+        c = self.config(inbox_dir=str(view), attachments_dir=str(store))
+        self.assertEqual(c.inbox_dir, view.resolve())
+        self.assertEqual(c.attachments_dir, store.resolve())
+        argv = sandbox_command(c, self.state / 'home', self.state / 'session')
+        self.assertEqual(argv[argv.index(str(view.resolve())) - 1], '--ro-bind')
+        self.assertEqual(argv[argv.index(str(view.resolve())) + 1], '/workspace/inbox')
+        self.assertEqual(argv[argv.index(str(store.resolve())) - 1], '--ro-bind')
+        self.assertEqual(argv[argv.index(str(store.resolve())) + 1], '/attachments')
+
+    def test_explicit_inbox_must_exist(self):
+        with self.assertRaises(RunnerError):
+            self.config(inbox_dir=str(self.root / 'absent'))
+
+    def test_inbox_dir_must_not_contain_project(self):
+        with self.assertRaises(RunnerError):
+            self.config(inbox_dir=str(self.root))
+
+    def test_inbox_file_args_uses_selected_directory(self):
+        from pi_runner.cli import inbox_file_args
+
+        legacy = self.repo / 'inbox'
+        legacy.mkdir()
+        (legacy / 'legacy.jpg').write_bytes(b'legacy')
+        current = self.root / 'current'
+        current.mkdir()
+        (current / 'current.jpg').write_bytes(b'current')
+
+        file_args, archive = inbox_file_args(current)
+        self.assertEqual(file_args, ['@/workspace/inbox/current.jpg'])
+        self.assertEqual([item.name for item in archive], ['current.jpg'])
+        # The legacy project inbox is not consulted when an explicit view is
+        # selected; the caller passes the conversation-scoped directory.
+        self.assertNotIn('legacy.jpg', ' '.join(file_args))
+
 
 if __name__ == '__main__':
     unittest.main()

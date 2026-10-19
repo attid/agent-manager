@@ -827,7 +827,9 @@ def _render_task_text(turn_input: TurnInput) -> str:
 
     The header records the turn/conversation/input-message ids and attempt
     count; the incoming message text follows the blank line verbatim. No size
-    limit is imposed.
+    limit is imposed. When the handler supplies an ``attachment_context``
+    metadata string, it is rendered between the header and the message so the
+    child prompt and the attachment manifest always agree.
     """
     header = (
         f"turn_id: {turn_input.turn_id}\n"
@@ -836,6 +838,9 @@ def _render_task_text(turn_input: TurnInput) -> str:
         f"attempt_count: {turn_input.attempt_count}\n"
         f"role: {turn_input.role}\n"
     )
+    attachment_context = turn_input.metadata.get("attachment_context")
+    if isinstance(attachment_context, str) and attachment_context.strip():
+        return f"{header}\n{attachment_context}\n\n{turn_input.text}"
     return f"{header}\n{turn_input.text}"
 
 

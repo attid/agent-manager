@@ -55,6 +55,8 @@ An `AgentProfile.runner_config` carries the execution policy:
 | `tools` | Tool names exposed to the model for this profile. |
 | `skills` | Skill names bound to the profile. |
 | `state_dir` | Absolute Runner state directory; must be outside the project. |
+| `inbox_dir` | Generated per-execution inbox view. It replaces the shared `<project>/inbox` scan and is mounted read-only at `/workspace/inbox`. Persistent conversations set it to the current turn's attachment view. |
+| `attachments_dir` | Generated read-only conversation store mounted at `/attachments`; contains earlier same-conversation assets but never current ones. |
 | `pi_command`, `runtime_paths` | Runner executable and dependency mounts. |
 | `provider`, `model`, `pi_auth_provider`, `models_file` | Late-bound runtime selection (see [Profiles, runtime and skills](profiles-runtime-skills.md)). |
 

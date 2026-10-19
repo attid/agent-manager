@@ -42,6 +42,8 @@ class Config:
     knowledge_dir: Path | None = None
     skills_dir: Path | None = None
     backend: dict[str, str] | None = None
+    inbox_dir: Path | None = None
+    attachments_dir: Path | None = None
 
     @classmethod
     def load(cls, path):
@@ -95,9 +97,20 @@ class Config:
             raise RunnerError('models_file must be an existing file')
         knowledge_dir = absolute(data['knowledge_dir']) if data.get('knowledge_dir') else None
         skills_dir = absolute(data['skills_dir']) if data.get('skills_dir') else None
-        for label, directory in (('knowledge_dir', knowledge_dir), ('skills_dir', skills_dir)):
+        # Optional explicit media mounts. ``inbox_dir`` replaces the implicit
+        # ``<project>/inbox`` scan with a conversation/turn-scoped directory;
+        # ``attachments_dir`` exposes earlier same-conversation assets
+        # read-only without treating them as current attachments.
+        inbox_dir = absolute(data['inbox_dir']) if data.get('inbox_dir') else None
+        attachments_dir = absolute(data['attachments_dir']) if data.get('attachments_dir') else None
+        for label, directory in (('knowledge_dir', knowledge_dir), ('skills_dir', skills_dir),
+                                 ('inbox_dir', inbox_dir), ('attachments_dir', attachments_dir)):
             if directory is not None and not directory.is_dir():
                 raise RunnerError(f'{label} must be an existing directory')
+        if inbox_dir is not None and (inbox_dir == Path('/') or within(project, inbox_dir)):
+            raise RunnerError('inbox_dir must not expose the project or /')
+        if attachments_dir is not None and attachments_dir == Path('/'):
+            raise RunnerError('attachments_dir must not be /')
         backend = data.get('backend')
         if backend is not None:
             if not isinstance(backend, dict) or not all(
@@ -111,7 +124,7 @@ class Config:
                    data.get('credential_env', []), str(wd.relative_to(project)), models_file,
                    data.get('pi_auth_provider'), data.get('project_read_only', False),
                    data.get('skills', []), data.get('allow_git_commit', False),
-                   knowledge_dir, skills_dir, backend)
+                   knowledge_dir, skills_dir, backend, inbox_dir, attachments_dir)
 
 
 def sandbox_command(config, home, session):
@@ -150,6 +163,13 @@ def sandbox_command(config, home, session):
         argv += ['--ro-bind', str(c.knowledge_dir), '/knowledge']
     if c.skills_dir is not None:
         argv += ['--ro-bind', str(c.skills_dir), '/skills']
+    # The current-turn inbox view replaces the project's shared inbox inside
+    # the sandbox. Earlier same-conversation assets stay read-only and are
+    # never passed to the model as if they arrived with this turn.
+    if c.inbox_dir is not None:
+        argv += ['--ro-bind', str(c.inbox_dir), '/workspace/inbox']
+    if c.attachments_dir is not None:
+        argv += ['--ro-bind', str(c.attachments_dir), '/attachments']
     dotgit = c.project / '.git'
     if dotgit.is_dir():
         if dotgit.is_symlink():

@@ -47,6 +47,7 @@ def _base_runner_config(
     selection_probe: pathlib.Path | None = None,
     state_dir: pathlib.Path | None = None,
     stateful_session: bool = False,
+    media_probe: pathlib.Path | None = None,
 ) -> dict[str, object]:
     config: dict[str, object] = {
         "mode": mode,
@@ -64,6 +65,8 @@ def _base_runner_config(
         config["state_dir"] = str(state_dir)
     if stateful_session:
         config["stateful_session"] = True
+    if media_probe is not None:
+        config["media_probe"] = str(media_probe)
     return config
 
 
@@ -141,12 +144,14 @@ def _append_user(
     *,
     conversation_id: str = "conv-1",
     text: str = "hello",
+    metadata: dict[str, object] | None = None,
 ):
     return ConversationRepository(database).append_message(
         conversation_id=conversation_id,
         role="user",
         text=text,
         source="test",
+        metadata=metadata,
     ).message
 
 
@@ -1803,5 +1808,291 @@ def test_conversation_execution_grant_is_scoped_and_revoked(
         role_config = json.loads(roles[-1].read_text(encoding="utf-8"))
         assert role_config["backend"]["api_token"] == grant.token
         assert role_config["backend"]["backend_url"] == instance.backend_url
+    finally:
+        database.dispose()
+
+
+def _seed_legacy_shared_inbox(root: pathlib.Path) -> pathlib.Path:
+    """Create the exact pre-rollout legacy shared workspace files."""
+    inbox = root / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / "photo_photo_xyz.jpg").write_bytes(b"fake-image-bytes")
+    (inbox / "voice_voice_file_abc.ogg").write_bytes(b"fake-ogg-bytes")
+    return inbox
+
+
+def _read_probe(path: pathlib.Path) -> dict[str, object]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_new_conversation_ignores_legacy_shared_workspace_inbox(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A fresh text-only conversation never sees shared inbox files.
+
+    The legacy files really exist in the profile's project inbox. The child
+    role must still receive an empty current-turn inbox and a prompt that
+    says no attachment arrived with this message.
+    """
+    artifact_root = tmp_path / "exports"
+    shared_ws = tmp_path / "secretary-workspace"
+    legacy_inbox = _seed_legacy_shared_inbox(shared_ws)
+    media_probe = tmp_path / "media-probe.json"
+
+    database = Database.from_path(migrated_db)
+    try:
+        _create_conversation(database)
+        ConversationRepository(database).create_conversation(id="conv-2")
+        runner_config = _base_runner_config(
+            media_probe=media_probe,
+            state_dir=tmp_path / "state",
+            stateful_session=True,
+        )
+        runner_config["project"] = str(shared_ws)
+        _profile(database, runner_config=runner_config)
+        processor = TurnProcessor(database)
+
+        for conversation_id in ("conv-1", "conv-2"):
+            message = _append_user(
+                database,
+                conversation_id=conversation_id,
+                text="Привет",
+            )
+            _enqueue(
+                processor,
+                conversation_id=conversation_id,
+                input_message_id=message.id,
+            )
+            result = processor.run_once(
+                _handler(database, artifact_root),
+                conversation_id=conversation_id,
+            )
+            assert result.status == "completed"
+            probe = _read_probe(media_probe)
+            assert [item["relative"] for item in probe["project_inbox_files"]] == [
+                "photo_photo_xyz.jpg",
+                "voice_voice_file_abc.ogg",
+            ]
+            assert probe["inbox_files"] == []
+            assert "Current message attachments: none" in probe["task_text"]
+
+        roles = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in artifact_root.rglob("executions/*/runner_role.json")
+        ]
+        assert len(roles) == 2
+        for role_config in roles:
+            assert role_config["inbox_dir"] != str(legacy_inbox)
+            assert role_config["inbox_dir"] != str(shared_ws / "inbox")
+            assert role_config["attachments_dir"] != str(shared_ws)
+            assert pathlib.Path(role_config["attachments_dir"]).is_relative_to(
+                artifact_root / "attachments"
+            )
+    finally:
+        database.dispose()
+
+
+def test_current_attachment_reaches_child_and_stays_conversation_scoped(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A real attached file reaches the child; another conversation does not."""
+    artifact_root = tmp_path / "exports"
+    shared_ws = tmp_path / "secretary-workspace"
+    _seed_legacy_shared_inbox(shared_ws)
+    media_probe = tmp_path / "media-probe.json"
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    first_source = incoming / "photo.jpg"
+    first_source.write_bytes(b"first-current-bytes")
+    second_dir = tmp_path / "incoming-two"
+    second_dir.mkdir()
+    second_source = second_dir / "photo.jpg"
+    second_source.write_bytes(b"second-current-bytes")
+
+    database = Database.from_path(migrated_db)
+    try:
+        _create_conversation(database)
+        ConversationRepository(database).create_conversation(id="conv-2")
+        runner_config = _base_runner_config(
+            media_probe=media_probe,
+            state_dir=tmp_path / "state",
+            stateful_session=True,
+        )
+        runner_config["project"] = str(shared_ws)
+        _profile(database, runner_config=runner_config)
+        processor = TurnProcessor(database)
+
+        first_message = _append_user(
+            database,
+            conversation_id="conv-1",
+            text="Посмотри фото",
+            metadata={"media_type": "photo", "media_path": str(first_source)},
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-1",
+            input_message_id=first_message.id,
+        )
+        assert processor.run_once(
+            _handler(database, artifact_root), conversation_id="conv-1"
+        ).status == "completed"
+        first_probe = _read_probe(media_probe)
+        assert len(first_probe["inbox_files"]) == 1
+        assert first_probe["inbox_files"][0]["bytes_hex"] == (
+            b"first-current-bytes".hex()
+        )
+        assert "/workspace/inbox/" in first_probe["task_text"]
+        assert "Current message attachments (read-only, passed with this turn):" in (
+            first_probe["task_text"]
+        )
+        # Legacy shared inbox files still exist but are not the child inbox.
+        assert len(first_probe["project_inbox_files"]) == 2
+        first_store = pathlib.Path(str(first_probe["attachments_dir"]))
+        assert first_store.is_dir()
+        assert first_store != artifact_root / "attachments"
+
+        second_message = _append_user(
+            database,
+            conversation_id="conv-2",
+            text="И это фото",
+            metadata={"media_type": "photo", "media_path": str(second_source)},
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-2",
+            input_message_id=second_message.id,
+        )
+        assert processor.run_once(
+            _handler(database, artifact_root), conversation_id="conv-2"
+        ).status == "completed"
+        second_probe = _read_probe(media_probe)
+        assert second_probe["inbox_files"][0]["bytes_hex"] == (
+            b"second-current-bytes".hex()
+        )
+        second_relatives = [
+            str(item["relative"]) for item in second_probe["attachments_files"]
+        ]
+        assert any(item.startswith("turns/") for item in second_relatives)
+        assert all(
+            item.startswith(("turns/", "views/")) for item in second_relatives
+        )
+        second_payload_files = [
+            item
+            for item in second_probe["attachments_files"]
+            if "/files/" in str(item["relative"])
+            or str(item["relative"]).startswith("views/")
+        ]
+        assert second_payload_files
+        assert all(
+            bytes.fromhex(str(item["bytes_hex"])) == b"second-current-bytes"
+            for item in second_payload_files
+        )
+        # The first conversation's canonical bytes are unchanged and are not
+        # visible under the second conversation's read-only mount.
+        first_store_bytes = b"".join(
+            path.read_bytes() for path in first_store.rglob("files/*")
+        )
+        assert first_store_bytes == b"first-current-bytes"
+        second_store = pathlib.Path(str(second_probe["attachments_dir"]))
+        assert first_store != second_store
+        assert first_store not in second_store.parents
+        assert not any(
+            b"first-current-bytes" in path.read_bytes()
+            for path in second_store.rglob("*")
+            if path.is_file()
+        )
+    finally:
+        database.dispose()
+
+
+def test_attachment_retry_after_prelaunch_failure_reuses_staged_bytes(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A pre-launch failure released the turn; retry reuses the staged file.
+
+    The inbound source is removed between attempts to prove the child cannot
+    fall back to a shared workspace file and instead reads the canonical
+    conversation/turn copy.
+    """
+    artifact_root = tmp_path / "exports"
+    settings = tmp_path / "pi-settings.json"
+    settings.write_text("{not valid json", encoding="utf-8")
+    media_probe = tmp_path / "media-probe.json"
+    source = tmp_path / "incoming" / "voice.ogg"
+    source.parent.mkdir()
+    source.write_bytes(b"retry-stable-ogg")
+
+    database = Database.from_path(migrated_db)
+    failed_turn_id: str | None = None
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                media_probe=media_probe,
+                state_dir=tmp_path / "state",
+                stateful_session=True,
+            ),
+        )
+        processor = TurnProcessor(database)
+        message = _append_user(
+            database,
+            text="[voice]",
+            metadata={"media_type": "voice", "media_path": str(source)},
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-1",
+            input_message_id=message.id,
+        )
+        result = processor.run_once(
+            _handler(
+                database,
+                artifact_root,
+                runtime_defaults=_defaults_source(
+                    artifact_root, global_settings=settings
+                ),
+            ),
+            conversation_id="conv-1",
+        )
+        assert result.status == "failed"
+        assert result.turn is not None
+        failed_turn_id = result.turn.id
+        assert not list(artifact_root.rglob("task.txt"))
+        staged = list(artifact_root.rglob("attachments/*/turns/*/files/*"))
+        assert len(staged) == 1
+        staged_bytes = staged[0].read_bytes()
+        assert staged_bytes == b"retry-stable-ogg"
+    finally:
+        database.dispose()
+
+    source.unlink()
+    _write_settings(settings, provider="ok-p", model="ok-m")
+    database = Database.from_path(migrated_db)
+    try:
+        processor = TurnProcessor(database)
+        assert failed_turn_id is not None
+        processor.retry_failed(failed_turn_id)
+        result = processor.run_once(
+            _handler(
+                database,
+                artifact_root,
+                runtime_defaults=_defaults_source(
+                    artifact_root, global_settings=settings
+                ),
+            ),
+            conversation_id="conv-1",
+        )
+        assert result.status == "completed"
+        assert len(list(artifact_root.rglob("task.txt"))) == 1
+        staged_after = list(artifact_root.rglob("attachments/*/turns/*/files/*"))
+        assert len(staged_after) == 1
+        assert staged_after[0].read_bytes() == b"retry-stable-ogg"
+        probe = _read_probe(media_probe)
+        assert len(probe["inbox_files"]) == 1
+        assert probe["inbox_files"][0]["bytes_hex"] == (
+            b"retry-stable-ogg".hex()
+        )
+        assert "/workspace/inbox/" in probe["task_text"]
     finally:
         database.dispose()

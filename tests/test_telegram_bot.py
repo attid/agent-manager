@@ -789,4 +789,73 @@ async def test_on_user_message_document_text(
     assert pathlib.Path(kwargs["media_path"]).is_file()
 
 
+class _WorkspaceOnlyKnowledgeBase:
+    """Knowledge base stub exposing only a temporary workspaces root."""
+
+    def __init__(self, workspaces_root: pathlib.Path) -> None:
+        self.workspaces_root = workspaces_root
+
+    def resolve_file(self, query: str) -> None:
+        return None
+
+
+@sync_test
+async def test_queue_processor_does_not_copy_media_to_shared_inbox(
+    test_backend_client: BackendClient,
+    user_storage: UserStateStorage,
+    tmp_path: pathlib.Path,
+) -> None:
+    """The Telegram worker stores metadata only; the handler owns staging."""
+    user = _make_user(12345)
+    conv = await test_backend_client.create_conversation(title="Media owner test")
+
+    workspaces_root = tmp_path / "workspaces"
+    legacy_inbox = workspaces_root / "secretary" / "inbox"
+    legacy_inbox.mkdir(parents=True)
+    legacy = legacy_inbox / "photo_photo_xyz.jpg"
+    legacy.write_bytes(b"fake-image-bytes")
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    media_path = media_dir / "photo_new.jpg"
+    media_path.write_bytes(b"new-image-bytes")
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=77))
+    processor = QueueProcessor(
+        bot=bot,
+        backend_client=test_backend_client,
+        storage=user_storage,
+        transcriber=DeepgramTranscriber(mock_transcript="тест"),
+        knowledge_base=_WorkspaceOnlyKnowledgeBase(workspaces_root),
+        turn_timeout_seconds=0.1,
+    )
+
+    await processor.submit_message(
+        user_id=user.id,
+        chat_id=12345,
+        telegram_message_id=5,
+        context_mode="talk",
+        context_task_id=None,
+        context_conversation_id=conv["id"],
+        text="смотри",
+        media_type="photo",
+        media_path=str(media_path),
+    )
+    await asyncio.sleep(0.4)
+
+    messages = await test_backend_client.list_messages(conv["id"])
+    user_messages = [m for m in messages if m["role"] == "user"]
+    assert user_messages
+    assert user_messages[0]["metadata"]["media_type"] == "photo"
+    assert user_messages[0]["metadata"]["media_path"] == str(media_path)
+    # The legacy shared inbox is untouched and the new file is not staged
+    # there; the persistent conversation handler owns attachment staging.
+    assert [item.name for item in legacy_inbox.iterdir()] == [
+        "photo_photo_xyz.jpg"
+    ]
+    assert legacy.read_bytes() == b"fake-image-bytes"
+    assert not (legacy_inbox / "photo_new.jpg").exists()
+
+
 
