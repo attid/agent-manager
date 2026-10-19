@@ -14,6 +14,7 @@ Every advertised tool reaches a working API implementation or reports a truthful
 - T04: evidence-backed analysis, recommendations and approvals (after T01; parallel to T03).
 - T05: integrate T01–T04, finish all advertised operation handlers, comprehensive discoverable agent handbook and executable capability inventory.
 - T06: isolated deterministic Pirozhki E2E plus opt-in real-model acceptance and final verification.
+- T07: independent external AGY review of the complete committed implementation and Pirozhki acceptance; verify findings, fix confirmed defects through Pi, and repeat review before completion.
 
 Each Task has its own file, worktree and commit(s). Worker implementations do not spawn other agents. Coordinator integrates tested commits in dependency order and independently checks results. Do not delete worktrees or maps to save space. Tests must use temporary storage; no production endpoint is permitted. Full suites run in an outer Bubblewrap namespace that substitutes the application state directory.
 
