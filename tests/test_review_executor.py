@@ -126,6 +126,122 @@ def test_parse_changes_requested_accepts_backtick_wrapped_finding() -> None:
     assert "no CSS rule" in findings[0].message
 
 
+@pytest.mark.parametrize(
+    ("line", "severity", "file_name", "line_no", "message"),
+    [
+        (
+            "**P1: index.html:2 — кнопка фактически не становится зелёной.**",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — кнопка фактически не становится зелёной.",
+        ),
+        (
+            "- **P1: index.html:2 — кнопка фактически не становится зелёной.**",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — кнопка фактически не становится зелёной.",
+        ),
+        (
+            "__P2: src/app.py:9 - missing null check__",
+            "P2",
+            "src/app.py",
+            9,
+            "src/app.py:9 - missing null check",
+        ),
+        (
+            "`P3: README.md:4 – typo in the title`",
+            "P3",
+            "README.md",
+            4,
+            "README.md:4 – typo in the title",
+        ),
+        (
+            "**P1**: index.html:2 — missing CSS rule",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — missing CSS rule",
+        ),
+        (
+            "**P1** — index.html:2 — missing CSS rule",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — missing CSS rule",
+        ),
+        (
+            "**P1:** index.html:2 — missing CSS rule",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — missing CSS rule",
+        ),
+        (
+            "P1 — index.html:2 — missing CSS rule",
+            "P1",
+            "index.html",
+            2,
+            "index.html:2 — missing CSS rule",
+        ),
+        (
+            "- `P2: src/app.py:7 — missing regression test`",
+            "P2",
+            "src/app.py",
+            7,
+            "src/app.py:7 — missing regression test",
+        ),
+    ],
+)
+def test_parse_changes_requested_accepts_markdown_finding_variants(
+    line: str,
+    severity: str,
+    file_name: str,
+    line_no: int,
+    message: str,
+) -> None:
+    verdict, findings = parse_review_report(
+        f"{line}\nВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    assert verdict == VERDICT_CHANGES_REQUESTED
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.severity == severity
+    assert finding.file == file_name
+    assert finding.line == line_no
+    assert finding.message == message
+    assert finding.evidence == line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "**P1: **",
+        "**P1 index.html:2 — missing separator**",
+        "**P4: index.html:2 — invalid severity**",
+        "**P1** index.html:2 — missing separator**",
+    ],
+)
+def test_parse_changes_requested_rejects_malformed_markdown_finding(
+    line: str,
+) -> None:
+    with pytest.raises(ReviewFormatError):
+        parse_review_report(f"{line}\nВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n")
+
+
+def test_parse_bold_finding_without_verdict_still_fails() -> None:
+    with pytest.raises(ReviewFormatError):
+        parse_review_report("**P1: index.html:2 — missing CSS rule**\n")
+
+
+def test_parse_approved_with_bold_critical_finding_fails() -> None:
+    with pytest.raises(ReviewFormatError):
+        parse_review_report(
+            "**P1: index.html:2 — missing CSS rule**\nВЕРДИКТ: ОДОБРЕНО\n"
+        )
+
+
 def test_parse_structured_json_block_is_authoritative() -> None:
     report = (
         "Review body.\n"
@@ -243,6 +359,29 @@ def test_execute_changes_requested_round_keeps_findings(tmp_path: Path) -> None:
     assert result.findings[0].file == "src/app.py"
     assert result.findings[0].line == 9
     assert result.to_dict()["verdict"] == "changes_requested"
+
+
+def test_execute_changes_requested_accepts_markdown_bold_finding(
+    tmp_path: Path,
+) -> None:
+    summary = tmp_path / "summary.md"
+    report = (
+        "### Замечания\n\n"
+        "**P1: index.html:2 — кнопка фактически не становится зелёной.**\n"
+        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    executor = _executor(_fake_runner(summary, report))
+
+    result = executor.execute(_request(tmp_path))
+
+    assert result.verdict == VERDICT_CHANGES_REQUESTED
+    assert result.approved is False
+    assert len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding.severity == "P1"
+    assert finding.file == "index.html"
+    assert finding.line == 2
+    assert finding.message == "index.html:2 — кнопка фактически не становится зелёной."
 
 
 def test_execute_parses_pretty_printed_runner_result(tmp_path: Path) -> None:

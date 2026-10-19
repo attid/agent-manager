@@ -113,11 +113,16 @@ _FENCED_JSON_RE = re.compile(
     r"```[ \t]*(?:review|json)[ \t]*\r?\n(.*?)```",
     re.DOTALL | re.IGNORECASE,
 )
+_LIST_ITEM_RE = re.compile(r"^[-*+]\s+")
 _FINDING_RE = re.compile(
-    r"^\s*(?:[-*+]\s+)?`?\s*(P[1-3]|BLOCKER|CRITICAL|MAJOR|MINOR|INFO)"
-    r"\s*[:\-]\s*(.+?)\s*`?\s*$",
+    r"^(?P<severity>P[1-3]|BLOCKER|CRITICAL|MAJOR|MINOR|INFO)"
+    r"\s*(?:\*\*|__|`)?\s*"
+    r"(?P<separator>[:\-\u2013\u2014])\s*"
+    r"(?:\*\*|__|`)?\s*"
+    r"(?P<body>.+?)\s*$",
     re.IGNORECASE,
 )
+_FINDING_MARKUP = ("**", "__", "`")
 _FILE_LINE_RE = re.compile(
     r"([A-Za-z0-9_][A-Za-z0-9_./\-]*\.[A-Za-z0-9_]+)[:\s]+(\d+)"
 )
@@ -314,17 +319,37 @@ def _findings_from_json(payload: Mapping[str, Any]) -> list[ReviewFinding]:
     return findings
 
 
+def _normalize_finding_line(line: str) -> str:
+    """Remove ordinary Markdown decoration around a finding line.
+
+    Reviewers commonly emit findings as list items wrapped in inline code,
+    bold or ``__bold__``. The severity itself may be the only decorated part
+    (``**P1**: ...``). Stripping the wrappers before matching keeps the
+    finding grammar readable; it never relaxes the explicit verdict rules.
+    """
+    text = _LIST_ITEM_RE.sub("", line.strip(), count=1).strip()
+    for marker in _FINDING_MARKUP:
+        if text.startswith(marker):
+            text = text[len(marker):].strip()
+            if text.endswith(marker):
+                text = text[: -len(marker)].strip()
+            break
+    return text
+
+
 def _findings_from_text(report_text: str) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     for line in report_text.splitlines():
-        match = _FINDING_RE.match(line)
+        match = _FINDING_RE.match(_normalize_finding_line(line))
         if match is None:
             continue
-        body = match.group(2).strip()
+        body = match.group("body").strip().rstrip("*_`").strip()
+        if not body:
+            continue
         file_name, line_no = _file_line_from_text(body)
         findings.append(
             ReviewFinding(
-                severity=_normalize_severity(match.group(1)),
+                severity=_normalize_severity(match.group("severity")),
                 message=body,
                 file=file_name,
                 line=line_no,
