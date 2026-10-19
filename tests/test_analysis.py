@@ -388,6 +388,51 @@ def test_approval_is_explicit_and_generation_does_not_mutate_profile(
         database.dispose()
 
 
+def test_applied_profile_recommendation_survives_knowledge_file_sync(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """An applied profile proposal must not be reverted by a file sync.
+
+    The Git-backed ``agents/<id>.md`` export is what a restart/bootstrap
+    imports. Applying only to the database would let the next
+    ``sync_agent_from_file`` resurrect the pre-approval prompt.
+    """
+    database = Database.from_path(migrated_db)
+    try:
+        _make_profile(database, "developer", prompt="Original prompt.")
+        knowledge = KnowledgeBase(tmp_path / "knowledge")
+        profiles = AgentProfileRepository(database)
+        current = profiles.get_current("developer")
+        assert current is not None
+        knowledge.save_agent_profile(current)
+
+        recommendation = _seed_recommendation(
+            database,
+            tmp_path,
+            recommendation=_profile_recommendation(),
+            knowledge_base=knowledge,
+        )
+        service = RecommendationService(database, knowledge_base=knowledge)
+        service.approve(recommendation.id)
+        applied = service.apply(recommendation.id)
+        assert applied.status == "applied"
+
+        exported = (
+            knowledge.agents_dir / "developer.md"
+        ).read_text(encoding="utf-8")
+        assert "Updated developer prompt." in exported
+
+        # A restart-style import reads the exported file and must agree with
+        # the applied revision instead of reverting it.
+        knowledge.sync_agent_from_file("developer", database)
+        after = profiles.get_current("developer")
+        assert after is not None
+        assert after.revision == 2
+        assert after.system_prompt == "Updated developer prompt."
+    finally:
+        database.dispose()
+
+
 def test_stale_approval_conflicts_without_overwriting_newer_content(
     migrated_db: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:

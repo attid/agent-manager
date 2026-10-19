@@ -982,6 +982,11 @@ class RecommendationService:
                 recommendation.id,
                 f"profile revision conflict: {error}",
             ) from error
+        # The Git-backed agent markdown is the durable export other processes
+        # sync from. Persist the applied revision there too, otherwise the
+        # next file sync would silently revert the approved change.
+        if self._knowledge_base is not None:
+            self._knowledge_base.save_agent_profile(updated)
         return {"revision": updated.revision, "content_hash": None,
                 "agent_id": updated.agent_id}
 
