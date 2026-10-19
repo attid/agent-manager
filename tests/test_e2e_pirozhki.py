@@ -19,14 +19,12 @@ import pytest
 from agent_manager.permissions import (
     GIT_ACTIONS,
     REVIEW_TRIGGER,
-    ExecutionPermissions,
     actions_for_tools,
     resources_for_execution,
 )
 from agent_manager.storage import AnalysisRepository
 
 from .pirozhki_harness import (
-    ADMIN_HEADERS,
     PirozhkiInstance,
     pirozhki_instance,
     run_git,
