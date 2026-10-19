@@ -1,0 +1,122 @@
+# Task lifecycle
+
+A task is a durable request for work. `TaskExecutionWorker` claims
+`in_progress` tasks, runs the selected agent through the Pi Runner sandbox,
+optionally runs an internal review cycle, and writes the result back to the
+task row. Task `status` is free-form; the values below are the conventional
+ones the worker and API use.
+
+## Status values
+
+| Status | Set by | Meaning |
+|---|---|---|
+| `incoming` | `POST /tasks`, `create_task` | Draft. Saved, not executed. |
+| `in_progress` | `update_task` / `PATCH /tasks` | Authorizes execution; the worker claims it. |
+| `waiting_user_input` | worker | The agent invoked `ask_clarification`; a human answer is required. |
+| `ready_to_commit` | worker | Code and review completed; waits for an explicit commit/rollback decision. |
+| `done` | worker or Git commit operation | Finished/committed. |
+| `failed` | worker | Runtime error, failed tests or an unhandled exception. |
+| `cancelled` | Git rollback operation | Cancelled or reverted. |
+
+`incoming` does not run anything and does not schedule a future check. The
+secretary must use `status="in_progress"` (or `update_task(..., status=
+"in_progress")`) when the user explicitly asks to execute.
+
+## Creating and editing
+
+- `POST /tasks` with `id` optional; duplicate caller ids return `409`.
+- `PATCH /tasks/{task_id}` updates only supplied fields
+  (`title`, `description`, `status`, `workspace`, `agent_id`, `metadata`);
+  `metadata` replaces the whole stored object.
+- `POST /imports/tasks` imports historical tasks by stable id. Replaying the
+  same ids never duplicates or overwrites, and validation rejects the whole
+  batch before any write.
+- `create_task` / `update_task` preflight the workspace and executor first
+  (see [Workspaces and routing](workspaces-and-routing.md)) and copy the
+  resolved `host_path` into `tasks.workspace`.
+
+## Worker claim and workspace lock
+
+`TaskRepository.claim_in_progress` (`src/agent_manager/storage/repository.py`)
+skips a candidate when another task in the same `workspace` is
+`ready_to_commit` or already `in_progress`. This serializes work per
+workspace while allowing different workspaces to run in parallel.
+
+## Execution
+
+`TaskExecutionWorker.step` (`src/agent_manager/task_worker.py`):
+
+1. claims one `in_progress` task;
+2. selects `task.agent_id` or the worker default, loads the current profile and
+   rejects archived profiles;
+3. resolves the workspace again and writes the effective context to
+   `task.metadata.execution_context`;
+4. builds a role configuration from `runner_config`, pointing `project` at the
+   resolved host directory, extracting `skills`, and enabling
+   `allow_git_commit` for `devops` tasks or `metadata.allow_git_commit`;
+5. reuses a prior native Runner session only when both the executor and the
+   workspace are unchanged; otherwise it starts a new session and keeps older
+   artifacts in their original directory;
+6. runs the child outside any database transaction and stores summary,
+   `changed_files`, errors and provenance.
+
+## Internal review cycle
+
+When the task has `changed_files` and review is required (coding tasks by
+default; a profile/metadata flag can disable it), the worker runs up to three
+review rounds with `system-code-reviewer` before marking the task. The
+reviewer runs read-only against the project and writes reports to task
+artifacts (`review_round_<n>.md`). The verdict strings recognized are
+`ВЕРДИКТ: ОДОБРЕНО` and `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ`. See
+[Review](review.md) for the separation between this in-worker cycle and the
+pending standalone review executor.
+
+## Resume a session
+
+`resume_task_session(task_id, message)`:
+
+- reads the task, appends `{text, timestamp}` to
+  `metadata.additional_instructions`;
+- `PATCH`es the task to `status="in_progress"` with the updated metadata.
+
+It does not itself run the model; it feeds the next worker claim, which
+resumes the prior native session when the executor and workspace are
+unchanged.
+
+## Turns (secretary lifecycle)
+
+Secretary conversations use a separate durable protocol
+(`src/agent_manager/secretary.py`, `src/agent_manager/dispatcher.py`):
+
+- `POST /conversations/{id}/turns` enqueues one `pending` turn for an existing
+  inbound user message. `input_message_id` is unique, so a replay returns the
+  original turn.
+- `QueueDispatcher` claims one eligible turn at a time per conversation
+  (`claim_next`), runs the handler outside any transaction, then completes or
+  fails with the claim token.
+- `TurnProcessor.retry_failed` reopens a `failed` turn to `pending`.
+- `TurnProcessor.recover_abandoned(turn_id, claim_token=...)` reopens an
+  abandoned `running` turn; recovery is caller-authorized, never guessed.
+- `reconcile_startup_orphans` fails `running` turns left by a terminated
+  process so a conversation is never permanently blocked.
+
+The dispatcher loop never dies from one bad turn; loop-level exceptions are
+logged and polling continues.
+
+## Pending interfaces
+
+- T02I/T05: operation-level execution permissions and explicit instance
+  contexts for workers.
+- T03: standalone review executor for `review` operations.
+- T04: analysis runs and recommendation lifecycle.
+- T05: injected platform operating prompt on every run/resume (today the
+  contract is appended through the knowledge catalog instruction file, see
+  [Profiles, runtime and skills](profiles-runtime-skills.md)).
+
+## Related
+
+- `src/agent_manager/task_worker.py`
+- `src/agent_manager/secretary.py`
+- `src/agent_manager/dispatcher.py`
+- `src/agent_manager/storage/repository.py`
+- `src/agent_manager/storage/models.py`

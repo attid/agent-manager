@@ -1,0 +1,83 @@
+# Agent Manager
+
+> Agent Manager is a loopback-only, SQLite-backed agent platform: task and
+> conversation storage, immutable agent profiles, a durable turn queue, a
+> durable operation queue for deferred triggers, a Pi Runner execution
+> boundary and a Telegram secretary. This file is the machine-readable entry
+> point for LLM readers; the human-readable detail lives in `docs/handbook/`.
+
+## Snapshot
+
+This handbook documents the committed platform as of base commit `fc7a3f7`
+(T01 durable operations integrated). Tasks T02I (scoped execution
+permissions), T03 (independent review executor) and T04 (analysis,
+recommendations and approvals) are parallel tasks that have not landed in this
+snapshot. Pending interfaces are labelled explicitly in the handbook; do not
+treat them as implemented. This is not a final parity verification.
+
+## Platform at a glance
+
+- Default API address: `http://127.0.0.1:18767` (loopback only).
+- Storage: one file-backed SQLite database in WAL mode, versioned by Alembic
+  migrations `0001`–`0007`.
+- Execution: `pi_runner` sandboxes each agent run; agent identity and runtime
+  policy come from immutable `AgentProfile` revisions.
+- Deferred work: every review/analysis/Git trigger is a durable `Operation`
+  row, not a synchronous side effect.
+
+## Handbook
+
+- [Handbook index](docs/handbook/README.md): scope, discovery and verification.
+- [Objects and links](docs/handbook/objects.md): Task, Conversation, Message,
+  Turn, AgentProfile, ConversationRuntime, Operation.
+- [Workspaces and routing](docs/handbook/workspaces-and-routing.md): workspace
+  resolution, `agent_id` routing, sandbox paths and code isolation.
+- [Profiles, runtime and skills](docs/handbook/profiles-runtime-skills.md):
+  immutable revisions, runtime defaults, frozen execution and skills.
+- [Task lifecycle](docs/handbook/task-lifecycle.md): statuses, worker, review
+  cycle, resume and recovery.
+- [Tools and API discovery](docs/handbook/tools-and-api.md): REST endpoints,
+  JS tools, auth, idempotency and discovery commands.
+- [Review](docs/handbook/review.md): current automatic review cycle and the
+  pending independent review executor.
+- [Analysis and recommendations](docs/handbook/analysis-and-recommendations.md):
+  the analyzer profile and the pending evidence/recommendation interface.
+- [Approvals and revisions](docs/handbook/approvals-and-revisions.md):
+  optimistic revision checks and explicit-approval rules.
+- [Knowledge and integrations](docs/handbook/knowledge-and-integrations.md):
+  knowledge base, OpenViking, skills, files and Telegram.
+- [Errors, security and isolation](docs/handbook/errors-security-isolation.md):
+  error contract, auth boundary, sandbox guarantees and isolated instances.
+- [Capability inventory](docs/handbook/capability-inventory.md): tool → API →
+  executor → status mapping.
+- [Verification](docs/handbook/verification.md): exact commands and a
+  completion checklist.
+
+## Discovery quick reference
+
+```bash
+# REST surface (authoritative list, no database touched):
+PYTHONPATH=src .venv/bin/python -c \
+  "from agent_manager.api.app import create_app; \
+   app=create_app('sqlite:////tmp/probe.db'); \
+   print('\n'.join(sorted(app.openapi()['paths'])))"
+
+# Registered JS tool names (authoritative list):
+grep -n 'name: "' src/pi_runner/policy.mjs
+
+# Durable operation kinds and their executors:
+grep -n 'OPERATION_KIND_\|worker.register' \
+  src/agent_manager/operation_worker.py src/agent_manager/operation_handlers.py
+```
+
+## Verification quick reference
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest \
+  tests/test_operations.py tests/test_platform_tools_contract.py \
+  tests/test_api.py tests/test_api_auth.py tests/test_persistent_conversation.py \
+  tests/test_execution_contract.py -q
+```
+
+See `docs/handbook/verification.md` for the full bounded set and expected
+outcomes. Only the coordinator runs the final full suite.
