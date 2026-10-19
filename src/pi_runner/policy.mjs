@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { Type } from "typebox";
 
 // An accidental-action guard. This is deliberately not a shell security parser.
@@ -54,6 +55,18 @@ export default function policy(pi) {
     if (params.workspace != null) query.set("workspace", params.workspace);
     if (params.agent_id != null) query.set("agent_id", params.agent_id);
     return backendRequest("GET", `/workspaces/resolve?${query}`);
+  }
+  function operationKey(kind, targetId, payload) {
+    return createHash("sha256").update(JSON.stringify([kind, targetId ?? null, payload ?? null])).digest("hex");
+  }
+  // Submit a durable operation. The default key is deterministic for the same
+  // kind/target/input, so an exact retry after a lost response resolves to the
+  // same operation instead of duplicating the side effect.
+  async function submitOperation(kind, targetId, payload, explicitKey) {
+    const body = { kind, input: payload ?? {} };
+    if (targetId != null) body.target_id = targetId;
+    body.idempotency_key = explicitKey || operationKey(kind, targetId, payload);
+    return backendRequest("POST", "/operations", body);
   }
 
   // 1. Guard against accidental git commit / push
@@ -702,21 +715,14 @@ export default function policy(pi) {
   pi.registerTool({
     name: "trigger_review",
     label: "Trigger Code Review",
-    description: "Trigger an independent Code Review cycle for a specific task.",
+    description: "Submit an independent Code Review operation for a task and return its durable operation id. Inspect the operation to learn the review verdict; submission alone is not a verdict.",
     parameters: Type.Object({
       task_id: Type.String({ description: "Task ID to review" }),
-      instructions: Type.Optional(Type.String({ description: "Optional specific review focus or instructions" }))
+      instructions: Type.Optional(Type.String({ description: "Optional specific review focus or instructions" })),
+      idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      appendJsonArray("/session/actions.json", {
-        action: "trigger_review",
-        task_id: params.task_id.trim(),
-        instructions: (params.instructions || "").trim(),
-        timestamp: new Date().toISOString()
-      });
-      return {
-        content: [{ type: "text", text: `Запущен раунд Code Review для задачи #${params.task_id}.` }]
-      };
+      return toolResult(await submitOperation("review", params.task_id.trim(), { instructions: (params.instructions || "").trim() }, params.idempotency_key));
     }
   });
 
@@ -724,23 +730,16 @@ export default function policy(pi) {
   pi.registerTool({
     name: "trigger_commit_push",
     label: "Trigger Commit and Push",
-    description: "Commit task changes and push to remote git repository with CI monitoring.",
+    description: "Submit a commit/push operation for a task and return its durable operation id. The write is not finished when the tool returns; inspect the operation for the outcome.",
     parameters: Type.Object({
       task_id: Type.String({ description: "Task ID" }),
       push: Type.Optional(Type.Boolean({ description: "Push to remote after local commit (default: true)" })),
-      message: Type.Optional(Type.String({ description: "Custom commit message" }))
+      message: Type.Optional(Type.String({ description: "Custom commit message" })),
+      idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      appendJsonArray("/session/actions.json", {
-        action: "trigger_commit_push",
-        task_id: params.task_id.trim(),
-        push: params.push !== false,
-        message: (params.message || "").trim(),
-        timestamp: new Date().toISOString()
-      });
-      return {
-        content: [{ type: "text", text: `Запущен процесс фиксации и отправки изменений для задачи #${params.task_id}.` }]
-      };
+      const payload = { push: params.push !== false, message: (params.message || "").trim() };
+      return toolResult(await submitOperation("git.commit_push", params.task_id.trim(), payload, params.idempotency_key));
     }
   });
 
@@ -748,19 +747,13 @@ export default function policy(pi) {
   pi.registerTool({
     name: "trigger_rollback",
     label: "Trigger Rollback",
-    description: "Discard working tree changes and cancel task.",
+    description: "Submit a rollback operation for a task and return its durable operation id. Inspect the operation for the outcome.",
     parameters: Type.Object({
-      task_id: Type.String({ description: "Task ID to roll back" })
+      task_id: Type.String({ description: "Task ID to roll back" }),
+      idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      appendJsonArray("/session/actions.json", {
-        action: "trigger_rollback",
-        task_id: params.task_id.trim(),
-        timestamp: new Date().toISOString()
-      });
-      return {
-        content: [{ type: "text", text: `Запущен откат изменений по задаче #${params.task_id}.` }]
-      };
+      return toolResult(await submitOperation("git.rollback", params.task_id.trim(), {}, params.idempotency_key));
     }
   });
 
@@ -768,19 +761,13 @@ export default function policy(pi) {
   pi.registerTool({
     name: "trigger_analysis",
     label: "Trigger Session Analysis",
-    description: "Trigger deep session and log analysis to extract learnings for the knowledge base.",
+    description: "Submit a session-analysis operation for a task and return its durable operation id. Inspect the operation for the report; submission alone is not a result.",
     parameters: Type.Object({
-      task_id: Type.String({ description: "Task ID to analyze" })
+      task_id: Type.String({ description: "Task ID to analyze" }),
+      idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      appendJsonArray("/session/actions.json", {
-        action: "trigger_analysis",
-        task_id: params.task_id.trim(),
-        timestamp: new Date().toISOString()
-      });
-      return {
-        content: [{ type: "text", text: `Запущен глубокий анализ сессии по задаче #${params.task_id}.` }]
-      };
+      return toolResult(await submitOperation("analysis", params.task_id.trim(), {}, params.idempotency_key));
     }
   });
 }

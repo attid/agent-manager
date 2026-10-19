@@ -127,6 +127,7 @@ implemented; the handler is not release-ready for unbounded conversations.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -135,6 +136,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .operation_worker import SESSION_ACTION_KINDS
 from .session_operations import unapplied_items
 from .secretary_contract import SECRETARY_CONTRACT
 from .pi_reply import (
@@ -154,6 +156,7 @@ from .storage import (
     AgentProfileRepository,
     ConversationRuntimeRepository,
     Database,
+    OperationRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,6 +167,20 @@ __all__ = [
     "PersistentConversationHandler",
     "PersistentConversationSessionError",
 ]
+
+
+def _session_action_payload(
+    action_type: str, record: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build the operation input for one legacy session action record."""
+    if action_type == "trigger_commit_push":
+        return {
+            "push": bool(record.get("push", True)),
+            "message": str(record.get("message") or "").strip(),
+        }
+    if action_type == "trigger_review":
+        return {"instructions": str(record.get("instructions") or "").strip()}
+    return {}
 
 
 class PersistentConversationError(Exception):
@@ -834,38 +851,32 @@ class PersistentConversationHandler:
         archived_agents_file = session_pi_dir / "archived_agents.json"
         if archived_agents_file.is_file():
             try:
-                import json as _json
-                archived_data = _json.loads(archived_agents_file.read_text(encoding="utf-8"))
-                if isinstance(archived_data, list):
-                    for ag in archived_data:
-                        a_id = ag.get("agent_id")
-                        if not a_id or a_id in CORE_SYSTEM_AGENTS:
-                            continue
-                        if self._knowledge_base is not None and hasattr(
-                            self._knowledge_base, "archive_agent"
-                        ):
-                            self._knowledge_base.archive_agent(a_id, self._database)
-                        else:
-                            repo = AgentProfileRepository(self._database)
-                            cur = repo.get_current(a_id)
-                            if cur is not None:
-                                repo.archive(a_id, expected_revision=cur.revision)
-                        logger.info("Archived agent %s from session", a_id)
+                for ag in unapplied_items(archived_agents_file):
+                    a_id = ag.get("agent_id")
+                    if not a_id or a_id in CORE_SYSTEM_AGENTS:
+                        continue
+                    if self._knowledge_base is not None and hasattr(
+                        self._knowledge_base, "archive_agent"
+                    ):
+                        self._knowledge_base.archive_agent(a_id, self._database)
+                    else:
+                        repo = AgentProfileRepository(self._database)
+                        cur = repo.get_current(a_id)
+                        if cur is not None:
+                            repo.archive(a_id, expected_revision=cur.revision)
+                    logger.info("Archived agent %s from session", a_id)
             except Exception as e:
                 logger.warning("Failed to archive agents from session: %s", e)
 
         saved_projects_file = session_pi_dir / "saved_projects.json"
-        if saved_projects_file.is_file():
+        if saved_projects_file.is_file() and self._knowledge_base is not None:
             try:
-                import json as _json
-                projects_data = _json.loads(saved_projects_file.read_text(encoding="utf-8"))
-                if isinstance(projects_data, list) and self._knowledge_base is not None:
-                    for prj in projects_data:
-                        p_name = prj.get("name")
-                        p_sum = prj.get("summary")
-                        if p_name and p_sum:
-                            self._knowledge_base.create_or_update_project_summary(p_name, p_sum)
-                            logger.info("Persisted project summary for %s from session", p_name)
+                for prj in unapplied_items(saved_projects_file):
+                    p_name = prj.get("name")
+                    p_sum = prj.get("summary")
+                    if p_name and p_sum:
+                        self._knowledge_base.create_or_update_project_summary(p_name, p_sum)
+                        logger.info("Persisted project summary for %s from session", p_name)
             except Exception as e:
                 logger.warning("Failed to persist saved projects from session: %s", e)
 
@@ -900,87 +911,93 @@ class PersistentConversationHandler:
         install_skills_file = session_pi_dir / "install_skills.json"
         if install_skills_file.is_file():
             try:
-                import json as _json, shutil as _shutil
-                skills_to_install = _json.loads(install_skills_file.read_text(encoding="utf-8"))
-                if isinstance(skills_to_install, list):
-                    skills_base.mkdir(parents=True, exist_ok=True)
-                    for sk in skills_to_install:
-                        s_name = sk.get("name")
-                        src = sk.get("source")
-                        if s_name and src:
-                            src_path = pathlib.Path(src).expanduser().resolve()
-                            if src_path.is_dir():
-                                target = skills_base / s_name
-                                if target.exists():
-                                    _shutil.rmtree(target)
-                                _shutil.copytree(src_path, target)
-                                logger.info("Installed skill %s from %s", s_name, src_path)
+                import shutil as _shutil
+                skills_base.mkdir(parents=True, exist_ok=True)
+                for sk in unapplied_items(install_skills_file):
+                    s_name = sk.get("name")
+                    src = sk.get("source")
+                    if s_name and src:
+                        src_path = pathlib.Path(src).expanduser().resolve()
+                        if src_path.is_dir():
+                            target = skills_base / s_name
+                            if target.exists():
+                                _shutil.rmtree(target)
+                            _shutil.copytree(src_path, target)
+                            logger.info("Installed skill %s from %s", s_name, src_path)
             except Exception as e:
                 logger.warning("Failed to install skills from session: %s", e)
 
         created_skills_file = session_pi_dir / "created_skills.json"
         if created_skills_file.is_file():
             try:
-                import json as _json
-                skills_to_create = _json.loads(created_skills_file.read_text(encoding="utf-8"))
-                if isinstance(skills_to_create, list):
-                    skills_base.mkdir(parents=True, exist_ok=True)
-                    for c_sk in skills_to_create:
-                        c_name = c_sk.get("name")
-                        skill_md = c_sk.get("skill_md")
-                        scripts = c_sk.get("scripts") or {}
-                        if c_name and skill_md:
-                            sk_dir = skills_base / c_name
-                            sk_dir.mkdir(parents=True, exist_ok=True)
-                            (sk_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
-                            for s_file, s_body in scripts.items():
-                                s_dest = sk_dir / s_file
-                                s_dest.parent.mkdir(parents=True, exist_ok=True)
-                                s_dest.write_text(s_body, encoding="utf-8")
-                            logger.info("Created skill %s in %s", c_name, sk_dir)
+                skills_base.mkdir(parents=True, exist_ok=True)
+                for c_sk in unapplied_items(created_skills_file):
+                    c_name = c_sk.get("name")
+                    skill_md = c_sk.get("skill_md")
+                    scripts = c_sk.get("scripts") or {}
+                    if c_name and skill_md:
+                        sk_dir = skills_base / c_name
+                        sk_dir.mkdir(parents=True, exist_ok=True)
+                        (sk_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+                        for s_file, s_body in scripts.items():
+                            s_dest = sk_dir / s_file
+                            s_dest.parent.mkdir(parents=True, exist_ok=True)
+                            s_dest.write_text(s_body, encoding="utf-8")
+                        logger.info("Created skill %s in %s", c_name, sk_dir)
             except Exception as e:
                 logger.warning("Failed to create skills from session: %s", e)
 
-        # Process triggered pipeline actions
+        # Process triggered pipeline actions through the durable operation queue.
+        # The action body is acknowledged only after the idempotent submit
+        # succeeds, so a restart never replays a completed side effect and a
+        # crash after submit reuses the same idempotency key.
         actions_file = session_pi_dir / "actions.json"
         if actions_file.is_file():
             try:
-                import json as _json
-                from .git_engine import GitEngine
-                from .storage import TaskRepository
-                actions = _json.loads(actions_file.read_text(encoding="utf-8"))
-                if isinstance(actions, list) and self._database is not None:
-                    task_repo = TaskRepository(self._database)
-                    for act in actions:
-                        action_type = act.get("action")
-                        t_id = act.get("task_id")
-                        if not t_id:
-                            continue
-                        try:
-                            act_task = task_repo.get(t_id)
-                        except Exception:
-                            act_task = None
-                        ws = act_task.workspace if act_task else None
-                        if action_type == "trigger_commit_push":
-                            engine = GitEngine(default_workspace=ws)
-                            engine.commit_and_push(
-                                workspace=ws,
-                                task_id=t_id,
-                                title=act_task.title if act_task else t_id,
-                                summary=(act_task.meta or {}).get("summary") if act_task else None,
-                                changed_files=(act_task.meta or {}).get("changed_files") if act_task else None,
-                                custom_message=act.get("message"),
-                                push=act.get("push", True),
+                operation_repository = OperationRepository(self._database)
+                for act in unapplied_items(actions_file):
+                    action_type = act.get("action")
+                    t_id = act.get("task_id")
+                    kind = SESSION_ACTION_KINDS.get(action_type)
+                    if not t_id or kind is None:
+                        if action_type is not None:
+                            logger.warning(
+                                "Ignoring unknown session action %r", action_type
                             )
-                            task_repo.update(t_id, status="done")
-                        elif action_type == "trigger_rollback":
-                            engine = GitEngine(default_workspace=ws)
-                            engine.rollback(workspace=ws, changed_files=(act_task.meta or {}).get("changed_files") if act_task else None)
-                            task_repo.update(t_id, status="cancelled")
-                        elif action_type == "trigger_review":
-                            task_repo.update(t_id, status="in_progress")
+                        continue
+                    payload = _session_action_payload(action_type, act)
+                    idempotency_key = hashlib.sha256(
+                        json.dumps(
+                            [
+                                turn_input.conversation_id,
+                                returned_session_id,
+                                action_type,
+                                t_id,
+                                payload,
+                            ],
+                            sort_keys=True,
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    operation_repository.submit(
+                        kind=kind,
+                        target_id=t_id,
+                        input=payload,
+                        idempotency_key=idempotency_key,
+                        metadata={
+                            "source": REPLY_SOURCE,
+                            "session_action": action_type,
+                            "conversation_id": turn_input.conversation_id,
+                        },
+                    )
+                    logger.info(
+                        "Queued %s as durable operation kind=%s task=%s",
+                        action_type,
+                        kind,
+                        t_id,
+                    )
             except Exception as e:
-                logger.warning("Failed to execute session actions: %s", e)
+                logger.warning("Failed to queue session actions: %s", e)
 
         return reply_text
 

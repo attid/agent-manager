@@ -135,10 +135,11 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
     finally:
         connection.close()
     # The single head moved from 0003 to 0004 when the agent_profiles table
-    # was added, and then to 0005 when conversation_runtimes was added; the
-    # assertion that exactly one version row is stored, and that it is the
-    # current head, is unchanged.
-    assert rows == [("0006_task_agent",)]
+    # was added, to 0005 when conversation_runtimes was added, to 0006 when the
+    # task assignment column was added, and to 0007 when the durable operations
+    # table was added; the assertion that exactly one version row is stored,
+    # and that it is the current head, is unchanged.
+    assert rows == [("0007_operations",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

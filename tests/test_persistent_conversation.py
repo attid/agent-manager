@@ -27,6 +27,7 @@ from agent_manager.storage import (
     ConversationRuntimeBusyError,
     ConversationRuntimeRepository,
     Database,
+    OperationRepository,
 )
 from agent_manager.storage.models import ConversationRuntime
 
@@ -1649,5 +1650,82 @@ def test_custom_secretary_receives_platform_contract_without_replacing_identity(
         stored = AgentProfileRepository(database).get_current('triage')
         assert stored.system_prompt == 'Custom identity must remain.'
         assert 'resolve_workspace' not in stored.runner_config['tools']
+    finally:
+        database.dispose()
+
+
+def test_session_actions_become_durable_operations_and_are_not_replayed(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    database = Database.from_path(migrated_db)
+    artifact_root = tmp_path / "artifacts"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True)
+    session_id = "test-session-actions"
+    pi_dir = state_dir / "sessions" / session_id / "pi"
+    pi_dir.mkdir(parents=True)
+    (pi_dir / "actions.json").write_text(
+        json.dumps(
+            [
+                {
+                    "action": "trigger_review",
+                    "task_id": "task-42",
+                    "instructions": "check edge cases",
+                    "timestamp": "t0",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    try:
+        _create_conversation(database)
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                session_id=session_id,
+                summary="Actions queued.",
+                state_dir=state_dir,
+                stateful_session=True,
+            ),
+        )
+        processor = TurnProcessor(database)
+        message = _append_user(database, text="please review")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message.id)
+        turn = processor.claim_next(conversation_id="conv-1")
+        assert turn is not None
+        handler = _handler(database, artifact_root)
+        reply = handler(_turn_input(turn))
+        assert reply == "Actions queued."
+        processor.complete(turn.id, turn.claim_token, text=reply)
+
+        repository = OperationRepository(database)
+        operations = repository.list(kind="review")
+        assert len(operations) == 1
+        assert operations[0].target_id == "task-42"
+        assert operations[0].status == "pending"
+        assert operations[0].input == {"instructions": "check edge cases"}
+        assert operations[0].result is None
+
+        # The session array is acknowledged, so a resumed turn does not queue
+        # the historical action again.
+        message2 = _append_user(database, text="any update?")
+        _enqueue(processor, conversation_id="conv-1", input_message_id=message2.id)
+        turn2 = processor.claim_next(conversation_id="conv-1")
+        handler(_turn_input(turn2))
+        assert len(repository.list(kind="review")) == 1
+
+        # An unrelated conversation is not blocked by the queued operation.
+        _create_conversation(database, conversation_id="conv-2")
+        message3 = _append_user(
+            database, conversation_id="conv-2", text="unrelated"
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-2",
+            input_message_id=message3.id,
+        )
+        turn3 = processor.claim_next(conversation_id="conv-2")
+        assert turn3 is not None
+        assert handler(_turn_input(turn3)) == "Actions queued."
     finally:
         database.dispose()

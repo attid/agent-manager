@@ -176,7 +176,8 @@ def test_upgrade_from_0004_preserves_rows_and_adds_runtime(
         ).fetchall()
     finally:
         connection.close()
-    assert version == [("0006_task_agent",)]
+    # The single head is 0007 after the durable operations table was added.
+    assert version == [("0007_operations",)]
 
     database = Database.from_path(db_path)
     try:

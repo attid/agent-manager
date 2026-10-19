@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..storage.models import AgentProfile, Conversation, Message, Task, Turn
+from ..storage.models import AgentProfile, Conversation, Message, Operation, Task, Turn
 
 
 class TaskCreate(BaseModel):
@@ -407,5 +407,67 @@ def turn_to_read(turn: Turn) -> TurnRead:
         claimed_at=turn.claimed_at,
         finished_at=turn.finished_at,
         metadata=turn.meta,
+    )
+
+
+class OperationSubmit(BaseModel):
+    """Payload accepted by ``POST /operations``.
+
+    ``idempotency_key`` is optional. When supplied, an exact retry returns the
+    stored operation and a reused key with a different payload returns
+    ``409 Conflict``. Extra top-level fields are rejected so a caller cannot
+    silently drop intended input.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    target_id: str | None = None
+    input: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperationRead(BaseModel):
+    """Operation representation returned by the API.
+
+    ``status`` is a protocol value (accepted/pending/running/succeeded/
+    failed/interrupted). A domain verdict belongs inside ``result`` and is not
+    an operation status.
+    """
+
+    id: str
+    kind: str
+    target_id: str | None = None
+    input: dict[str, Any]
+    status: str
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    idempotency_key: str | None = None
+    attempt_count: int = 0
+    created_at: dt.datetime
+    updated_at: dt.datetime
+    claimed_at: dt.datetime | None = None
+    finished_at: dt.datetime | None = None
+    metadata: dict[str, Any]
+
+
+def operation_to_read(operation: Operation) -> OperationRead:
+    """Convert a storage :class:`Operation` into the API representation."""
+    return OperationRead(
+        id=operation.id,
+        kind=operation.kind,
+        target_id=operation.target_id,
+        input=operation.input or {},
+        status=operation.status,
+        result=operation.result,
+        error=operation.error,
+        idempotency_key=operation.idempotency_key,
+        attempt_count=operation.attempt_count,
+        created_at=operation.created_at,
+        updated_at=operation.updated_at,
+        claimed_at=operation.claimed_at,
+        finished_at=operation.finished_at,
+        metadata=operation.meta or {},
     )
 

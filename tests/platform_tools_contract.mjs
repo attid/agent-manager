@@ -56,4 +56,23 @@ assert.equal(missing.status, 'failed');
 assert.equal(missing.http_status, 422);
 const stored = await fetch(`${backend}/tasks`).then(r => r.json());
 assert.equal(stored.length, 1);
-console.log('Synchronous profile create/update, revision conflict, task routing, workspace preflight: passed.');
+
+// Trigger tools route through the durable operation API and return its id.
+const review = await call('trigger_review', { task_id: task.data.id, instructions: 'Check edge cases' });
+assert.equal(review.status, 'applied', JSON.stringify(review));
+assert.equal(review.data.kind, 'review');
+assert.equal(review.data.status, 'pending');
+assert.equal(review.data.target_id, task.data.id);
+assert.deepEqual(review.data.input, { instructions: 'Check edge cases' });
+assert.equal(review.data.result, null);
+const reviewRetry = await call('trigger_review', { task_id: task.data.id, instructions: 'Check edge cases' });
+assert.equal(reviewRetry.data.id, review.data.id);
+const analysis = await call('trigger_analysis', { task_id: task.data.id });
+assert.equal(analysis.status, 'applied', JSON.stringify(analysis));
+assert.equal(analysis.data.kind, 'analysis');
+assert.equal(analysis.data.status, 'pending');
+assert.notEqual(analysis.data.id, review.data.id);
+const fetchedOperation = await fetch(`${backend}/operations/${review.data.id}`).then(r => r.json());
+assert.equal(fetchedOperation.status, 'pending');
+assert.equal(fetchedOperation.result, null);
+console.log('Synchronous profile create/update, revision conflict, task routing, workspace preflight, durable trigger submission: passed.');

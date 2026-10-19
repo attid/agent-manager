@@ -66,6 +66,8 @@ from ..storage import (
     DuplicateConversationIdError,
     DuplicateTaskIdError,
     MessageConflictError,
+    OperationConflictError,
+    OperationRepository,
     TaskNotFoundError,
     TaskRepository,
 )
@@ -78,6 +80,8 @@ from .schemas import (
     MessageAppendResponse,
     MessageCreate,
     MessageRead,
+    OperationRead,
+    OperationSubmit,
     TaskCreate,
     TaskImportRequest,
     TaskImportResponse,
@@ -90,6 +94,7 @@ from .schemas import (
     import_item_to_record,
     message_append_to_response,
     message_to_read,
+    operation_to_read,
     task_to_read,
     turn_to_read,
 )
@@ -116,6 +121,11 @@ _REQUIRED_TABLES = (
     "conversation_runtimes",
     "turns",
 )
+
+# The operations table arrived in the last migration. It is checked after the
+# assignment-migration guard so a database at 0005 still reports the specific
+# missing ``tasks.agent_id`` column instead of the new table.
+_REQUIRED_OPERATION_TABLES = ("operations",)
 
 _MIGRATION_HINT = (
     "Run the migration first: "
@@ -424,13 +434,6 @@ def _sqlite_file_path(url: str) -> Path | None:
     return Path(database)
 
 
-def _missing_tables(database: Database) -> set[str]:
-    """Return the required tables that are absent from the database."""
-    inspector = sa.inspect(database.engine)
-    existing = set(inspector.get_table_names())
-    return {name for name in _REQUIRED_TABLES if name not in existing}
-
-
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create the engine on startup and dispose it on shutdown."""
@@ -443,7 +446,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     database = Database(url)
-    missing = _missing_tables(database)
+    inspector = sa.inspect(database.engine)
+    existing_tables = set(inspector.get_table_names())
+    missing = {
+        name for name in _REQUIRED_TABLES if name not in existing_tables
+    }
     if missing:
         database.dispose()
         raise RuntimeError(
@@ -451,16 +458,34 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             f"{', '.join(sorted(missing))}. "
             + _MIGRATION_HINT.format(url=url)
         )
-
-    task_columns = {column["name"] for column in sa.inspect(database.engine).get_columns("tasks")}
+    # The assignment-migration check stays specific so a database created at
+    # 0005 reports the exact missing column instead of a generic table list.
+    task_columns = {
+        column["name"] for column in inspector.get_columns("tasks")
+    }
     if "agent_id" not in task_columns:
         database.dispose()
-        raise RuntimeError("Database is missing tasks.agent_id. " + _MIGRATION_HINT.format(url=url))
-
+        raise RuntimeError(
+            "Database is missing tasks.agent_id. "
+            + _MIGRATION_HINT.format(url=url)
+        )
+    missing_operations = {
+        name
+        for name in _REQUIRED_OPERATION_TABLES
+        if name not in existing_tables
+    }
+    if missing_operations:
+        database.dispose()
+        raise RuntimeError(
+            f"Database {url} is missing required tables: "
+            f"{', '.join(sorted(missing_operations))}. "
+            + _MIGRATION_HINT.format(url=url)
+        )
     app.state.database = database
     app.state.repository = TaskRepository(database)
     app.state.conversation_repository = ConversationRepository(database)
     app.state.agent_repository = AgentProfileRepository(database)
+    app.state.operation_repository = OperationRepository(database)
     app.state.turn_processor = TurnProcessor(database)
     try:
         # A killed or restarted process leaves turns ``running`` with no live
@@ -562,6 +587,9 @@ def create_app(
 
     def get_turn_processor(request: Request) -> TurnProcessor:
         return request.app.state.turn_processor
+
+    def get_operation_repository(request: Request) -> OperationRepository:
+        return request.app.state.operation_repository
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -853,6 +881,81 @@ def create_app(
                 detail=f"turn not found: {turn_id}",
             )
         return turn_to_read(turn)
+
+    @app.post(
+        "/operations",
+        response_model=OperationRead,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def submit_operation(
+        payload: OperationSubmit,
+        response: Response,
+        repository: OperationRepository = Depends(
+            get_operation_repository
+        ),
+    ) -> OperationRead:
+        """Submit a durable operation; exact idempotent retries reuse it.
+
+        ``202 Accepted`` means a new queued operation was written; ``200 OK``
+        means the idempotency key matched a stored operation and no row was
+        written. A reused key with a different payload returns ``409
+        Conflict`` and leaves the original untouched. The response is the
+        operation record, so a lost write response is resolved by reading the
+        same operation id. A submitted operation is never itself proof of a
+        completed side effect; callers inspect ``status``/``result``/``error``.
+        """
+        try:
+            result = repository.submit(
+                kind=payload.kind,
+                target_id=payload.target_id,
+                input=payload.input,
+                idempotency_key=payload.idempotency_key,
+                metadata=payload.metadata,
+            )
+        except OperationConflictError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        if result.replayed:
+            response.status_code = status.HTTP_200_OK
+        return operation_to_read(result.operation)
+
+    @app.get("/operations", response_model=list[OperationRead])
+    def list_operations(
+        status_filter: str | None = Query(default=None, alias="status"),
+        kind: str | None = Query(default=None),
+        target_id: str | None = Query(default=None),
+        limit: int | None = Query(default=None),
+        offset: int = Query(default=0),
+        repository: OperationRepository = Depends(
+            get_operation_repository
+        ),
+    ) -> list[OperationRead]:
+        operations = repository.list(
+            status=status_filter,
+            kind=kind,
+            target_id=target_id,
+            limit=limit,
+            offset=offset,
+        )
+        return [operation_to_read(item) for item in operations]
+
+    @app.get("/operations/{operation_id}", response_model=OperationRead)
+    def get_operation(
+        operation_id: str,
+        repository: OperationRepository = Depends(
+            get_operation_repository
+        ),
+    ) -> OperationRead:
+        """Return one operation, including status, result and error."""
+        operation = repository.get(operation_id)
+        if operation is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"operation not found: {operation_id}",
+            )
+        return operation_to_read(operation)
 
     @app.post(
         "/agents",

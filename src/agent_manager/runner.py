@@ -24,6 +24,13 @@ from agent_manager.api import create_app
 from agent_manager.dispatcher import QueueDispatcher
 from agent_manager.knowledge import KnowledgeBase
 from agent_manager.logging import configure_logging
+from agent_manager.operation_handlers import (
+    register_default_operation_handlers,
+)
+from agent_manager.operation_worker import (
+    OperationInstanceContext,
+    OperationWorker,
+)
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.storage import Database
 from agent_manager.task_worker import TaskExecutionWorker
@@ -176,6 +183,7 @@ class AgentManagerServices:
         self.database: Database | None = None
         self.queue_dispatcher: QueueDispatcher | None = None
         self.task_worker: TaskExecutionWorker | None = None
+        self.operation_worker: OperationWorker | None = None
         self.bot = None
         self.dp = None
         self.telegram_notifier: TelegramNotifier | None = None
@@ -262,7 +270,24 @@ class AgentManagerServices:
             poll_interval_seconds=1.0,
         )
 
-        # 6. FastAPI Uvicorn Server
+        # 6. Durable Operation Worker (deferred triggers: review, analysis, Git)
+        operation_artifacts = self.config.artifact_root / "operations"
+        operation_artifacts.mkdir(parents=True, exist_ok=True)
+        operation_instance = OperationInstanceContext(
+            database=self.database,
+            artifact_root=operation_artifacts,
+            runner_argv_prefix=tuple(self.config.runner_argv_prefix),
+            default_workspace=self.config.default_workspace,
+            knowledge_base=self.knowledge_base,
+        )
+        self.operation_worker = OperationWorker(
+            self.database,
+            instance=operation_instance,
+            poll_interval_seconds=1.0,
+        )
+        register_default_operation_handlers(self.operation_worker)
+
+        # 7. FastAPI Uvicorn Server
         app = create_app(
             self.config.database_url,
             api_tokens=self.config.api_tokens,
@@ -289,8 +314,19 @@ class AgentManagerServices:
             logger.info("Starting TaskExecutionWorker background thread...")
             self.task_worker.start()
 
+        if self.operation_worker:
+            logger.info("Starting OperationWorker background thread...")
+            self.operation_worker.start()
+
     def stop_background_threads(self) -> None:
         """Stop background worker threads gracefully."""
+        if self.operation_worker:
+            logger.info("Stopping OperationWorker...")
+            try:
+                self.operation_worker.stop(timeout=5.0)
+            except Exception as e:
+                logger.warning("Error stopping OperationWorker: %s", e)
+
         if self.task_worker:
             logger.info("Stopping TaskExecutionWorker...")
             try:

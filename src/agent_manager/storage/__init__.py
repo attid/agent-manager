@@ -58,7 +58,24 @@ from .conversation_runtime import (
     release_interrupted_reservation,
 )
 from .database import DEFAULT_BUSY_TIMEOUT_MS, Database
-from .models import AgentProfile, Base, Conversation, Message, Task, Turn
+from .models import AgentProfile, Base, Conversation, Message, Operation, Task, Turn
+from .operations import (
+    OPERATION_QUEUED_STATUSES,
+    OPERATION_STATUSES,
+    OPERATION_STATUS_ACCEPTED,
+    OPERATION_STATUS_FAILED,
+    OPERATION_STATUS_INTERRUPTED,
+    OPERATION_STATUS_PENDING,
+    OPERATION_STATUS_RUNNING,
+    OPERATION_STATUS_SUCCEEDED,
+    OPERATION_TERMINAL_STATUSES,
+    OperationConflictError,
+    OperationError,
+    OperationNotFoundError,
+    OperationRepository,
+    OperationStaleClaimError,
+    OperationSubmitResult,
+)
 from .repository import (
     ConversationNotFoundError,
     ConversationRepository,
@@ -102,6 +119,22 @@ __all__ = [
     "Message",
     "MessageAppendResult",
     "MessageConflictError",
+    "OPERATION_QUEUED_STATUSES",
+    "OPERATION_STATUSES",
+    "OPERATION_STATUS_ACCEPTED",
+    "OPERATION_STATUS_FAILED",
+    "OPERATION_STATUS_INTERRUPTED",
+    "OPERATION_STATUS_PENDING",
+    "OPERATION_STATUS_RUNNING",
+    "OPERATION_STATUS_SUCCEEDED",
+    "OPERATION_TERMINAL_STATUSES",
+    "Operation",
+    "OperationConflictError",
+    "OperationError",
+    "OperationNotFoundError",
+    "OperationRepository",
+    "OperationStaleClaimError",
+    "OperationSubmitResult",
     "RuntimeReservation",
     "Task",
     "TaskImportResult",

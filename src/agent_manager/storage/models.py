@@ -345,3 +345,88 @@ class Turn(Base):
     meta: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSON, nullable=False, default=dict, server_default="{}"
     )
+
+
+class Operation(Base):
+    """A durable, observable unit of deferred platform work.
+
+    An operation is the queue record behind every deferred trigger (review,
+    analysis, Git actions and future executors). It stores the executor kind,
+    an optional target identifier, the free-form JSON input and result, the
+    last error, an optional caller-supplied idempotency key, the number of
+    claim attempts and the full intake/claim/finish timestamps.
+
+    Public protocol statuses are ``accepted``/``pending`` (queued),
+    ``running`` (claimed by exactly one worker), and the terminal
+    ``succeeded``/``failed``/``interrupted``. They are execution states and
+    are independent of the free-form :class:`Task` status and of any domain
+    verdict a handler may return (for example ``changes_requested``), which is
+    stored inside :attr:`result`.
+
+    ``idempotency_key`` is nullable and unique. SQLite treats NULL keys as
+    distinct, so callers that omit a key always create a new operation. When a
+    key is supplied, an exact retry returns the stored operation and a reused
+    key with a different ``kind``/``target_id``/``input``/``metadata`` payload
+    is rejected instead of silently overwriting the original.
+
+    ``claim_token`` fences completion and failure: only the worker that holds
+    the current token may move a ``running`` operation to a terminal state.
+    ``attempt_count`` and ``worker_id`` retain the execution history.
+    """
+
+    __tablename__ = "operations"
+    __table_args__ = (
+        UniqueConstraint("id", name="uq_operations_id"),
+        UniqueConstraint(
+            "idempotency_key", name="uq_operations_idempotency_key"
+        ),
+        Index("ix_operations_status", "status"),
+        Index("ix_operations_target", "target_id"),
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    target_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    input: Mapped[dict[str, Any]] = mapped_column(
+        "input", JSON, nullable=False, default=dict, server_default="{}"
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default="pending"
+    )
+    result: Mapped[dict[str, Any] | None] = mapped_column(
+        "result", JSON, nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )
+    claim_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    finished_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON, nullable=False, default=dict, server_default="{}"
+    )

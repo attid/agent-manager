@@ -86,9 +86,10 @@ def test_base_metadata_matches_migrated_schema(
 
     The expectation grew from ``{"tasks"}`` to include the conversation and
     message tables added by revision 0002, the ``turns`` table added by
-    revision 0003, the ``agent_profiles`` table added by revision 0004 and
-    the ``conversation_runtimes`` table added by revision 0005; the migration
-    chain is still the single source of the physical schema.
+    revision 0003, the ``agent_profiles`` table added by revision 0004, the
+    ``conversation_runtimes`` table added by revision 0005 and the durable
+    ``operations`` table added by revision 0007; the migration chain is still
+    the single source of the physical schema.
     """
     from sqlalchemy import inspect
 
@@ -101,6 +102,7 @@ def test_base_metadata_matches_migrated_schema(
             "turns",
             "agent_profiles",
             "conversation_runtimes",
+            "operations",
         }
         assert Base.metadata.tables.keys() == expected
         migrated = set(inspect(database.engine).get_table_names())
