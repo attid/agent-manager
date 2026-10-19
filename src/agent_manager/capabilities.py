@@ -256,6 +256,12 @@ def _endpoint(
 
 
 _TOOL_CAPABILITIES: tuple[Capability, ...] = (
+    *(_tool(
+        name, method=method, path="/tasks/{task_id}/subscriptions",
+        action="tasks.write", request_schema="TaskSubscriptionCreate",
+        result_statuses=("applied", "failed", "unknown"), deferred=True,
+        doc="task-lifecycle.md", summary="subscribe the originating conversation to a task outcome or cancel before queuing",
+    ) for name, method in (("subscribe_task", "POST"), ("unsubscribe_task", "DELETE"))),
     # -- API-backed reads -------------------------------------------------
     _tool(
         "list_tasks",
@@ -839,6 +845,11 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
 
 #: The complete advertised surface: 28 tools plus every REST endpoint.
 CAPABILITIES: tuple[Capability, ...] = (
+    *(_endpoint(
+        method, "/tasks/{task_id}/subscriptions", deferred=True,
+        request_schema="TaskSubscriptionCreate", doc="task-lifecycle.md",
+        summary="persist or cancel a completion subscription for the originating conversation",
+    ) for method in ("POST", "DELETE")),
     *_TOOL_CAPABILITIES,
     *_ENDPOINT_CAPABILITIES,
 )

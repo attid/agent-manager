@@ -6,6 +6,17 @@ For the next approximately one hour, the user requested direct coordinator edits
 
 ## Deferred verification
 
+- After sprint, review task-completion subscriptions: event injection, delivery
+  recovery, subscription management across `/reset`, and retrying an event turn
+  interrupted during model execution. Ordinary dispatcher orphan handling still
+  applies; no automatic model retries or exact-once Telegram guarantee were added.
+- On the next explicitly authorized rollout, add `subscribe_task` and
+  `unsubscribe_task` to the existing secretary profile, preserving its prompt
+  and other tools. Default newly created profiles include them; customized
+  existing profiles are not silently widened. `/watch` works independently of
+  the model's tool list after deployment. Test one real secretary continuation
+  then; the sprint validates queue/delivery with isolated deterministic handlers.
+
 - Independently review attachment fixes in `7854936..3a1ca60` after the sprint. The review was started before the sprint and interrupted at the user's mode change; no final verdict is claimed. Existing validation before sprint: 501 tests passed, 2 opt-in tests skipped; coordinator independently ran 46 relevant tests successfully, including real Bubblewrap isolation. Preserve `/tmp/am-agy-attachment-review-round1.log` and existing task reports. Do not repeat the full suite during the sprint.
 - Before a later rollout, verify the two reported user flows: reset then text greeting without stale attachments; send a document, then an unrelated image question without document replay. Attachment source changes are committed locally; production remains on `7854936`.
 

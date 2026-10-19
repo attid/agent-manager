@@ -757,6 +757,7 @@ class PersistentConversationHandler:
                 resolved_role["backend"] = self._instance.child_backend(
                     grant.token
                 )
+                resolved_role["backend"]["conversation_id"] = turn_input.conversation_id
         catalog_text = None
         if self._knowledge_base is not None and hasattr(
             self._knowledge_base, "get_catalog_index"

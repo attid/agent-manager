@@ -136,6 +136,8 @@ ACTIONS_FOR_TOOLS: Mapping[str, str] = {
     "create_task": TASKS_WRITE,
     "update_task": TASKS_WRITE,
     "resume_task_session": TASKS_WRITE,
+    "subscribe_task": TASKS_WRITE,
+    "unsubscribe_task": TASKS_WRITE,
     "resolve_workspace": WORKSPACES_READ,
     "list_agents": AGENTS_READ,
     "get_agent": AGENTS_READ,
@@ -337,6 +339,8 @@ def resolve_requirement(method: str, path: str) -> Requirement | None:
     if path == "/health":
         return None
     path = path.rstrip("/") or "/"
+    if method in {"POST", "DELETE"} and _match("/tasks/{task_id}/subscriptions", path) is not None:
+        return Requirement(deferred=True)
     # The operations routes carry several kinds and an ownership dimension
     # the URL alone cannot express. They authenticate here and defer the
     # concrete action/resource decision to the handler.

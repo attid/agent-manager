@@ -179,7 +179,7 @@ def test_upgrade_from_0004_preserves_rows_and_adds_runtime(
     # The single head moved to 0009 after analysis reports and
     # recommendations were added; the assertion still verifies exactly one
     # head row records the current schema.
-    assert version == [("0010_task_numbers",)]
+    assert version == [("0011_task_subscriptions",)]
 
     database = Database.from_path(db_path)
     try:

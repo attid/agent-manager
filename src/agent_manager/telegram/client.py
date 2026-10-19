@@ -86,6 +86,12 @@ class BackendClient:
 
     # -- Tasks --
 
+    async def subscribe_task(self, task_id: str, conversation_id: str, *, instructions: str = "", cancel: bool = False) -> dict[str, Any]:
+        return await self._request(
+            "DELETE" if cancel else "POST", f"/tasks/{task_id}/subscriptions",
+            json={"conversation_id": conversation_id, "instructions": instructions},
+        )
+
     async def create_task(
         self,
         title: str,

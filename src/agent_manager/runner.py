@@ -38,6 +38,7 @@ from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.storage import Database
 from agent_manager.task_worker import TaskExecutionWorker
+from agent_manager.task_subscriptions import TaskSubscriptions
 from agent_manager.telegram.bot import create_bot, setup_bot_commands
 from agent_manager.telegram.config import TelegramConfig
 from agent_manager.telegram.notifier import TelegramNotifier
@@ -241,6 +242,7 @@ class AgentManagerServices:
         self.queue_dispatcher: QueueDispatcher | None = None
         self.task_worker: TaskExecutionWorker | None = None
         self.operation_worker: OperationWorker | None = None
+        self.task_subscriptions: TaskSubscriptions | None = None
         self.bot = None
         self.dp = None
         self.queue_processor = None
@@ -351,11 +353,17 @@ class AgentManagerServices:
         task_artifacts = self.config.artifact_root / "tasks"
         task_artifacts.mkdir(parents=True, exist_ok=True)
 
-        on_task_finished = (
-            self.telegram_notifier.notify_sync
-            if self.telegram_notifier is not None
-            else None
+        self.task_subscriptions = TaskSubscriptions(
+            self.database, knowledge_base=self.knowledge_base,
+            default_chat_id=(self.config.telegram_config.allowed_user_id if self.config.telegram_config else None),
         )
+
+        def on_task_finished(task, outcome):
+            try:
+                self.task_subscriptions.enqueue_ready(task.id)
+            finally:
+                if self.telegram_notifier is not None:
+                    self.telegram_notifier.notify_sync(task, outcome)
 
         self.task_worker = TaskExecutionWorker(
             database=self.database,
@@ -454,6 +462,9 @@ class AgentManagerServices:
     async def run(self) -> None:
         """Run async loops: uvicorn server and Telegram bot polling."""
         tasks: list[asyncio.Task[Any]] = []
+
+        if self.task_subscriptions is not None:
+            tasks.append(asyncio.create_task(self.task_subscriptions.run(self.bot), name="task-subscriptions"))
 
         if self.uvicorn_server:
             tasks.append(asyncio.create_task(self.uvicorn_server.serve(), name="uvicorn"))

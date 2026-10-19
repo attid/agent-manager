@@ -153,6 +153,40 @@ async def cmd_list(
     )
 
 
+@router.message(Command("watch", "unwatch"))
+async def cmd_watch(message: Message, storage: UserStateStorage, client: BackendClient) -> None:
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2:
+        await message.answer("Укажите номер задачи: /watch 8 или /unwatch 8.")
+        return
+    cancel = parts[0].split("@", 1)[0] == "/unwatch"
+    try:
+        task = await client.get_task(parts[1])
+        state = storage.get_user_state(message.from_user.id)
+        conversation_id = state.active_conversation_id or state.talk_conversation_id
+        if not conversation_id:
+            conv = await client.create_conversation(
+                title="Общий разговор (Telegram)",
+                metadata={"chat_id": message.chat.id, "user_id": message.from_user.id},
+            )
+            conversation_id = conv["id"]
+            storage.set_talk_conversation(message.from_user.id, conversation_id)
+            storage.set_user_mode(message.from_user.id, "talk", conversation_id=conversation_id)
+        result = await client.subscribe_task(
+            task["id"], conversation_id, instructions=parts[2] if len(parts) > 2 else "", cancel=cancel,
+        )
+        number = task_display_number(task)
+        if cancel:
+            text = f"Ожидание результата задачи #{number} отменено."
+        elif result["status"] == "delivered":
+            text = f"Результат задачи #{number} уже разобран в этом диалоге."
+        else:
+            text = f"Подписка на задачу #{number} сохранена. Когда она завершится, секретарь разберёт результат и ответит здесь."
+        await message.answer(text, parse_mode=None)
+    except Exception as error:
+        await message.answer(f"Не удалось изменить подписку: {error}", parse_mode=None)
+
+
 async def _render_analysis_report(
     message: Message,
     client: BackendClient,

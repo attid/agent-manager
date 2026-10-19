@@ -78,4 +78,20 @@ assert.equal(clarification.status, 'awaiting_user', JSON.stringify(clarification
 assert.equal(clarification.question, 'Which project?');
 assert.ok(fs.existsSync(redirect('/session/clarification.json')));
 
-console.log('Session-deferred tools return structured pending status: passed.');
+// Completion subscriptions use the host-provided conversation, never a
+// model-supplied destination. Exercise the registered tools' real requests.
+const missingContext = await call('subscribe_task', { task_id: '8' });
+assert.equal(missingContext.status, 'failed');
+fs.writeFileSync('/session/backend_api.json', JSON.stringify({ backend_url: 'http://fixture', conversation_id: 'origin-conversation' }));
+const requests = [];
+globalThis.fetch = async (url, init) => {
+  requests.push({ url, method: init.method, body: JSON.parse(init.body) });
+  return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'pending' }) };
+};
+assert.equal((await call('subscribe_task', { task_id: '8', instructions: 'Summarize findings' })).status, 'applied');
+assert.equal((await call('unsubscribe_task', { task_id: '8' })).status, 'applied');
+assert.deepEqual(requests.map(r => r.method), ['POST', 'DELETE']);
+assert.equal(requests[0].url, 'http://fixture/tasks/8/subscriptions');
+assert.equal(requests[0].body.conversation_id, 'origin-conversation');
+assert.equal(requests[0].body.instructions, 'Summarize findings');
+console.log('Session-deferred tools and task subscriptions: passed.');

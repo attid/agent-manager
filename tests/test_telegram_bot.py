@@ -29,6 +29,7 @@ from agent_manager.telegram.handlers import (
     cmd_new,
     cmd_start,
     cmd_talk,
+    cmd_watch,
     on_category_switch,
     on_select_task,
     on_talk_task,
@@ -355,6 +356,31 @@ async def test_task_selection_and_status_patch(
 
 
 # 7. FIFO Queue and Cancellation
+
+
+@sync_test
+async def test_watch_command_subscribes_current_dialogue_and_can_cancel(
+    user_storage: UserStateStorage,
+    test_backend_client: BackendClient,
+    migrated_db: pathlib.Path,
+) -> None:
+    import sqlite3
+
+    task = await test_backend_client.create_task(title="Background research", status="in_progress")
+    message = _make_message(text=f"/watch {task['number']} Explain the findings")
+    await cmd_watch(message, storage=user_storage, client=test_backend_client)
+    state = user_storage.get_user_state(message.from_user.id)
+    assert state.active_conversation_id is not None
+    assert f"#{task['number']}" in message.answer.call_args.args[0]
+    with sqlite3.connect(migrated_db) as connection:
+        assert connection.execute(
+            "SELECT task_id,conversation_id,status,instructions FROM task_subscriptions"
+        ).fetchone() == (task["id"], state.active_conversation_id, "pending", "Explain the findings")
+    message.text = f"/unwatch {task['number']}"
+    await cmd_watch(message, storage=user_storage, client=test_backend_client)
+    assert "отменено" in message.answer.call_args.args[0]
+    with sqlite3.connect(migrated_db) as connection:
+        assert connection.execute("SELECT status FROM task_subscriptions").fetchone() == ("cancelled",)
 
 
 @sync_test

@@ -1,5 +1,28 @@
 # Task lifecycle
 
+## Completion subscriptions
+
+`subscribe_task(task_id="8", instructions="Summarize the findings and continue the agreed plan")`
+subscribes the current conversation to one task outcome. The host supplies the
+conversation identity; the model cannot redirect a subscription to another
+conversation. Telegram users can also send `/watch 8` (with optional instructions)
+or `/unwatch 8`. Cancellation is available until the event is queued.
+
+The subscription is stored before returning success. On completion, failure or
+a request for clarification, the service atomically appends an explicitly marked
+`task_event` input and enqueues a normal secretary turn in the original dialogue.
+It is not a new human instruction or approval. The secretary reads the result,
+answers in Telegram and may continue only the previously authorized plan.
+Polling recovers missed completion callbacks after a restart. Repeated subscription
+calls are idempotent and do not generate another model call for the same subscription.
+
+API: `POST /tasks/{id-or-number}/subscriptions` with `conversation_id` and optional
+`instructions`; `DELETE` at the same path cancels a pending subscription.
+The response exposes the subscription `status` and eventual `turn_id`.
+Reply delivery retries separately from model execution and records per-part
+progress; a failed Telegram send does not rerun the secretary. Transport delivery
+is at-least-once across a crash in the send/acknowledge window.
+
 Tasks expose a stable human `number` (`#1`, `#2`, …) alongside their internal
 `id`. Display the number in Telegram and user conversations. `GET`/`PATCH
 /tasks/5` resolve a number; exact internal IDs remain supported. Read the

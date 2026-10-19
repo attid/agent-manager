@@ -146,7 +146,7 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
     # to 0009 when the analysis reports and recommendations tables were added;
     # the assertion that exactly one version row is stored, and that it is the
     # current head, is unchanged.
-    assert rows == [("0010_task_numbers",)]
+    assert rows == [("0011_task_subscriptions",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

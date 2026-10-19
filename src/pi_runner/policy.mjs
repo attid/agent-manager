@@ -401,6 +401,23 @@ export default function policy(pi) {
     }
   });
 
+  for (const [name, method] of [["subscribe_task", "POST"], ["unsubscribe_task", "DELETE"]]) {
+    pi.registerTool({
+      name, label: name === "subscribe_task" ? "Subscribe to Task" : "Cancel Task Subscription",
+      description: name === "subscribe_task"
+        ? "Subscribe this conversation to one task outcome. When it finishes, a durable system event resumes the secretary and delivers the reply to Telegram. Repeating the subscription is idempotent."
+        : "Cancel a task subscription before its completion event has been queued.",
+      parameters: Type.Object({ task_id: Type.String(), instructions: Type.Optional(Type.String()) }),
+      async execute(toolCallId, params) {
+        const cfg = getBackendConfig();
+        if (!cfg.conversation_id) return toolResult({ status: "failed", error: "No originating conversation is configured for this execution" });
+        return toolResult(await backendRequest(method, `/tasks/${encodeURIComponent(params.task_id)}/subscriptions`, {
+          conversation_id: cfg.conversation_id, instructions: params.instructions || ""
+        }));
+      }
+    });
+  }
+
   pi.registerTool({
     name: "resolve_workspace", label: "Resolve Workspace",
     description: "Read-only preflight: returns the exact host directory, /workspace mount, executor and filesystem/network policy. Missing explicit paths fail; no fallback to another project.",

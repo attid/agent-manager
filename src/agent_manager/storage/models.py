@@ -35,6 +35,18 @@ class Base(DeclarativeBase):
     """Declarative base that owns the schema metadata used by Alembic."""
 
 
+class TaskSubscription(Base):
+    """One durable completion subscription for a task and conversation."""
+
+    __tablename__ = "task_subscriptions"
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), primary_key=True)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending", server_default="pending")
+    turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    parts_sent: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+
 class Task(Base):
     """A durable task record.
 

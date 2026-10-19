@@ -388,6 +388,7 @@ class KnowledgeBase:
             "resolve_workspace", "list_tasks", "get_task", "create_task", "update_task", "get_task_logs", "resume_task_session",
             "list_skills", "install_skill", "create_skill",
             "trigger_review", "trigger_commit_push", "trigger_rollback", "trigger_analysis",
+            "subscribe_task", "unsubscribe_task",
             "list_analysis_reports", "get_analysis_report", "list_recommendations",
             "preview_recommendation", "approve_recommendation", "apply_recommendation",
         ]

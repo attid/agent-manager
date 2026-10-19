@@ -106,6 +106,7 @@ def test_base_metadata_matches_migrated_schema(
             "operations",
             "analysis_reports",
             "recommendations",
+            "task_subscriptions",
         }
         assert Base.metadata.tables.keys() == expected
         migrated = set(inspect(database.engine).get_table_names())

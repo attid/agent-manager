@@ -75,6 +75,11 @@ class TaskImportResponse(BaseModel):
     skipped: int
 
 
+class TaskSubscriptionCreate(BaseModel):
+    conversation_id: str
+    instructions: str = ""
+
+
 class TaskRead(BaseModel):
     """Task representation returned by the API."""
 

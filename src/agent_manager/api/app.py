@@ -106,6 +106,7 @@ from .schemas import (
     TaskImportResponse,
     TaskPatch,
     TaskRead,
+    TaskSubscriptionCreate,
     TurnCreate,
     TurnRead,
     agent_to_read,
@@ -919,6 +920,39 @@ def create_app(
         if task is None:
             raise HTTPException(status_code=404, detail="task not found")
         return task_to_read(task)
+
+    def change_task_subscription(task_id, payload, request, *, cancel=False):
+        from ..task_subscriptions import TaskSubscriptions
+
+        grant = getattr(request.state, "execution_grant", None)
+        if grant is not None and (
+            grant.label != f"conversation:{payload.conversation_id}"
+            or not ({"tasks.write", "*"} & grant.actions)
+        ):
+            raise HTTPException(status_code=403, detail="subscription requires the originating conversation grant")
+        repository = request.app.state.repository
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        if grant is not None and not request.app.state.permissions.authorize(grant.token, "tasks.write", f"task:{task.id}"):
+            raise HTTPException(status_code=404, detail="task not found")
+        service = TaskSubscriptions(request.app.state.database)
+        try:
+            if cancel:
+                return service.cancel(task.id, payload.conversation_id)
+            return service.subscribe(task.id, payload.conversation_id, payload.instructions)
+        except LookupError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/tasks/{task_id}/subscriptions")
+    def subscribe_task(task_id: str, payload: TaskSubscriptionCreate, request: Request) -> dict[str, Any]:
+        return change_task_subscription(task_id, payload, request)
+
+    @app.delete("/tasks/{task_id}/subscriptions")
+    def unsubscribe_task(task_id: str, payload: TaskSubscriptionCreate, request: Request) -> dict[str, Any]:
+        return change_task_subscription(task_id, payload, request, cancel=True)
 
     @app.patch("/tasks/{task_id}", response_model=TaskRead)
     def patch_task(
