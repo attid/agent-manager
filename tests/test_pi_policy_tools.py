@@ -8,7 +8,8 @@ import tempfile
 import unittest
 
 import pi_runner
-from pi_runner.cli import execute
+from pi_runner.cli import build_pi_command, execute
+from pi_runner.core import Config
 
 
 class PolicyToolsTests(unittest.TestCase):
@@ -20,25 +21,39 @@ class PolicyToolsTests(unittest.TestCase):
             res = subprocess.run([node, "-c", str(policy_path)], capture_output=True, text=True)
             self.assertEqual(res.returncode, 0, f"policy.mjs syntax error: {res.stderr}")
 
-    def test_backend_api_json_generation(self):
+    def _write_config(self, root, extra):
+        repo = root / "repo"
+        repo.mkdir(exist_ok=True)
+        (repo / "dummy.txt").write_text("hello")
+        config = {
+            "agent_id": "test-agent",
+            "project": str(repo),
+            "state_dir": str(root / "state"),
+            "pi_command": ["python3", "-c", "import sys; sys.exit(0)"],
+            "runtime_paths": [shutil.which("python3")],
+        }
+        config.update(extra)
+        config_file = root / "config.json"
+        config_file.write_text(json.dumps(config))
+        task_file = root / "task.md"
+        task_file.write_text("Test task")
+        return config_file, task_file
+
+    def test_backend_api_json_uses_only_explicit_instance_settings(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            repo = root / "repo"
-            repo.mkdir()
-            (repo / "dummy.txt").write_text("hello")
-
-            config_file = root / "config.json"
-            config_file.write_text(json.dumps({
-                "agent_id": "test-agent",
-                "project": str(repo),
-                "state_dir": str(root / "state"),
-                "pi_command": ["python3", "-c", "import sys; sys.exit(0)"],
-                "runtime_paths": [shutil.which("python3")],
-                "tools": ["list_tasks", "openviking_search"],
-            }))
-
-            task_file = root / "task.md"
-            task_file.write_text("Test task")
+            config_file, task_file = self._write_config(
+                root,
+                {
+                    "tools": ["list_tasks", "openviking_search"],
+                    "backend": {
+                        "backend_url": "http://instance.example:9999",
+                        "api_token": "scoped-execution-token",
+                        "openviking_url": "http://viking.example:1933",
+                        "openviking_token": "viking-instance-token",
+                    },
+                },
+            )
 
             result = execute(config_file, task_file)
             session_id = result["session_id"]
@@ -47,7 +62,41 @@ class PolicyToolsTests(unittest.TestCase):
             self.assertTrue(api_file.exists())
 
             api_data = json.loads(api_file.read_text())
-            self.assertEqual(api_data["backend_url"], "http://127.0.0.1:18767")
-            self.assertEqual(api_data["openviking_url"], "http://127.0.0.1:1933")
-            self.assertIn("openviking_token", api_data)
-            self.assertIn("api_token", api_data)
+            self.assertEqual(api_data["backend_url"], "http://instance.example:9999")
+            self.assertEqual(api_data["api_token"], "scoped-execution-token")
+            self.assertEqual(api_data["openviking_url"], "http://viking.example:1933")
+            self.assertEqual(api_data["openviking_token"], "viking-instance-token")
+
+    def test_no_backend_document_and_no_production_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file, task_file = self._write_config(
+                root, {"tools": ["list_tasks"]}
+            )
+
+            result = execute(config_file, task_file)
+            session_id = result["session_id"]
+            session_dir = root / "state" / "sessions" / session_id
+            api_file = session_dir / "pi" / "backend_api.json"
+            # No implicit localhost address or administrative token is written.
+            self.assertFalse(api_file.exists())
+
+    def test_runner_does_not_silently_add_platform_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_file, _ = self._write_config(root, {"tools": ["read", "bash"]})
+            config = Config.load(config_file)
+            command = build_pi_command(config)
+            tools_arg = command[command.index("--tools") + 1]
+            self.assertEqual(tools_arg, "read,bash")
+            for platform_tool in (
+                "create_task",
+                "create_agent",
+                "trigger_commit_push",
+                "openviking_search",
+            ):
+                self.assertNotIn(platform_tool, tools_arg.split(","))
+
+
+if __name__ == "__main__":
+    unittest.main()

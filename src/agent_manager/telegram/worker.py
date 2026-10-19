@@ -162,11 +162,20 @@ class QueueProcessor:
             if queued_msg.media_path:
                 try:
                     src_file = Path(queued_msg.media_path)
-                    if src_file.is_file():
-                        sec_inbox = Path.home() / ".local/share/agent-manager/workspaces/secretary/inbox"
+                    if src_file.is_file() and self.knowledge_base is not None:
+                        # Explicit instance root, never the host HOME directory.
+                        sec_inbox = (
+                            self.knowledge_base.workspaces_root
+                            / "secretary"
+                            / "inbox"
+                        )
                         sec_inbox.mkdir(parents=True, exist_ok=True)
                         dest_file = sec_inbox / src_file.name
                         shutil.copy2(src_file, dest_file)
+                    elif src_file.is_file():
+                        logger.warning(
+                            "Ignoring inbound media: no instance knowledge base configured"
+                        )
                 except Exception as e:
                     logger.warning("Failed to copy media to secretary inbox: %s", e)
 

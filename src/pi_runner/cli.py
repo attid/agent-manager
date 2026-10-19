@@ -37,6 +37,38 @@ def process_stamp(pid):
         return None
 
 
+def skill_arguments(config):
+    """Return the explicit skill selection for one launch."""
+    if config.skills:
+        arguments = []
+        for name in config.skills:
+            arguments += ['--skill', f'/skills/{name}']
+        return arguments
+    return ['--no-skills']
+
+
+def build_pi_command(config, *, instruction_text=''):
+    """Build the Pi command for one execution.
+
+    The active tool list is exactly ``config.tools``. The Runner never adds
+    platform tools that the profile did not request, so a restricted profile
+    cannot acquire the platform surface through the launcher.
+    """
+    command = config.pi_command + [
+        '--mode', 'json', '--print', '--session', '/session/session.jsonl',
+        '--no-extensions', '--no-mcp', *skill_arguments(config),
+        '--no-prompt-templates', '--no-themes', '--extension', '/runner/policy.mjs',
+        '--tools', ','.join(config.tools),
+    ]
+    if config.model:
+        command += ['--model', config.model]
+    if config.provider:
+        command += ['--provider', config.provider]
+    if instruction_text:
+        command += ['--append-system-prompt', instruction_text]
+    return command
+
+
 def session_dir(state, session_id):
     try:
         if str(uuid.UUID(session_id)) != session_id:
@@ -157,41 +189,13 @@ def execute(config_path, task=None, resume=None):
             stack.callback(os.close, fd)
             arguments = argv[1:]
             instruction_text = '\n\n'.join(p.read_text() for p in c.instructions)
-            skill_args = []
-            if c.skills:
-                for s in c.skills:
-                    skill_args += ['--skill', f'/skills/{s}']
-            else:
-                skill_args = ['--no-skills']
-            backend_cfg = {
-                "backend_url": os.environ.get("AGENT_MANAGER_BACKEND_URL", "http://127.0.0.1:18767"),
-                "api_token": os.environ.get("AGENT_MANAGER_API_TOKEN") or (os.environ.get("AGENT_MANAGER_API_TOKENS", "").split(",")[0].strip() if os.environ.get("AGENT_MANAGER_API_TOKENS") else ""),
-                "openviking_url": os.environ.get("OPENVIKING_URL", "http://127.0.0.1:1933"),
-                "openviking_token": os.environ.get("OPENVIKING_API_KEY") or "ZGVmYXVsdA.Y29kZXg.NWJmZDlmYWYzYmY4ODhiNmJlNTU1YzVlYjY4ODJiZGZhOGY2ODg2MjQ0ZDg2MDc1NzE4NmFmNGJiZTcwYWYyYw",
-            }
-            (pi_dir / "backend_api.json").write_text(json.dumps(backend_cfg, indent=2))
-
-            active_tools = list(c.tools)
-            platform_tools = (
-                'attach_document', 'create_agent', 'update_agent', 'list_agents', 'get_agent',
-                'save_project_summary', 'ask_clarification', 'read_knowledge', 'list_knowledge', 'write_knowledge',
-                'update_component_rules', 'openviking_search', 'openviking_read',
-                'list_tasks', 'get_task', 'create_task', 'update_task', 'get_task_logs', 'resume_task_session',
-                'list_skills', 'install_skill', 'create_skill',
-                'trigger_review', 'trigger_commit_push', 'trigger_rollback', 'trigger_analysis',
-            )
-            for pt in platform_tools:
-                if pt not in active_tools:
-                    active_tools.append(pt)
-            command = c.pi_command + ['--mode', 'json', '--print', '--session', '/session/session.jsonl',
-                '--no-extensions', '--no-mcp', *skill_args, '--no-prompt-templates', '--no-themes',
-                '--extension', '/runner/policy.mjs', '--tools', ','.join(active_tools)]
-            if c.model:
-                command += ['--model', c.model]
-            if c.provider:
-                command += ['--provider', c.provider]
-            if instruction_text:
-                command += ['--append-system-prompt', instruction_text]
+            # Backend settings are explicit per-instance role configuration.
+            # There is no compiled-in production address or administrative
+            # token fallback: a standalone filesystem-only role simply has no
+            # platform backend.
+            if c.backend:
+                (pi_dir / "backend_api.json").write_text(json.dumps(c.backend, indent=2))
+            command = build_pi_command(c, instruction_text=instruction_text)
             inbox_dir = c.project / 'inbox'
             file_args = []
             files_to_archive = []

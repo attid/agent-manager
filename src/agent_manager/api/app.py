@@ -15,10 +15,11 @@ file. Every request opens its own short-lived session through
 never shared between requests.
 
 The ``/agents`` endpoints are thin HTTP wrappers over the immutable versioned
-agent-profile repository. They are administrative endpoints of the loopback
-development prototype: they have no authentication or authorization and are
-not automatically granted to an LLM or a Telegram client, and they are not a
-production permission control.
+agent-profile repository. They are administrative endpoints. Administrative
+Bearer tokens receive unrestricted access; execution credentials issued by
+:class:`~agent_manager.permissions.ExecutionPermissions` are accepted only
+for the declared route action and resource, so an agent profile's configured
+tools bound what its sandbox can reach even through raw HTTP.
 """
 
 from __future__ import annotations
@@ -47,6 +48,11 @@ from sqlalchemy.engine import make_url
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import bind_log_context
+from ..permissions import (
+    ExecutionGrant,
+    ExecutionPermissions,
+    resolve_requirement,
+)
 from ..workspaces import resolve_workspace
 from ..secretary import (
     TurnConversationMismatchError,
@@ -275,15 +281,33 @@ class UnhandledExceptionMiddleware:
 
 
 class BearerAuthMiddleware:
-    """Validate incoming Bearer tokens against an allowed token set.
+    """Authenticate Bearer tokens and enforce execution scopes.
 
-    Allows unrestricted access to `/health` and OPTIONS requests.
-    If no allowed tokens are configured (empty set), all requests are allowed.
+    Two credential classes are supported:
+
+    * administrative tokens from ``allowed_tokens`` receive unrestricted
+      access and are never placed in a child execution environment; and
+    * execution tokens issued by an
+      :class:`~agent_manager.permissions.ExecutionPermissions` registry are
+      accepted only when the resolved route action and resource are inside
+      the granted scope. The exact grant is stored in
+      ``scope['state']['execution_grant']`` for downstream handlers.
+
+    ``/health`` and OPTIONS requests are always public. When neither an
+    administrative token nor any execution grant is configured the
+    middleware stays in open mode so existing development and test setups
+    keep working.
     """
 
-    def __init__(self, app: ASGIApp, allowed_tokens: set[str]) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        allowed_tokens: set[str],
+        permissions: ExecutionPermissions | None = None,
+    ) -> None:
         self.app = app
         self.allowed_tokens = allowed_tokens
+        self.permissions = permissions
 
     async def __call__(
         self,
@@ -295,8 +319,10 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # If no tokens are configured, pass through (open mode for tests/dev)
-        if not self.allowed_tokens:
+        # Open mode only while nothing is configured to authenticate against.
+        if not self.allowed_tokens and not (
+            self.permissions is not None and self.permissions.enabled
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -308,37 +334,109 @@ class BearerAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Check Authorization header
         auth_header = _scope_header(scope, "authorization")
         token = ""
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
 
-        if not token or token not in self.allowed_tokens:
-            request_id = _request_id_for_scope(scope)
-            logger.warning(
-                "Unauthorized API access attempt method=%s path=%s request_id=%s",
+        if not token:
+            await self._deny(
+                scope,
+                receive,
+                send,
+                status.HTTP_401_UNAUTHORIZED,
+                "Unauthorized: invalid or missing Bearer token",
                 method,
                 path,
-                request_id,
-                extra={
-                    "event": "unauthorized_access",
-                    "path": path,
-                    "method": method,
-                },
+                event="unauthorized_access",
             )
-            response = JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content={"detail": "Unauthorized: invalid or missing Bearer token"},
-                headers={
-                    "WWW-Authenticate": "Bearer",
-                    REQUEST_ID_HEADER: request_id,
-                },
-            )
-            await response(scope, receive, send)
             return
 
+        # Administrative credential: unrestricted, outside the registry.
+        if token in self.allowed_tokens:
+            _set_execution_grant(scope, None)
+            await self.app(scope, receive, send)
+            return
+
+        grant = (
+            self.permissions.resolve(token)
+            if self.permissions is not None
+            else None
+        )
+        if grant is None:
+            await self._deny(
+                scope,
+                receive,
+                send,
+                status.HTTP_401_UNAUTHORIZED,
+                "Unauthorized: invalid or missing Bearer token",
+                method,
+                path,
+                event="unauthorized_access",
+            )
+            return
+
+        requirement = resolve_requirement(method, path)
+        if (
+            requirement is None
+            or not self.permissions.authorize(
+                token, requirement.action, requirement.resource
+            )
+        ):
+            await self._deny(
+                scope,
+                receive,
+                send,
+                status.HTTP_403_FORBIDDEN,
+                "Forbidden: execution credential lacks the required scope",
+                method,
+                path,
+                event="forbidden_scope",
+            )
+            return
+
+        _set_execution_grant(scope, grant)
         await self.app(scope, receive, send)
+
+    async def _deny(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        status_code: int,
+        detail: str,
+        method: str,
+        path: str,
+        *,
+        event: str,
+    ) -> None:
+        request_id = _request_id_for_scope(scope)
+        logger.warning(
+            "API access denied method=%s path=%s status=%s request_id=%s",
+            method,
+            path,
+            status_code,
+            request_id,
+            extra={
+                "event": event,
+                "path": path,
+                "method": method,
+            },
+        )
+        headers = {REQUEST_ID_HEADER: request_id}
+        if status_code == status.HTTP_401_UNAUTHORIZED:
+            headers["WWW-Authenticate"] = "Bearer"
+        response = JSONResponse(
+            status_code=status_code,
+            content={"detail": detail},
+            headers=headers,
+        )
+        await response(scope, receive, send)
+
+
+def _set_execution_grant(scope: Scope, grant: ExecutionGrant | None) -> None:
+    """Expose the resolved execution grant to downstream handlers."""
+    scope.setdefault("state", {})["execution_grant"] = grant
 
 
 class RequestCorrelationMiddleware:
@@ -539,6 +637,7 @@ def create_app(
     workspace_map: dict[str, str] | None = None,
     default_agent_id: str = "agent-manager-developer",
     knowledge_base: KnowledgeBase | None = None,
+    permissions: ExecutionPermissions | None = None,
 ) -> FastAPI:
     """Build a FastAPI application bound to a file-backed SQLite database.
 
@@ -547,19 +646,32 @@ def create_app(
             ``sqlite:////tmp/agent_manager.db``. When omitted, the
             ``AGENT_MANAGER_DB_URL`` environment variable is used. The
             database must already be migrated to head.
-        api_tokens: Optional collection of allowed Bearer tokens. When supplied
-            or configured via ``AGENT_MANAGER_API_TOKENS``, all endpoints
-            except ``/health`` require a valid Bearer token.
+        api_tokens: Optional collection of administrative Bearer tokens. When
+            supplied or configured via ``AGENT_MANAGER_API_TOKENS``, all
+            endpoints except ``/health`` require a valid Bearer token.
+        permissions: Optional execution-scope registry shared with the
+            runtime. When omitted a fresh registry is created and exposed as
+            ``app.state.permissions``. Execution tokens are accepted only
+            inside their granted action/resource scope.
     """
     url = _resolve_database_url(database_url)
     resolved_tokens = _resolve_api_tokens(api_tokens)
+    resolved_permissions = (
+        permissions if permissions is not None else ExecutionPermissions()
+    )
 
     app = FastAPI(title="Agent Manager", version="0.1.0", lifespan=_lifespan)
     app.state.database_url = url
     app.state.api_tokens = resolved_tokens
+    app.state.permissions = resolved_permissions
+    app.state.knowledge_base = knowledge_base
 
     # Added inner-to-outer: BearerAuth is inner to RequestCorrelation
-    app.add_middleware(BearerAuthMiddleware, allowed_tokens=resolved_tokens)
+    app.add_middleware(
+        BearerAuthMiddleware,
+        allowed_tokens=resolved_tokens,
+        permissions=resolved_permissions,
+    )
     app.add_middleware(RequestCorrelationMiddleware)
     app.add_middleware(UnhandledExceptionMiddleware)
 
@@ -1117,14 +1229,14 @@ def create_app(
         try:
             profile = repository.archive(agent_id, expected_revision=current.revision)
             try:
-                from agent_manager.knowledge import KnowledgeBase
                 kb = getattr(request.app.state, "knowledge_base", None)
-                if kb is None:
-                    kb = KnowledgeBase()
-                target = kb.agents_dir / f"{agent_id}.md"
-                if target.is_file():
-                    target.unlink()
-                    kb.git_commit(f"Archive agent profile: {agent_id}")
+                # No knowledge base is attached to this instance: do not
+                # construct one against an implicit host HOME directory.
+                if kb is not None:
+                    target = kb.agents_dir / f"{agent_id}.md"
+                    if target.is_file():
+                        target.unlink()
+                        kb.git_commit(f"Archive agent profile: {agent_id}")
             except Exception as e:
                 logger.warning("Could not remove agent markdown file on delete: %s", e)
         except Exception as error:

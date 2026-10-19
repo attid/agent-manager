@@ -15,7 +15,13 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 import uuid
 
+from .instance import InstanceContext
 from .logging import bind_log_context
+from .permissions import (
+    ExecutionPermissions,
+    actions_for_tools,
+    resources_for_execution,
+)
 from .workspaces import resolve_workspace
 from .runtime_defaults import RuntimeDefaultsResolver
 from .profile_runtime import _build_role_config
@@ -60,6 +66,8 @@ class TaskExecutionWorker:
         on_task_finished: Callable[[Task, TaskOutcome], None] | None = None,
         knowledge_base: Any | None = None,
         runtime_defaults: RuntimeDefaultsResolver | None = None,
+        instance: InstanceContext | None = None,
+        permissions: ExecutionPermissions | None = None,
     ) -> None:
         self.database = database
         self.artifact_root = Path(artifact_root)
@@ -76,6 +84,8 @@ class TaskExecutionWorker:
         self.on_task_finished = on_task_finished
         self.knowledge_base = knowledge_base
         self.runtime_defaults = runtime_defaults or RuntimeDefaultsResolver()
+        self.instance = instance
+        self.permissions = permissions
 
         self._repository = TaskRepository(database)
         self._agent_repository = AgentProfileRepository(database)
@@ -254,6 +264,36 @@ class TaskExecutionWorker:
                     if kb_root_str not in ro_paths:
                         ro_paths.append(kb_root_str)
                     runner_config["readonly_paths"] = ro_paths
+
+                # Explicit per-instance mounts and execution-scoped backend
+                # credentials. Flagship/admin tokens never reach the child.
+                if self.instance is not None:
+                    if self.instance.knowledge_root.is_dir():
+                        runner_config["knowledge_dir"] = str(
+                            self.instance.knowledge_root
+                        )
+                    if self.instance.skills_root.is_dir():
+                        runner_config["skills_dir"] = str(
+                            self.instance.skills_root
+                        )
+                    if self.permissions is not None and self.instance.backend_url:
+                        exec_actions = actions_for_tools(
+                            runner_config.get("tools") or []
+                        )
+                        resources = resources_for_execution(
+                            exec_actions,
+                            task_id=task.id,
+                            agent_id=selected_agent_id,
+                        )
+                        grant = self.permissions.issue(
+                            agent_id=selected_agent_id,
+                            actions=exec_actions,
+                            resources=resources,
+                            label=f"task:{task.id}",
+                        )
+                        runner_config["backend"] = self.instance.child_backend(
+                            grant.token
+                        )
 
                 role_file = exec_dir / "role.json"
                 role_file.write_text(

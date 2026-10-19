@@ -22,6 +22,7 @@ import uvicorn
 
 from agent_manager.api import create_app
 from agent_manager.dispatcher import QueueDispatcher
+from agent_manager.instance import InstanceContext
 from agent_manager.knowledge import KnowledgeBase
 from agent_manager.logging import configure_logging
 from agent_manager.operation_handlers import (
@@ -31,6 +32,7 @@ from agent_manager.operation_worker import (
     OperationInstanceContext,
     OperationWorker,
 )
+from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.storage import Database
 from agent_manager.task_worker import TaskExecutionWorker
@@ -50,7 +52,13 @@ class RunnerConfig:
     port: int = 18767
     artifact_root: Path = Path("~/.local/share/agent-manager/artifacts").expanduser()
     knowledge_root: Path = Path("~/.local/share/agent-manager/knowledge").expanduser()
+    state_root: Path = Path("~/.local/share/agent-manager/state").expanduser()
+    workspaces_root: Path = Path("~/.local/share/agent-manager/workspaces").expanduser()
+    skills_root: Path = Path("~/.local/share/agent-manager/skills").expanduser()
     default_workspace: Path = Path.cwd()
+    backend_url: str = ""
+    openviking_url: str = ""
+    openviking_token: str = ""
     runner_argv_prefix: tuple[str, ...] = (sys.executable, "-m", "pi_runner")
     secretary_agent_id: str = "system-secretary"
     developer_agent_id: str = "agent-manager-developer"
@@ -59,6 +67,20 @@ class RunnerConfig:
     api_tokens: tuple[str, ...] = ()
     log_level: str = "INFO"
     json_logging: bool = False
+
+    def instance_context(self) -> InstanceContext:
+        """Build the typed per-instance context passed to every subsystem."""
+        return InstanceContext(
+            state_root=self.state_root,
+            workspaces_root=self.workspaces_root,
+            skills_root=self.skills_root,
+            knowledge_root=self.knowledge_root,
+            artifact_root=self.artifact_root,
+            default_workspace=self.default_workspace,
+            backend_url=self.backend_url,
+            openviking_url=self.openviking_url,
+            openviking_token=self.openviking_token,
+        )
 
     @classmethod
     def from_env(cls) -> RunnerConfig:
@@ -82,6 +104,31 @@ class RunnerConfig:
                 "~/.local/share/agent-manager/knowledge",
             )
         ).expanduser()
+
+        state_root = Path(
+            os.environ.get(
+                "AGENT_MANAGER_STATE_ROOT",
+                "~/.local/share/agent-manager/state",
+            )
+        ).expanduser()
+
+        workspaces_root = Path(
+            os.environ.get(
+                "AGENT_MANAGER_WORKSPACES_ROOT",
+                "~/.local/share/agent-manager/workspaces",
+            )
+        ).expanduser()
+
+        skills_root = Path(
+            os.environ.get(
+                "AGENT_MANAGER_SKILLS_ROOT",
+                "~/.local/share/agent-manager/skills",
+            )
+        ).expanduser()
+
+        backend_url = os.environ.get("AGENT_MANAGER_BACKEND_URL") or f"http://127.0.0.1:{port}"
+        openviking_url = os.environ.get("OPENVIKING_URL", "")
+        openviking_token = os.environ.get("OPENVIKING_API_KEY", "")
 
         default_ws_str = os.environ.get("AGENT_MANAGER_DEFAULT_WORKSPACE")
         default_workspace = (
@@ -141,7 +188,13 @@ class RunnerConfig:
             port=port,
             artifact_root=artifact_root,
             knowledge_root=knowledge_root,
+            state_root=state_root,
+            workspaces_root=workspaces_root,
+            skills_root=skills_root,
             default_workspace=default_workspace,
+            backend_url=backend_url,
+            openviking_url=openviking_url,
+            openviking_token=openviking_token,
             runner_argv_prefix=runner_argv,
             secretary_agent_id=os.environ.get(
                 "AGENT_MANAGER_SECRETARY_AGENT_ID", "system-secretary"
@@ -180,6 +233,8 @@ class AgentManagerServices:
 
     def __init__(self, config: RunnerConfig) -> None:
         self.config = config
+        self.instance: InstanceContext = config.instance_context()
+        self.permissions = ExecutionPermissions()
         self.database: Database | None = None
         self.queue_dispatcher: QueueDispatcher | None = None
         self.task_worker: TaskExecutionWorker | None = None
@@ -204,8 +259,11 @@ class AgentManagerServices:
         # 2. Storage
         self.database = Database(self.config.database_url)
 
-        # 3. Knowledge Base
-        self.knowledge_base = KnowledgeBase(self.config.knowledge_root)
+        # 3. Knowledge Base (explicit per-instance paths)
+        self.knowledge_base = KnowledgeBase(
+            self.config.knowledge_root,
+            instance=self.instance,
+        )
         try:
             self.knowledge_base.initialize(database=self.database)
             logger.info("KnowledgeBase initialized at %s", self.config.knowledge_root)
@@ -242,6 +300,8 @@ class AgentManagerServices:
             runner_argv_prefix=list(self.config.runner_argv_prefix),
             artifact_root=secretary_artifacts,
             knowledge_base=self.knowledge_base,
+            instance=self.instance,
+            permissions=self.permissions,
         )
         self.queue_dispatcher = QueueDispatcher(
             self.database,
@@ -268,6 +328,8 @@ class AgentManagerServices:
             on_task_finished=on_task_finished,
             knowledge_base=self.knowledge_base,
             poll_interval_seconds=1.0,
+            instance=self.instance,
+            permissions=self.permissions,
         )
 
         # 6. Durable Operation Worker (deferred triggers: review, analysis, Git)
@@ -294,6 +356,7 @@ class AgentManagerServices:
             default_workspace=self.config.default_workspace,
             default_agent_id=self.config.developer_agent_id,
             knowledge_base=self.knowledge_base,
+            permissions=self.permissions,
         )
         uvicorn_cfg = uvicorn.Config(
             app=app,

@@ -33,6 +33,10 @@ export default function policy(pi) {
   }
   async function backendRequest(method, endpoint, payload) {
     const cfg = getBackendConfig();
+    if (!cfg.backend_url) {
+      return { status: "failed", error: "platform backend is not configured for this execution",
+        instruction: "This profile received no scoped backend credential. Do not invent a backend address." };
+    }
     try {
       const response = await fetch(`${cfg.backend_url}${endpoint}`, {
         method,
@@ -256,17 +260,15 @@ export default function policy(pi) {
   });
 
   function getBackendConfig() {
+    // The Runner writes the explicit per-instance backend document. There is
+    // no compiled-in production address or token fallback.
     try {
       if (fs.existsSync("/session/backend_api.json")) {
-        return JSON.parse(fs.readFileSync("/session/backend_api.json", "utf-8"));
+        const parsed = JSON.parse(fs.readFileSync("/session/backend_api.json", "utf-8"));
+        if (parsed && typeof parsed === "object") return parsed;
       }
     } catch (e) {}
-    return {
-      backend_url: "http://127.0.0.1:18767",
-      api_token: "",
-      openviking_url: "http://127.0.0.1:1933",
-      openviking_token: "ZGVmYXVsdA.Y29kZXg.NWJmZDlmYWYzYmY4ODhiNmJlNTU1YzVlYjY4ODJiZGZhOGY2ODg2MjQ0ZDg2MDc1NzE4NmFmNGJiZTcwYWYyYw"
-    };
+    return {};
   }
 
   // 7. Custom Tool: openviking_search
@@ -280,6 +282,9 @@ export default function policy(pi) {
     }),
     async execute(toolCallId, params) {
       const cfg = getBackendConfig();
+      if (!cfg.openviking_url || !cfg.openviking_token) {
+        return { content: [{ type: "text", text: "OpenViking не настроен для этой инсталляции." }] };
+      }
       const limit = params.limit || 5;
       try {
         const res = await fetch(`${cfg.openviking_url}/api/v1/search/search`, {
@@ -319,6 +324,9 @@ export default function policy(pi) {
     }),
     async execute(toolCallId, params) {
       const cfg = getBackendConfig();
+      if (!cfg.openviking_url || !cfg.openviking_token) {
+        return { content: [{ type: "text", text: "OpenViking не настроен для этой инсталляции." }] };
+      }
       try {
         const res = await fetch(`${cfg.openviking_url}/api/v1/content/read?uri=${encodeURIComponent(params.uri)}`, {
           headers: {
@@ -423,6 +431,9 @@ export default function policy(pi) {
     }),
     async execute(toolCallId, params) {
       const cfg = getBackendConfig();
+      if (!cfg.backend_url) {
+        return { content: [{ type: "text", text: "Платформенный backend не настроен для этой инсталляции." }] };
+      }
       try {
         const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
         const res = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, { headers });
@@ -460,6 +471,9 @@ export default function policy(pi) {
     }),
     async execute(toolCallId, params) {
       const cfg = getBackendConfig();
+      if (!cfg.backend_url) {
+        return { content: [{ type: "text", text: "Платформенный backend не настроен для этой инсталляции." }] };
+      }
       try {
         const headers = {
           "Content-Type": "application/json",

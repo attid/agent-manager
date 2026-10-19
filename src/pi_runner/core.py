@@ -39,6 +39,9 @@ class Config:
     project_read_only: bool = False
     skills: list[str] = field(default_factory=list)
     allow_git_commit: bool = False
+    knowledge_dir: Path | None = None
+    skills_dir: Path | None = None
+    backend: dict[str, str] | None = None
 
     @classmethod
     def load(cls, path):
@@ -90,12 +93,25 @@ class Config:
         models_file = absolute(data['models_file']) if data.get('models_file') else None
         if models_file and not models_file.is_file():
             raise RunnerError('models_file must be an existing file')
+        knowledge_dir = absolute(data['knowledge_dir']) if data.get('knowledge_dir') else None
+        skills_dir = absolute(data['skills_dir']) if data.get('skills_dir') else None
+        for label, directory in (('knowledge_dir', knowledge_dir), ('skills_dir', skills_dir)):
+            if directory is not None and not directory.is_dir():
+                raise RunnerError(f'{label} must be an existing directory')
+        backend = data.get('backend')
+        if backend is not None:
+            if not isinstance(backend, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in backend.items()
+            ):
+                raise RunnerError('backend must be an object of string values')
         return cls(data['agent_id'], project, state, command, runtime, readonly,
                    instructions, data.get('tools', ['read', 'bash', 'edit', 'write']),
                    data.get('network', True), data.get('model'), data.get('provider'),
                    data.get('credential_env', []), str(wd.relative_to(project)), models_file,
                    data.get('pi_auth_provider'), data.get('project_read_only', False),
-                   data.get('skills', []), data.get('allow_git_commit', False))
+                   data.get('skills', []), data.get('allow_git_commit', False),
+                   knowledge_dir, skills_dir, backend)
 
 
 def sandbox_command(config, home, session):
@@ -128,12 +144,12 @@ def sandbox_command(config, home, session):
     if c.models_file:
         argv += ['--ro-bind', str(c.models_file), '/home/runner/.pi/agent/models.json']
     argv += ['--ro-bind', str(Path(__file__).with_name('policy.mjs')), '/runner/policy.mjs']
-    knowledge_dir = Path.home().resolve() / '.local/share/agent-manager/knowledge'
-    if knowledge_dir.is_dir():
-        argv += ['--ro-bind', str(knowledge_dir), '/knowledge']
-    skills_dir = Path.home().resolve() / '.local/share/agent-manager/skills'
-    if skills_dir.is_dir():
-        argv += ['--ro-bind', str(skills_dir), '/skills']
+    # Knowledge and skills are explicit per-instance mounts. The Runner never
+    # invents them from the host HOME directory.
+    if c.knowledge_dir is not None:
+        argv += ['--ro-bind', str(c.knowledge_dir), '/knowledge']
+    if c.skills_dir is not None:
+        argv += ['--ro-bind', str(c.skills_dir), '/skills']
     dotgit = c.project / '.git'
     if dotgit.is_dir():
         if dotgit.is_symlink():

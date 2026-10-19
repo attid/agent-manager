@@ -57,6 +57,10 @@ def test_agent_manager_services_setup_and_lifecycle(
         host="127.0.0.1",
         port=19999,
         artifact_root=tmp_path / "artifacts",
+        knowledge_root=tmp_path / "knowledge",
+        state_root=tmp_path / "state",
+        workspaces_root=tmp_path / "workspaces",
+        skills_root=tmp_path / "skills",
         default_workspace=tmp_path / "workspace",
         auto_migrate=False,
     )

@@ -136,7 +136,13 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .instance import InstanceContext
 from .operation_worker import SESSION_ACTION_KINDS
+from .permissions import (
+    ExecutionPermissions,
+    actions_for_tools,
+    resources_for_execution,
+)
 from .session_operations import unapplied_items
 from .secretary_contract import SECRETARY_CONTRACT
 from .pi_reply import (
@@ -410,6 +416,8 @@ class PersistentConversationHandler:
         runtime_defaults: RuntimeDefaultsResolver | None = None,
         defaults_config_path: str | os.PathLike[str] | None = None,
         knowledge_base: Any | None = None,
+        instance: InstanceContext | None = None,
+        permissions: ExecutionPermissions | None = None,
     ) -> None:
         prefix = tuple(runner_argv_prefix)
         if not prefix or any(
@@ -432,6 +440,8 @@ class PersistentConversationHandler:
         self._artifact_root = pathlib.Path(artifact_root).expanduser()
         self._env = dict(env) if env is not None else None
         self._knowledge_base = knowledge_base
+        self._instance = instance
+        self._permissions = permissions
         # Default source is the host global Pi settings with no app TOML.
         # The resolver holds no resolved values, so every call re-reads it.
         if runtime_defaults is not None:
@@ -681,6 +691,31 @@ class PersistentConversationHandler:
         if platform_secretary and "resolve_workspace" not in tools:
             base_role_config["tools"] = [*tools, "resolve_workspace"]
         resolved = self._runtime_defaults.resolve(base_role_config)
+        # Capture provenance before the per-instance additions so the scoped
+        # backend credential is never written into the stored provenance.
+        runtime_defaults = resolved.to_provenance()
+        # Explicit per-instance mounts and an execution-scoped backend token.
+        if self._instance is not None:
+            resolved_role = resolved.role_config
+            if self._instance.knowledge_root.is_dir():
+                resolved_role["knowledge_dir"] = str(
+                    self._instance.knowledge_root
+                )
+            if self._instance.skills_root.is_dir():
+                resolved_role["skills_dir"] = str(self._instance.skills_root)
+            if self._permissions is not None and self._instance.backend_url:
+                exec_actions = actions_for_tools(
+                    resolved_role.get("tools") or []
+                )
+                grant = self._permissions.issue(
+                    agent_id=self._agent_id,
+                    actions=exec_actions,
+                    resources=resources_for_execution(exec_actions),
+                    label=f"conversation:{context.binding.conversation_id}",
+                )
+                resolved_role["backend"] = self._instance.child_backend(
+                    grant.token
+                )
         catalog_text = None
         if self._knowledge_base is not None and hasattr(
             self._knowledge_base, "get_catalog_index"
@@ -694,7 +729,6 @@ class PersistentConversationHandler:
         execution_role_path = _write_execution_role(
             context.base_role_path, resolved.role_config, catalog_text
         )
-        runtime_defaults = resolved.to_provenance()
         handler = self._build_runtime_handler(
             context, execution_role_path, runtime_defaults
         )
@@ -822,15 +856,17 @@ class PersistentConversationHandler:
                         for s in skills
                         if s
                     ]
-                    agent_state = pathlib.Path.home() / ".local/share/agent-manager/state" / a_id
-                    agent_ws = pathlib.Path.home() / ".local/share/agent-manager/workspaces" / a_id
-                    agent_state.mkdir(parents=True, exist_ok=True)
-                    agent_ws.mkdir(parents=True, exist_ok=True)
-                    runner_cfg = {
-                        "tools": tools,
-                        "state_dir": str(agent_state),
-                        "project": str(agent_ws),
-                    }
+                    runner_cfg = {"tools": tools}
+                    # Explicit per-instance state/workspace for a newly created
+                    # agent. Without an instance context the profile keeps no
+                    # host-HOME path and the worker supplies a state dir later.
+                    if self._instance is not None:
+                        agent_state = self._instance.state_root / a_id
+                        agent_ws = self._instance.workspaces_root / a_id
+                        agent_state.mkdir(parents=True, exist_ok=True)
+                        agent_ws.mkdir(parents=True, exist_ok=True)
+                        runner_cfg["state_dir"] = str(agent_state)
+                        runner_cfg["project"] = str(agent_ws)
                     if skill_names:
                         runner_cfg["skills"] = skill_names
                     prof = agent_repo.create(
@@ -907,9 +943,15 @@ class PersistentConversationHandler:
                 logger.warning("Failed to persist written knowledge from session: %s", e)
 
         # Process skill installation and creation
-        skills_base = pathlib.Path.home() / ".local/share/agent-manager/skills"
+        skills_base = (
+            self._instance.skills_root if self._instance is not None else None
+        )
         install_skills_file = session_pi_dir / "install_skills.json"
-        if install_skills_file.is_file():
+        if install_skills_file.is_file() and skills_base is None:
+            logger.warning(
+                "Ignoring skill installation: no instance skills root configured"
+            )
+        elif install_skills_file.is_file() and skills_base is not None:
             try:
                 import shutil as _shutil
                 skills_base.mkdir(parents=True, exist_ok=True)
@@ -928,7 +970,11 @@ class PersistentConversationHandler:
                 logger.warning("Failed to install skills from session: %s", e)
 
         created_skills_file = session_pi_dir / "created_skills.json"
-        if created_skills_file.is_file():
+        if created_skills_file.is_file() and skills_base is None:
+            logger.warning(
+                "Ignoring skill creation: no instance skills root configured"
+            )
+        elif created_skills_file.is_file() and skills_base is not None:
             try:
                 skills_base.mkdir(parents=True, exist_ok=True)
                 for c_sk in unapplied_items(created_skills_file):

@@ -10,6 +10,7 @@ import re
 import subprocess
 from typing import Any, Mapping
 
+from .instance import InstanceContext
 from .secretary_contract import SECRETARY_CONTRACT
 
 from agent_manager.storage import (
@@ -31,8 +32,16 @@ import shutil
 
 
 def get_default_pi_runtime() -> tuple[list[str], list[str]]:
-    """Return default (pi_command, runtime_paths) for host environment."""
-    node_exe = shutil.which("node") or "/home/itolstov/.nvm/versions/node/v24.19.0/bin/node"
+    """Return default (pi_command, runtime_paths) for the host environment.
+
+    The Pi installation is discovered from the current interpreter's ``HOME``
+    only as a runtime dependency. There is no compiled-in production path
+    fallback: when Node is absent the caller sees a clear failure instead of
+    a host-specific path.
+    """
+    node_exe = shutil.which("node")
+    if node_exe is None:
+        raise RuntimeError("Node.js executable not found on PATH")
     node_path = Path(node_exe).resolve()
 
     release_dir = Path.home() / ".pi/agent/install/releases/1.3.0"
@@ -140,7 +149,12 @@ def parse_agent_profile_markdown(text: str) -> dict[str, Any]:
 class KnowledgeBase:
     """Manages filesystem-backed knowledge trees for projects, components, and agents."""
 
-    def __init__(self, root_dir: str | os.PathLike[str] | None = None) -> None:
+    def __init__(
+        self,
+        root_dir: str | os.PathLike[str] | None = None,
+        *,
+        instance: InstanceContext | None = None,
+    ) -> None:
         self.root_dir = (
             Path(root_dir).expanduser().resolve()
             if root_dir
@@ -149,6 +163,17 @@ class KnowledgeBase:
         self.projects_dir = self.root_dir / "projects"
         self.components_dir = self.root_dir / "components"
         self.agents_dir = self.root_dir / "agents"
+        # Per-instance roots are explicit when supplied. The fallback keeps a
+        # bare ``KnowledgeBase(root_dir)`` instance-local (siblings of the
+        # knowledge tree) instead of writing into the host HOME directory.
+        if instance is not None:
+            self.state_root = instance.state_root
+            self.workspaces_root = instance.workspaces_root
+            self.default_workspace = instance.default_workspace
+        else:
+            self.state_root = self.root_dir.parent / "state"
+            self.workspaces_root = self.root_dir.parent / "workspaces"
+            self.default_workspace = None
 
     def git_commit(self, message: str) -> bool:
         """Commit pending changes in the knowledge base repository if git is present."""
@@ -249,7 +274,7 @@ class KnowledgeBase:
                 "- **Назначение**: Персональная агентная система и секретарский интерфейс через Telegram\n"
                 "- **Стек**: Python 3.14, FastAPI, SQLite WAL, aiogram 3, Bubblewrap, Pi Runner\n"
                 "- **Порт API**: 18767\n"
-                "- **Рабочая директория**: `/home/itolstov/Projects/mtl/AgentManager/agent-manager`\n"
+                "- **Рабочая директория**: instance-managed workspace (configured by RunnerConfig)\n"
                 "- **Архитектура**: Единый сервис (FastAPI + QueueDispatcher + TaskExecutionWorker + Telegram Secretary bot)\n",
                 encoding="utf-8",
             )
@@ -355,10 +380,15 @@ class KnowledgeBase:
         )
         secretary_prompt += "\n\n" + SECRETARY_CONTRACT
 
-        base_state = Path.home() / ".local/share/agent-manager/state"
-        base_ws = Path.home() / ".local/share/agent-manager/workspaces"
+        base_state = self.state_root
+        base_ws = self.workspaces_root
 
-        default_cmd, default_runtime = get_default_pi_runtime()
+        try:
+            default_cmd, default_runtime = get_default_pi_runtime()
+        except Exception:
+            # Bootstrap stays usable without a discovered Pi runtime; the
+            # profile can still be edited or a runtime added later.
+            default_cmd, default_runtime = ["pi"], []
 
         sec_state = base_state / "secretary"
         sec_ws = base_ws / "secretary"
@@ -426,10 +456,17 @@ class KnowledgeBase:
 
         dev_state = base_state / "developer"
         dev_state.mkdir(parents=True, exist_ok=True)
+        dev_ws = self.default_workspace or (base_ws / "developer")
+        dev_ws.mkdir(parents=True, exist_ok=True)
         dev_cfg = {
-            "project": "/home/itolstov/Projects/mtl/AgentManager/agent-manager",
+            "project": str(dev_ws),
             "state_dir": str(dev_state),
-            "tools": ["read", "write", "edit", "bash"],
+            # Tools are listed explicitly. The Runner no longer appends the
+            # platform tool surface to every profile.
+            "tools": [
+                "read", "write", "edit", "bash",
+                "ask_clarification", "read_knowledge",
+            ],
             "network": True,
         }
 
