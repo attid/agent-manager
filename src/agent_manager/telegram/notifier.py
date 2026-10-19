@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 from typing import Any
 
 from aiogram import Bot
@@ -16,6 +17,30 @@ from agent_manager.task_worker import TaskOutcome
 from .keyboards import task_display_number
 
 logger = logging.getLogger(__name__)
+
+
+def format_duration_ms(duration_ms: float) -> str:
+    """Format a millisecond duration using compact Russian time units.
+
+    The value is rounded to whole seconds before decomposition, so values just
+    below a unit boundary do not produce e.g. ``60 сек`` or ``60 мин``.
+    Zero components are omitted; a zero duration is rendered as ``0 сек``.
+    """
+    total_seconds = max(0, math.floor(duration_ms / 1000.0 + 0.5))
+    days, remainder = divmod(total_seconds, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if minutes:
+        parts.append(f"{minutes} мин")
+    if seconds or not parts:
+        parts.append(f"{seconds} сек")
+    return " ".join(parts)
 
 
 def build_task_outcome_keyboard(
@@ -77,7 +102,7 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
     max_error_length = 1500
 
     title_safe = html.escape(task.title)
-    duration_str = f"{outcome.duration_ms / 1000.0:.1f}с" if outcome.duration_ms else "—"
+    duration_str = format_duration_ms(outcome.duration_ms)
 
     if outcome.status == "waiting_for_input":
         meta = dict(getattr(task, "meta", None) or getattr(task, "metadata", None) or {})

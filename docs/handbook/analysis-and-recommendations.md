@@ -33,8 +33,21 @@ for the `analysis` kind by `register_default_operation_handlers`. It:
   missing;
 - builds a read-only evidence package bounded by relevance via
   `build_evidence_package`: the task, its selected executor profile revision,
-  operations targeting the task, and review/metrics evidence reachable from
-  the task. Unrelated tasks are not read.
+  operations targeting the task, review/metrics evidence reachable from the
+  task, and a bounded diagnostic trace from the task's own
+  `session.jsonl`/`events.jsonl` artifacts. Unrelated tasks are not read.
+- the trace (`src/agent_manager/session_trace.py`) contains tool-call names,
+  statuses, durations, redacted arguments, repeated paths, error excerpts,
+  timestamps, usage counters and artifact availability. It never contains the
+  raw transcript, assistant text, file contents or full tool output. Sensitive
+  argument keys/values, bearer tokens, URL credentials and common token forms
+  are redacted; content-bearing arguments (`content`, `text`, `oldText`,
+  `newText`, `patch`, `diff`, ...) are replaced by an omitted-size marker.
+  Byte, record, call, path and output-size limits are explicit
+  in `trace.limits`. Only files under the target task's own artifact
+  directories are read; symlinks resolving elsewhere are ignored. Missing
+  sources are reported as `missing`/`outside_scope` and the overall trace is
+  `unavailable` or `partial`, never filled with inferred observations.
 - runs the analyzer through `resolve_analyzer_runner` (the injectable
   `OperationInstanceContext.analyzer_runner`, or the production
   `default_analyzer_runner`, which freezes the pinned `system-log-analyzer`
@@ -67,6 +80,11 @@ Retrieval API:
 | `GET` | `/recommendations/{id}` (preview) |
 | `POST` | `/recommendations/{id}/approve` |
 | `POST` | `/recommendations/{id}/apply` |
+
+The stored report evidence also contains a flat `trace:task` item. The
+analyzer instructions state that `trace.status` is authoritative:
+`unavailable` means there are no artifact observations for that source, so a
+hypothesis must not be presented as an observed event.
 
 The secretary client (`src/agent_manager/telegram/client.py`) and tools
 (`list_analysis_reports`, `get_analysis_report`, `list_recommendations`,

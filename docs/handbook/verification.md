@@ -19,6 +19,7 @@ PYTHONPATH=src .venv/bin/python -m pytest \
   tests/test_review_executor.py \
   tests/test_review_operation.py \
   tests/test_analysis.py \
+  tests/test_session_trace.py \
   tests/test_api.py \
   tests/test_api_auth.py \
   tests/test_execution_contract.py \
@@ -43,6 +44,8 @@ Interpretation:
   verdicts, failure diagnostics and the durable review handler.
 - `test_analysis.py` — evidence package, report/recommendation persistence,
   approval and stale-apply conflict.
+- `test_session_trace.py` — target-task session/event trace, missing artifacts,
+  path isolation, secret redaction and content-argument omission.
 - `test_api.py` / `test_api_auth.py` — REST contract and stable Bearer auth.
 - `test_execution_contract.py` — workspace/execution context.
 - `test_persistent_conversation.py` — session binding, deferred drains,

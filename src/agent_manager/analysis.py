@@ -38,6 +38,7 @@ from .operation_worker import (
     OperationExecutionError,
     OperationInstanceContext,
 )
+from .session_trace import build_task_trace
 from .storage import (
     RECOMMENDATION_STATUS_APPLIED,
     RECOMMENDATION_STATUS_APPROVED,
@@ -81,7 +82,7 @@ Return exactly one JSON object and no prose outside it. Shape:
   "summary": "<non-empty factual summary of the analyzed task session>",
   "findings": [
     {"title": "<short>", "detail": "<observed fact vs hypothesis>",
-     "evidence": ["<evidence id, e.g. task:T1 or operation:<id>>"]}
+     "evidence": ["<evidence id, e.g. task:T1, operation:<id> or trace:task>"]}
   ],
   "recommendations": [
     {
@@ -300,13 +301,62 @@ def _validate_recommendation(recommendation: Any, index: int) -> None:
 # -- evidence package ----------------------------------------------------
 
 
-def build_evidence_package(database: Database, task: Task) -> dict[str, Any]:
+def _analysis_artifact_roots(
+    instance: OperationInstanceContext,
+) -> tuple[Path, ...]:
+    """Return artifact roots that may contain the target task's own runs.
+
+    Analysis operations write under ``artifact_root/operations`` while task
+    runs live under the instance artifact root, conventionally in ``tasks``.
+    Both locations are supplied explicitly; the trace reader still rejects any
+    path that is not inside a directory belonging to the target task.
+    """
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(value: Path | str | None) -> None:
+        if value is None:
+            return
+        try:
+            candidate = Path(value).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return
+        if candidate not in seen:
+            seen.add(candidate)
+            roots.append(candidate)
+
+    add(instance.artifact_root)
+    runtime_instance = getattr(instance, "instance", None)
+    if runtime_instance is not None:
+        artifact_root = getattr(runtime_instance, "artifact_root", None)
+        if artifact_root is not None:
+            add(artifact_root)
+            add(Path(artifact_root) / "tasks")
+    else:
+        operation_root = Path(instance.artifact_root)
+        if operation_root.name in {"operations", "tasks"}:
+            add(operation_root.parent)
+            add(operation_root.parent / "tasks")
+    return tuple(roots)
+
+
+def build_evidence_package(
+    database: Database,
+    task: Task,
+    *,
+    artifact_roots: Sequence[Path | str] | None = None,
+) -> dict[str, Any]:
     """Build a bounded-by-relevance, read-only evidence package for ``task``.
 
     Only data related to this task is included: the task snapshot, the
     selected executor profile revision, operations whose ``target_id`` is the
-    task, available review evidence and metrics. No other task, conversation
-    or profile is read.
+    task, available review evidence, metrics and a bounded diagnostic trace
+    from the task's own ``session.jsonl``/``events.jsonl`` artifacts.
+
+    ``artifact_roots`` names the directories that may contain this task's
+    artifacts. The trace reader accepts only files inside a target-task
+    directory and reports missing sources as unavailable instead of inferring
+    observations.
     """
     operations = OperationRepository(database).list(target_id=task.id)
     profiles = AgentProfileRepository(database)
@@ -372,6 +422,9 @@ def build_evidence_package(database: Database, task: Task) -> dict[str, Any]:
     for review in reviews:
         add(review["id"], "review", review)
 
+    trace = build_task_trace(task, artifact_roots or ())
+    add("trace:task", "trace", trace)
+
     metrics = _collect_metrics(task, operations)
     add("metrics:task", "metrics", metrics)
 
@@ -398,6 +451,7 @@ def build_evidence_package(database: Database, task: Task) -> dict[str, Any]:
         ),
         "operations": operation_items,
         "reviews": reviews,
+        "trace": trace,
         "metrics": metrics,
         "items": items,
     }
@@ -541,6 +595,10 @@ def _render_instructions(
     """Render the analyzer user text: evidence plus the output contract."""
     return (
         "Analyze the following task-session evidence. Use only these facts.\n\n"
+        "The evidence includes a bounded diagnostic trace from the target "
+        "task's session/event artifacts. `trace.status` is authoritative: "
+        "`unavailable` means no artifact observations exist for that source; "
+        "do not present a hypothesis as an observed event.\n\n"
         f"Task: {task.id} — {task.title}\n\n"
         "Evidence package (JSON):\n"
         f"{json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True)}\n\n"
@@ -566,7 +624,11 @@ def analysis_operation_handler(context: OperationContext) -> dict[str, Any]:
     if task is None:
         raise OperationExecutionError(f"task not found: {task_id}")
 
-    evidence = build_evidence_package(database, task)
+    evidence = build_evidence_package(
+        database,
+        task,
+        artifact_roots=_analysis_artifact_roots(context.instance),
+    )
     runner = resolve_analyzer_runner(context.instance)
     request = AnalysisRequest(
         operation_id=context.operation_id,

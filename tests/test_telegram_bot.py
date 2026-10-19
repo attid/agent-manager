@@ -637,16 +637,16 @@ async def test_deepgram_transcriber_mock_and_parsing() -> None:
 def test_task_categories_keyboard_pagination() -> None:
     from agent_manager.telegram.keyboards import task_categories_keyboard
 
-    # Generate 15 dummy tasks
-    dummy_tasks = [{"id": f"task-{i}", "title": f"Task {i}"} for i in range(1, 16)]
+    # Generate 15 dummy tasks with numbers
+    dummy_tasks = [{"id": f"task-{i}", "title": f"Task {i}", "number": i} for i in range(1, 16)]
 
     # Page 1 (8 tasks, next page button exists)
     kb_p1 = task_categories_keyboard(active_category="incoming", tasks=dummy_tasks, page=1, page_size=8)
     all_buttons_p1 = [btn for row in kb_p1.inline_keyboard for btn in row]
     btn_texts_p1 = [b.text for b in all_buttons_p1]
-    assert any(t == "📌 Task 1" for t in btn_texts_p1)
-    assert any(t == "📌 Task 8" for t in btn_texts_p1)
-    assert not any(t == "📌 Task 9" for t in btn_texts_p1)
+    assert any(t == "📌 #1 Task 1" for t in btn_texts_p1)
+    assert any(t == "📌 #8 Task 8" for t in btn_texts_p1)
+    assert not any("Task 9" in t for t in btn_texts_p1)
     assert any("Стр. 1 из 2" in t for t in btn_texts_p1)
     assert any("➡️" in t for t in btn_texts_p1)
 
@@ -654,9 +654,9 @@ def test_task_categories_keyboard_pagination() -> None:
     kb_p2 = task_categories_keyboard(active_category="incoming", tasks=dummy_tasks, page=2, page_size=8)
     all_buttons_p2 = [btn for row in kb_p2.inline_keyboard for btn in row]
     btn_texts_p2 = [b.text for b in all_buttons_p2]
-    assert not any(t == "📌 Task 1" for t in btn_texts_p2)
-    assert any(t == "📌 Task 9" for t in btn_texts_p2)
-    assert any(t == "📌 Task 15" for t in btn_texts_p2)
+    assert not any(t == "📌 #1 Task 1" for t in btn_texts_p2)
+    assert any(t == "📌 #9 Task 9" for t in btn_texts_p2)
+    assert any(t == "📌 #15 Task 15" for t in btn_texts_p2)
     assert any("Стр. 2 из 2" in t for t in btn_texts_p2)
     assert any("⬅️" in t for t in btn_texts_p2)
 

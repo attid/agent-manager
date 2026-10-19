@@ -22,6 +22,7 @@ from agent_manager.task_worker import TaskExecutionWorker, TaskOutcome
 from agent_manager.telegram.notifier import (
     TelegramNotifier,
     build_task_outcome_keyboard,
+    format_duration_ms,
     format_task_outcome_message,
 )
 
@@ -349,6 +350,55 @@ def test_task_execution_worker_lifecycle(
 # -- Telegram Notifier Tests --
 
 
+@pytest.mark.parametrize(
+    ("duration_ms", "expected"),
+    [
+        (0.0, "0 сек"),
+        (999.0, "1 сек"),
+        (45_000.0, "45 сек"),
+        (59_999.0, "1 мин"),
+        (60_000.0, "1 мин"),
+        (120_000.0, "2 мин"),
+        (209_800.0, "3 мин 30 сек"),
+        (3_599_999.0, "1 ч"),
+        (3_600_000.0, "1 ч"),
+        (3_605_000.0, "1 ч 5 сек"),
+        (4_335_000.0, "1 ч 12 мин 15 сек"),
+        (86_400_000.0, "1 д"),
+        (184_200_000.0, "2 д 3 ч 10 мин"),
+        (184_215_000.0, "2 д 3 ч 10 мин 15 сек"),
+    ],
+)
+def test_format_duration_ms(duration_ms: float, expected: str) -> None:
+    assert format_duration_ms(duration_ms) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "extra"),
+    [
+        ("completed", {"summary": "Done."}),
+        ("ready_to_commit", {"summary": "Ready."}),
+        ("failed", {"error": "Boom."}),
+    ],
+)
+def test_format_task_outcome_message_uses_human_duration(
+    migrated_db: Path, status: str, extra: dict[str, str]
+) -> None:
+    test_db = Database.from_path(migrated_db)
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(title="Duration formatting", workspace="backend")
+    outcome = TaskOutcome(
+        task_id=task.id,
+        status=status,
+        duration_ms=209_800.0,
+        **extra,
+    )
+
+    msg = format_task_outcome_message(task, outcome)
+    assert "⏱ <b>Время:</b> 3 мин 30 сек" in msg
+    assert "209.8" not in msg
+
+
 def test_format_task_outcome_message_success(migrated_db: Path) -> None:
     test_db = Database.from_path(migrated_db)
     task_repo = TaskRepository(test_db)
@@ -371,7 +421,7 @@ def test_format_task_outcome_message_success(migrated_db: Path) -> None:
     assert "&lt;sanitized&gt;" in msg
     assert "&lt;b&gt;sanitized&lt;/b&gt;" in msg
     assert "<code>src/app.py</code>" in msg
-    assert "⏱ <b>Время:</b> 4.5с" in msg
+    assert "⏱ <b>Время:</b> 5 сек" in msg
 
     kb = build_task_outcome_keyboard(task.id)
     assert kb.inline_keyboard[0][0].callback_data == f"select_task:{task.id}"
@@ -576,6 +626,7 @@ def test_format_task_outcome_message_ready_to_commit(migrated_db: Path) -> None:
     assert f"Задача #{task.number} ожидает подтверждения!" in msg
     assert "<code>src/main.py</code>" in msg
     assert "<code>src/utils.py</code>" in msg
+    assert "⏱ <b>Время:</b> 4 сек" in msg
     assert "Выберите действие ниже:" in msg
 
     kb = build_task_outcome_keyboard(task.id, status="ready_to_commit")
