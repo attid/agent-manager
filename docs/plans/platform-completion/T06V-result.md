@@ -1,8 +1,9 @@
 # T06V — Delegated isolated acceptance and integrated verification: result
 
 Status: complete for the delegated scope. Base `3af8653` (current committed
-HEAD when the task started). Task spec `T06V.md` is committed alongside this
-report.
+HEAD when the task started). Verified source SHA: `9a8bf37` (the tree the
+full suite below ran against; this report only adds documentation on top).
+Task spec `T06V.md` is committed alongside this report.
 
 ## Commits (this task)
 
