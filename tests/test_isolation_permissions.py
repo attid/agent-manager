@@ -76,13 +76,23 @@ def test_resource_scope_for_read_only_execution_is_task_and_agent() -> None:
     assert resources == frozenset({"task:t1", "agent:reviewer"})
 
 
-def test_management_action_requires_wildcard_resource() -> None:
+def test_task_scoped_management_tools_do_not_widen_to_wildcard() -> None:
+    # A profile with management tools must not widen a task-scoped execution
+    # to the wildcard resource.
     resources = resources_for_execution(
-        actions_for_tools(["create_task"]),
+        actions_for_tools(["create_task", "update_task", "trigger_review"]),
         task_id="t1",
-        agent_id="secretary",
+        agent_id="developer",
     )
-    assert resources == frozenset({ADMIN_RESOURCE})
+    assert resources == frozenset({"task:t1", "agent:developer"})
+
+    # The secretary's conversation/turn-scoped execution has no task identity,
+    # so its management tools keep the wildcard authority they need.
+    conversation_resources = resources_for_execution(
+        actions_for_tools(["create_task", "update_task", "trigger_review"]),
+        agent_id="agent-manager-secretary",
+    )
+    assert conversation_resources == frozenset({ADMIN_RESOURCE})
 
 
 def test_route_requirement_resolves_action_and_resource() -> None:
@@ -174,6 +184,61 @@ def test_scoped_read_token_reads_only_its_own_task(migrated_db: Path) -> None:
         assert client.get(f"/tasks/{second}", headers=headers).status_code == 403
         assert client.get("/tasks", headers=headers).status_code == 403
         assert client.get("/agents", headers=headers).status_code == 403
+
+
+def test_task_scoped_management_token_cannot_reach_foreign_task(
+    migrated_db: Path,
+) -> None:
+    """A dev profile with management tools stays scoped to its own task."""
+    permissions = ExecutionPermissions()
+    with _admin_client(migrated_db, permissions) as client:
+        admin = {"Authorization": "Bearer administrative-token"}
+        first = client.post(
+            "/tasks", json={"title": "own", "workspace": "/tmp"}, headers=admin
+        ).json()["id"]
+        second = client.post(
+            "/tasks", json={"title": "foreign", "workspace": "/tmp"}, headers=admin
+        ).json()["id"]
+
+    actions = actions_for_tools(
+        ["get_task", "update_task", "trigger_review", "trigger_commit_push"]
+    )
+    resources = resources_for_execution(
+        actions, task_id=first, agent_id="developer"
+    )
+    assert resources == frozenset({f"task:{first}", "agent:developer"})
+    grant = permissions.issue(
+        agent_id="developer",
+        actions=actions,
+        resources=resources,
+        label=f"task:{first}",
+    )
+
+    with _admin_client(migrated_db, permissions) as client:
+        headers = _scoped_headers(grant.token)
+        # Own task is writable; a foreign task and the task collection are not.
+        assert client.patch(
+            f"/tasks/{first}", json={"title": "updated"}, headers=headers
+        ).status_code == 200
+        assert client.patch(
+            f"/tasks/{second}", json={"title": "hijacked"}, headers=headers
+        ).status_code == 403
+        assert client.post(
+            "/tasks", json={"title": "created"}, headers=headers
+        ).status_code == 403
+        # The operation route enforces the concrete target resource.
+        own_review = client.post(
+            "/operations",
+            json={"kind": "review", "target_id": first},
+            headers=headers,
+        )
+        assert own_review.status_code == 202, own_review.text
+        foreign_review = client.post(
+            "/operations",
+            json={"kind": "review", "target_id": second},
+            headers=headers,
+        )
+        assert foreign_review.status_code == 403, foreign_review.text
 
 
 def test_wildcard_read_grant_can_list_tasks(migrated_db: Path) -> None:

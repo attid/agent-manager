@@ -126,14 +126,20 @@ def test_review_grant_cannot_submit_git_through_generic_route(
 
 def test_scoped_grant_enforces_target_resource(migrated_db: Path) -> None:
     permissions = ExecutionPermissions()
-    # A concrete (non-wildcard) review grant is limited to exactly task t1.
+    # The real factory output for a task-scoped review grant is limited to
+    # exactly task t1 even though review.trigger is a management action.
+    actions = actions_for_tools(["trigger_review"])
+    resources = resources_for_execution(
+        actions, task_id="t1", agent_id="reviewer"
+    )
+    assert resources == frozenset({"task:t1", "agent:reviewer"})
     token = _scoped(
         permissions,
         ["trigger_review"],
         agent_id="reviewer",
         task_id="t1",
         label="task:t1",
-        resources=frozenset({"task:t1"}),
+        resources=resources,
     )
     with _client(migrated_db, permissions) as client:
         own = client.post(

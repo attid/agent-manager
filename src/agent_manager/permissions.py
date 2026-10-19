@@ -177,18 +177,22 @@ def resources_for_execution(
 ) -> frozenset[str]:
     """Return the resource scope for an execution with ``actions``.
 
-    Management actions need wildcard authority. Everything else is scoped to
-    the exact task and agent of the execution, so a raw HTTP call from the
-    sandbox cannot read or mutate an unrelated task or agent.
+    A task-scoped execution stays scoped to that exact task (and its agent)
+    even when its profile exposes management tools such as ``update_task`` or
+    ``trigger_review``; the management action alone must never widen it to the
+    wildcard resource or it could mutate a foreign task through raw HTTP. A
+    conversation/turn-scoped execution with no task identity keeps the
+    wildcard authority its management tools require (for example the secretary
+    creating tasks).
     """
     action_set = frozenset(actions)
-    if action_set & MANAGEMENT_ACTIONS:
-        return frozenset({ADMIN_RESOURCE})
     resources: set[str] = set()
     if task_id:
         resources.add(f"task:{task_id}")
     if agent_id:
         resources.add(f"agent:{agent_id}")
+    if task_id is None and action_set & MANAGEMENT_ACTIONS:
+        return frozenset({ADMIN_RESOURCE})
     if not resources:
         # A purely read-scoped execution with no identity cannot safely be
         # constrained; refuse to issue an implied broad grant by scoping to
