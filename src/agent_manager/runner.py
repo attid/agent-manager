@@ -35,6 +35,7 @@ from agent_manager.operation_worker import (
 )
 from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
+from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.storage import Database
 from agent_manager.task_worker import TaskExecutionWorker
 from agent_manager.telegram.bot import create_bot, setup_bot_commands
@@ -380,6 +381,7 @@ class AgentManagerServices:
             knowledge_base=self.knowledge_base,
             instance=self.instance,
             permissions=self.permissions,
+            runtime_defaults=RuntimeDefaultsResolver(),
         )
         self.operation_worker = OperationWorker(
             self.database,

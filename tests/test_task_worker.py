@@ -17,6 +17,7 @@ from agent_manager.storage import (
     Database,
     TaskRepository,
 )
+from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.task_worker import TaskExecutionWorker, TaskOutcome
 from agent_manager.telegram.notifier import (
     TelegramNotifier,
@@ -599,21 +600,60 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
     assert data["approved"] is True
     assert "duration_ms" in data
 
-    # The reviewer is a system agent: full handbook discovery is injected as
-    # an extra instruction file without replacing the customized prompt.
-    review_role = json.loads((exec_dir / "review" / "role_r1.json").read_text())
-    discovery = [
-        entry
-        for entry in review_role["instructions"]
-        if entry.endswith("platform_discovery.md")
-    ]
-    assert discovery, review_role["instructions"]
-    assert "docs/handbook/README.md" in Path(discovery[0]).read_text()
-    reviewer_prompt = Path(
-        next(
-            entry
-            for entry in review_role["instructions"]
-            if entry.endswith("reviewer_system_prompt_r1.md")
-        )
-    ).read_text()
-    assert "Custom Reviewer Rules" in reviewer_prompt
+
+def test_task_worker_malformed_review_fails_task(
+    migrated_db: Path, tmp_path: Path, fake_runner_argv: list[str]
+) -> None:
+    """A reviewer without an explicit verdict must fail the task, not approve."""
+    test_db = Database.from_path(migrated_db)
+    agent_repo = AgentProfileRepository(test_db)
+    agent_repo.create(
+        agent_id="agent-manager-developer",
+        name="Developer",
+        role="developer",
+        system_prompt="Coding prompt.",
+        runner_config={
+            "mode": "success",
+            "summary_text": "Implemented the fix.",
+            "changed_files": ["src/x.py"],
+        },
+    )
+    agent_repo.create(
+        agent_id="system-code-reviewer",
+        name="System Reviewer",
+        role="reviewer",
+        system_prompt="Review prompt.",
+        runner_config={"mode": "malformed"},
+    )
+
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(
+        title="Review must fail visibly",
+        status="in_progress",
+        metadata={"task_type": "coding", "requires_review": True},
+    )
+
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id="agent-manager-developer",
+        default_workspace=str(tmp_path),
+        runner_argv_prefix=fake_runner_argv,
+        runtime_defaults=RuntimeDefaultsResolver(
+            global_settings_path=tmp_path / "absent_settings.json"
+        ),
+    )
+
+    outcome = worker.step()
+
+    assert outcome is not None
+    assert outcome.status == "failed"
+    assert "no parseable JSON" in (outcome.error or "")
+    reloaded = task_repo.get(task.id)
+    assert reloaded.status == "failed"
+    failure = (
+        tmp_path / "artifacts" / str(task.id) / "review" / "round_1_failure.json"
+    )
+    assert failure.is_file()
+    diagnostics = json.loads(failure.read_text())
+    assert diagnostics["reason"] == "malformed_runner_output"

@@ -99,6 +99,7 @@ class OperationInstanceContext:
     workspace_map: Mapping[str, str] = dataclasses.field(default_factory=dict)
     instance: InstanceContext | None = None
     permissions: ExecutionPermissions | None = None
+    runtime_defaults: Any | None = None
 
 
 @dataclasses.dataclass(frozen=True)

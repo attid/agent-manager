@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -26,6 +25,12 @@ from .permissions import (
 from .workspaces import resolve_workspace
 from .runtime_defaults import RuntimeDefaultsResolver
 from .profile_runtime import _build_role_config
+from .review_executor import (
+    VERDICT_APPROVED,
+    ReviewExecutionError,
+    ReviewExecutor,
+    ReviewRequest,
+)
 from .storage import (
     AgentProfileRepository,
     Database,
@@ -551,13 +556,18 @@ class TaskExecutionWorker:
         state_dir: Path,
         child_env: dict[str, str],
     ) -> dict[str, Any]:
-        """Run an independent, read-only code review loop (up to 3 rounds)."""
+        """Run an independent, read-only review loop (up to 3 rounds).
+
+        Review execution and validation are shared with the standalone
+        ``review`` operation executor. A round that cannot produce an
+        explicit valid verdict raises, so the task fails visibly instead of
+        being approved by the absence of findings.
+        """
         review_dir = exec_dir / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
         task_artifacts_dir = self.artifact_root / str(task.id)
         task_artifacts_dir.mkdir(parents=True, exist_ok=True)
-        task_artifacts_review = task_artifacts_dir / "review"
-        task_artifacts_review.mkdir(parents=True, exist_ok=True)
+        (task_artifacts_dir / "review").mkdir(parents=True, exist_ok=True)
 
         current_summary = developer_summary
         current_changed = list(changed_files)
@@ -571,132 +581,51 @@ class TaskExecutionWorker:
                 logger.debug("Could not sync reviewer profile from file: %s", e)
 
         rev_profile = self._agent_repository.get_current("system-code-reviewer")
-        reviewer_instructions = rev_profile.system_prompt if rev_profile else ""
+        reviewer_system_prompt = rev_profile.system_prompt if rev_profile else ""
+        reviewer_runner_config = (
+            dict(rev_profile.runner_config)
+            if rev_profile and isinstance(rev_profile.runner_config, dict)
+            else {}
+        )
+
+        executor = ReviewExecutor(
+            runner_argv_prefix=self.runner_argv_prefix,
+            runtime_defaults=self.runtime_defaults,
+            knowledge_base=self.knowledge_base,
+            env=child_env,
+        )
 
         for round_num in range(1, 4):
-            round_started = time.perf_counter()
             logger.info("Starting code review round %d for task %s", round_num, task.id)
-            review_task_file = review_dir / f"review_prompt_r{round_num}.md"
-            review_task_file.write_text(
-                f"# Code Review: Task #{task.id} — {task.title} (Раунд {round_num})\n\n"
-                f"Роль: независимый Code Reviewer. Твоя задача — внимательно изучить незакоммиченные изменения `git diff`.\n\n"
-                f"## Исходная задача:\n{task.description or task.title}\n\n"
-                f"## Отчёт разработчика:\n{current_summary}\n\n"
-                f"## Изменённые файлы:\n" + "\n".join(f"- {f}" for f in current_changed) + "\n\n"
-                "## Инструкция по проверке:\n"
-                "1. Изучи `git diff` / `git status` и исходные файлы в рабочей директории.\n"
-                "2. Проверь наличие багов, краевых случаев, соответствие ТЗ, качество тестов.\n"
-                "3. Ты работаешь строго read-only, не пытайся вносить правки в код.\n"
-                "4. Сформулируй вердикт:\n"
-                "   - Если есть критические замечания или баги (P1): детально опиши каждое замечание в формате: `P1: файл:строка — суть проблемы и как исправить`.\n"
-                "     В конце напиши отдельной строкой: `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ`.\n"
-                "   - Если критических багов нет: напиши отдельной строкой: `ВЕРДИКТ: ОДОБРЕНО`.\n",
-                encoding="utf-8",
+            request = ReviewRequest(
+                task_id=str(task.id),
+                task_title=task.title,
+                task_description=task.description,
+                project_dir=Path(project_dir),
+                changed_files=tuple(current_changed),
+                developer_summary=current_summary,
+                reviewer_system_prompt=reviewer_system_prompt,
+                reviewer_runner_config=reviewer_runner_config,
+                round_number=round_num,
+                state_dir=review_dir / f"state_r{round_num}",
+                artifact_dir=review_dir,
+                task_artifact_dir=task_artifacts_dir,
             )
+            try:
+                result = executor.execute(request)
+            except ReviewExecutionError:
+                logger.error(
+                    "Code review round %d for task %s produced no valid verdict; failing task",
+                    round_num,
+                    task.id,
+                    exc_info=True,
+                )
+                raise
 
-            instructions_paths: list[str] = []
-            if reviewer_instructions:
-                rev_prompt_file = review_dir / f"reviewer_system_prompt_r{round_num}.md"
-                rev_prompt_file.write_text(reviewer_instructions, encoding="utf-8")
-                instructions_paths.append(str(rev_prompt_file))
+            review_summary = result.report_text
+            logger.info("Saved review report for task %s to %s", task.id, result.report_path)
 
-            review_role_config: dict[str, Any] = {
-                "agent_id": "system-code-reviewer",
-                "project": str(project_dir),
-                "state_dir": str(review_dir / f"state_r{round_num}"),
-                "tools": ["read", "bash"],
-                "project_read_only": True,
-            }
-            if rev_profile and isinstance(rev_profile.runner_config, dict):
-                if rev_profile.runner_config.get("pi_command"):
-                    review_role_config["pi_command"] = rev_profile.runner_config["pi_command"]
-                if rev_profile.runner_config.get("runtime_paths"):
-                    review_role_config["runtime_paths"] = rev_profile.runner_config["runtime_paths"]
-            discovery_path = write_handbook_discovery(
-                review_dir,
-                agent_id="system-code-reviewer",
-                tools=list(review_role_config.get("tools") or []),
-            )
-            if discovery_path is not None:
-                instructions_paths.append(str(discovery_path))
-            if instructions_paths:
-                review_role_config["instructions"] = instructions_paths
-
-            if self.knowledge_base is not None and self.knowledge_base.root_dir.is_dir():
-                ro_paths = list(review_role_config.get("readonly_paths") or [])
-                kb_root_str = str(self.knowledge_base.root_dir)
-                if kb_root_str not in ro_paths:
-                    ro_paths.append(kb_root_str)
-                review_role_config["readonly_paths"] = ro_paths
-
-            review_role_file = review_dir / f"role_r{round_num}.json"
-            review_role_file.write_text(
-                json.dumps(review_role_config, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-            cmd = [
-                *self.runner_argv_prefix,
-                "run",
-                "--agent",
-                str(review_role_file),
-                "--task",
-                str(review_task_file),
-            ]
-            review_proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=str(project_dir),
-                env=child_env,
-                check=False,
-            )
-            round_duration_ms = (time.perf_counter() - round_started) * 1000
-            review_summary = ""
-            if review_proc.returncode == 0 and review_proc.stdout.strip():
-                try:
-                    last_json = [l for l in review_proc.stdout.strip().splitlines() if l.strip().startswith("{") and l.strip().endswith("}")]
-                    if last_json:
-                        res = json.loads(last_json[-1])
-                        s_path = res.get("summary_path")
-                        if s_path and Path(s_path).is_file():
-                            review_summary = Path(s_path).read_text(encoding="utf-8")
-                except Exception:
-                    pass
-
-            if not review_summary:
-                review_summary = review_proc.stdout.strip() or "Ревью завершено без текста отчета."
-
-            # Persist review report into task artifacts
-            report_path = task_artifacts_dir / f"review_round_{round_num}.md"
-            report_path.write_text(review_summary, encoding="utf-8")
-            (task_artifacts_review / f"round_{round_num}.md").write_text(review_summary, encoding="utf-8")
-            logger.info("Saved review report for task %s to %s", task.id, report_path)
-
-            is_approved = (
-                "ВЕРДИКТ: ОДОБРЕНО" in review_summary
-                or "VERDICT: APPROVED" in review_summary.upper()
-                or not any(line.strip().startswith("P1") or "P1:" in line for line in review_summary.splitlines())
-            )
-
-            # Persist structured round metrics
-            round_metric_file = task_artifacts_review / f"round_{round_num}.json"
-            round_metric_data = {
-                "task_id": task.id,
-                "round": round_num,
-                "verdict": "APPROVED" if is_approved else "CHANGES_REQUESTED",
-                "approved": is_approved,
-                "returncode": review_proc.returncode,
-                "report_file": str(report_path),
-                "duration_ms": round_duration_ms,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            round_metric_file.write_text(
-                json.dumps(round_metric_data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-
-            if is_approved:
+            if result.verdict == VERDICT_APPROVED:
                 logger.info("Task %s code review round %d PASSED", task.id, round_num)
                 full_summary = (
                     current_summary
@@ -706,7 +635,7 @@ class TaskExecutionWorker:
                 return {"summary": full_summary, "changed_files": current_changed, "needs_user_input": False}
 
             # Not approved
-            logger.warning("Task %s code review round %d found P1 issues", task.id, round_num)
+            logger.warning("Task %s code review round %d requested changes", task.id, round_num)
             if round_num >= 3:
                 # Exceeded round limit -> escalate to user
                 return {
@@ -715,21 +644,21 @@ class TaskExecutionWorker:
                     "clarification": {
                         "title": f"Code Review не согласован после {round_num} раундов",
                         "description": (
-                            f"Ревьювер вернул замечания P1 на раунде {round_num}:\n\n"
+                            f"Ревьювер вернул замечания на раунде {round_num}:\n\n"
                             f"{review_summary[:2000]}"
                         ),
                         "question": "Как поступить: принять замечания, завершить задачу как есть или дать указания разработчику?",
                     },
                 }
 
-            # Resume developer to address reviewer's P1 issues
+            # Resume developer to address the reviewer's findings
             logger.info("Resuming developer for task %s with reviewer feedback (round %d)", task.id, round_num)
             dev_fix_task = exec_dir / f"dev_fix_task_r{round_num}.md"
             dev_fix_task.write_text(
                 f"# Доработка по замечаниям Code Review (Раунд {round_num})\n\n"
                 f"Ревьювер проверил твои изменения и вернул следующие замечания:\n\n"
                 f"{review_summary}\n\n"
-                "Пожалуйста, исправь указанные критические P1 замечания, проверь код тестами и предоставь обновленный отчёт.",
+                "Пожалуйста, исправь указанные критические замечания, проверь код тестами и предоставь обновленный отчёт.",
                 encoding="utf-8",
             )
             dev_cmd = [
@@ -751,8 +680,10 @@ class TaskExecutionWorker:
                 check=False,
             )
             if dev_proc.returncode != 0:
-                logger.warning("Developer fix run failed for task %s", task.id)
-                break
+                raise RuntimeError(
+                    "developer fix run failed with exit code "
+                    f"{dev_proc.returncode}; review round {round_num} cannot be re-verified"
+                )
             try:
                 last_json = [l for l in dev_proc.stdout.strip().splitlines() if l.strip().startswith("{") and l.strip().endswith("}")]
                 if last_json:
@@ -766,7 +697,7 @@ class TaskExecutionWorker:
                 pass
 
         return {
-            "summary": current_summary + f"\n\n### 🔍 Code Review: Завершено с замечаниями\n" + review_summary[:1000],
+            "summary": current_summary + "\n\n### 🔍 Code Review: Завершено с замечаниями\n" + review_summary[:1000],
             "changed_files": current_changed,
             "needs_user_input": False,
         }
