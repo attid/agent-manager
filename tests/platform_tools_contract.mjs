@@ -43,6 +43,19 @@ const inspected = await call('get_task', { task_id: task.data.id });
 assert.equal(inspected.data.agent_id, 'scout');
 const listed = await call('list_tasks', {});
 assert.equal(listed.data[0].agent_id, 'scout');
+// get_task_logs advertises a structured ok/failed result like the other
+// platform reads; it must not return raw Markdown to a JSON consumer.
+const taskLogs = await call('get_task_logs', { task_id: task.data.id });
+assert.equal(taskLogs.status, 'ok', JSON.stringify(taskLogs));
+assert.equal(taskLogs.task_id, task.data.id);
+assert.equal(taskLogs.title, 'Find project');
+assert.equal(taskLogs.task_status, 'incoming');
+assert.deepEqual(taskLogs.changed_files, []);
+assert.equal(taskLogs.isError, false);
+const missingLogs = await call('get_task_logs', { task_id: 'missing-task' });
+assert.equal(missingLogs.status, 'failed');
+assert.equal(missingLogs.http_status, 404);
+assert.equal(missingLogs.isError, true);
 const agentProfile = await call('get_agent', { agent_id: 'scout' });
 assert.equal(agentProfile.data.runner_config.project_read_only, true);
 

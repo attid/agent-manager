@@ -422,38 +422,26 @@ export default function policy(pi) {
   pi.registerTool({
     name: "get_task_logs",
     label: "Get Task Logs",
-    description: "Retrieve execution summary, errors, diffs, and review feedback for a task.",
+    description: "Retrieve execution summary, errors, changed files, and review feedback for a task.",
     parameters: Type.Object({
       task_id: Type.String({ description: "Task ID" })
     }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      if (!cfg.backend_url) {
-        return { content: [{ type: "text", text: "Платформенный backend не настроен для этой инсталляции." }] };
-      }
-      try {
-        const headers = cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {};
-        const res = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, { headers });
-        if (!res.ok) {
-          return { content: [{ type: "text", text: `HTTP ${res.status}: ${await res.text()}` }] };
-        }
-        const t = await res.json();
-        const meta = t.metadata || {};
-        let out = `### 📋 Логи и отчёт по задаче #${t.id} (${t.title}):\n\n`;
-        out += `* **Текущий статус:** \`${t.status}\`\n`;
-        if (meta.error) {
-          out += `* **❌ Ошибка выполнения:**\n\`\`\`\n${meta.error}\n\`\`\`\n\n`;
-        }
-        if (meta.summary) {
-          out += `* **Резюме разработчика / ревьюера:**\n${meta.summary}\n\n`;
-        }
-        if (meta.changed_files && meta.changed_files.length) {
-          out += `* **Изменённые файлы:**\n` + meta.changed_files.map(f => `  • \`${f}\``).join('\n') + '\n\n';
-        }
-        return { content: [{ type: "text", text: out.trim() }] };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка получения логов: ${err.message}` }] };
-      }
+      const result = await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id)}`);
+      if (result.status === "failed") return toolResult(result);
+      const task = result.data || {};
+      const meta = task.metadata || {};
+      return toolResult({
+        status: "ok",
+        task_id: task.id,
+        title: task.title,
+        task_status: task.status,
+        updated_at: task.updated_at,
+        summary: meta.summary || null,
+        error: meta.error || null,
+        changed_files: Array.isArray(meta.changed_files) ? meta.changed_files : [],
+        review: meta.review || null
+      });
     }
   });
 

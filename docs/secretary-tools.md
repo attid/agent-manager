@@ -48,7 +48,7 @@
 старые задачи с NULL используют прежнего агента worker по умолчанию.
 
 ### `get_task_logs(task_id)`
-- **Назначение**: Просмотр логов раундов Code Review (`round_1.json`, `review_round_1.md`) и отчетов разработчика.
+- **Назначение**: Структурированный просмотр исполнительного отчёта задачи. Возвращает `{status: "ok"|"failed", task_id, title, task_status, updated_at, summary, error, changed_files, review}`; при ошибке — `{status: "failed", http_status, error}`.
 
 ### `resume_task_session(task_id, message)`
 - **Назначение**: Отправка дополнительных инструкций агенту-разработчику и продолжение его существующей сессии.
