@@ -1,0 +1,238 @@
+"""Async HTTP client for interacting with the Agent Manager backend API."""
+
+from __future__ import annotations
+
+from typing import Any
+import httpx
+
+
+class BackendError(Exception):
+    """Base exception for errors returned by the Agent Manager backend."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(f"Backend returned HTTP {status_code}: {detail}")
+        self.status_code = status_code
+        self.detail = detail
+
+
+class BackendClient:
+    """Async client wrapping the Agent Manager FastAPI endpoints."""
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8000",
+        *,
+        api_token: str | None = None,
+        client: httpx.AsyncClient | None = None,
+        timeout: float = 15.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.api_token = api_token
+        self._external_client = client is not None
+        headers = {}
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+        self._client = client or httpx.AsyncClient(
+            base_url=self.base_url, timeout=timeout, headers=headers
+        )
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if owned."""
+        if not self._external_client:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> "BackendClient":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        url = f"{self.base_url}{path}" if path.startswith("/") else f"{self.base_url}/{path}"
+        req_headers = dict(headers or {})
+        if self.api_token and "Authorization" not in req_headers:
+            req_headers["Authorization"] = f"Bearer {self.api_token}"
+
+        response = await self._client.request(
+            method,
+            url,
+            json=json,
+            params=params,
+            headers=req_headers if req_headers else None,
+        )
+        if not response.is_success:
+            detail = response.text
+            try:
+                detail_json = response.json()
+                if isinstance(detail_json, dict) and "detail" in detail_json:
+                    detail = str(detail_json["detail"])
+            except Exception:
+                pass
+            raise BackendError(response.status_code, detail)
+        return response.json()
+
+    # -- Health --
+
+    async def get_health(self) -> dict[str, str]:
+        return await self._request("GET", "/health")
+
+    # -- Tasks --
+
+    async def create_task(
+        self,
+        title: str,
+        *,
+        description: str | None = None,
+        status: str = "incoming",
+        workspace: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "title": title,
+            "status": status,
+            "metadata": metadata or {},
+        }
+        if description is not None:
+            payload["description"] = description
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if id is not None:
+            payload["id"] = id
+        return await self._request("POST", "/tasks", json=payload)
+
+    async def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        workspace: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"offset": offset}
+        if status is not None:
+            params["status"] = status
+        if workspace is not None:
+            params["workspace"] = workspace
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request("GET", "/tasks", params=params)
+
+    async def get_task(self, task_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/tasks/{task_id}")
+
+    async def patch_task(
+        self,
+        task_id: str,
+        *,
+        title: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+        workspace: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if description is not None:
+            payload["description"] = description
+        if status is not None:
+            payload["status"] = status
+        if workspace is not None:
+            payload["workspace"] = workspace
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return await self._request("PATCH", f"/tasks/{task_id}", json=payload)
+
+    # -- Conversations --
+
+    async def create_conversation(
+        self,
+        *,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"metadata": metadata or {}}
+        if title is not None:
+            payload["title"] = title
+        if id is not None:
+            payload["id"] = id
+        return await self._request("POST", "/conversations", json=payload)
+
+    async def get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/conversations/{conversation_id}")
+
+    async def list_conversations(
+        self, *, limit: int | None = None, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request("GET", "/conversations", params=params)
+
+    # -- Messages --
+
+    async def append_message(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        role: str = "user",
+        source: str = "telegram",
+        external_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "text": text,
+            "role": role,
+            "source": source,
+            "metadata": metadata or {},
+        }
+        if external_id is not None:
+            payload["external_id"] = external_id
+        return await self._request(
+            "POST", f"/conversations/{conversation_id}/messages", json=payload
+        )
+
+    async def list_messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request(
+            "GET", f"/conversations/{conversation_id}/messages", params=params
+        )
+
+    # -- Turns --
+
+    async def create_turn(
+        self,
+        conversation_id: str,
+        input_message_id: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "input_message_id": input_message_id,
+            "metadata": metadata or {},
+        }
+        return await self._request(
+            "POST", f"/conversations/{conversation_id}/turns", json=payload
+        )
+
+    async def get_turn(self, turn_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/turns/{turn_id}")
