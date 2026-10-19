@@ -16,6 +16,11 @@ The role JSON is a plain local test control file. Recognised fields:
     ``missing_summary``, ``empty_summary`` or ``no_status``.
 ``summary_text``
     Text written to the summary file. Defaults to ``"fake summary"``.
+``write_files``
+    Optional mapping of relative path to text content. The fake Runner
+    writes each file relative to its working directory before emitting the
+    result, so an acceptance test can make the deterministic "developer"
+    produce a real working-tree edit instead of inserting a database row.
 ``shared_summary_path``
     Optional absolute summary file to write. A ``resume`` call with no such
     override writes ``<state-dir>/summary.md`` so successive resumable turns
@@ -167,6 +172,17 @@ def main() -> None:
                 indent=2,
             ),
         )
+
+    write_files = role.get("write_files")
+    if isinstance(write_files, dict):
+        for relative_path, content in write_files.items():
+            if not isinstance(relative_path, str) or not relative_path:
+                _failure("write_files keys must be non-empty strings")
+            destination = os.path.join(os.getcwd(), relative_path)
+            destination_parent = os.path.dirname(destination)
+            if destination_parent:
+                os.makedirs(destination_parent, exist_ok=True)
+            _write_text(destination, str(content))
 
     stderr_text = role.get("stderr_text")
     if stderr_text:
