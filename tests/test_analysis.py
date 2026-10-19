@@ -36,6 +36,7 @@ from agent_manager.operation_worker import (
     OperationInstanceContext,
     OperationWorker,
 )
+from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.storage import (
     AgentProfileRepository,
     AnalysisRepository,
@@ -388,6 +389,77 @@ def test_approval_is_explicit_and_generation_does_not_mutate_profile(
         database.dispose()
 
 
+def test_profile_recommendation_accepts_full_prompt_string(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The analyzer contract allows the full proposed text for a profile.
+
+    Applying that document must replace the profile system prompt instead of
+    rejecting it with "proposed_content must be an object".
+    """
+    database = Database.from_path(migrated_db)
+    try:
+        _make_profile(database, "developer", prompt="Original prompt.")
+        recommendation = _seed_recommendation(
+            database,
+            tmp_path,
+            recommendation=_profile_recommendation(
+                proposed="# Developer\n\nFollow the acceptance criteria."
+            ),
+        )
+        service = RecommendationService(database)
+        service.approve(recommendation.id)
+        applied = service.apply(recommendation.id)
+        assert applied.status == "applied"
+        assert applied.applied_revision == 2
+        updated = AgentProfileRepository(database).get_current("developer")
+        assert updated is not None
+        assert updated.revision == 2
+        assert (
+            updated.system_prompt
+            == "# Developer\n\nFollow the acceptance criteria."
+        )
+    finally:
+        database.dispose()
+
+
+def test_profile_recommendation_ignores_server_managed_identity_fields(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Echoed identity/revision fields must not fail an otherwise valid apply.
+
+    The analyzer often copies ``agent_id`` and ``revision`` from the observed
+    profile into the proposal. The target is fixed by ``target_id`` and the
+    revision is re-checked separately, so those fields are ignored instead of
+    treated as unsupported.
+    """
+    database = Database.from_path(migrated_db)
+    try:
+        _make_profile(database, "developer", prompt="Original prompt.")
+        recommendation = _seed_recommendation(
+            database,
+            tmp_path,
+            recommendation=_profile_recommendation(
+                proposed={
+                    "agent_id": "developer",
+                    "revision": 1,
+                    "system_prompt": "Updated prompt.",
+                }
+            ),
+        )
+        service = RecommendationService(database)
+        service.approve(recommendation.id)
+        applied = service.apply(recommendation.id)
+        assert applied.status == "applied"
+        assert applied.applied_revision == 2
+        updated = AgentProfileRepository(database).get_current("developer")
+        assert updated is not None
+        assert updated.revision == 2
+        assert updated.system_prompt == "Updated prompt."
+    finally:
+        database.dispose()
+
+
 def test_applied_profile_recommendation_survives_knowledge_file_sync(
     migrated_db: pathlib.Path, tmp_path: pathlib.Path
 ) -> None:
@@ -584,6 +656,62 @@ def test_default_analyzer_runner_executes_system_log_analyzer(
         assert recommendations
         assert recommendations[0].target_kind == "profile"
         assert recommendations[0].target_revision == 1
+    finally:
+        database.dispose()
+
+
+def test_default_analyzer_runner_uses_instance_runtime_defaults(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The production analyzer must follow the instance runtime selection.
+
+    Without the instance resolver the frozen analyzer role has no
+    provider/model and a real host launch cannot authenticate.
+    """
+    database = Database.from_path(migrated_db)
+    try:
+        TaskRepository(database).create(id="task-one", title="Task")
+        AgentProfileRepository(database).create(
+            agent_id=ANALYZER_AGENT_ID,
+            name="System Log Analyzer",
+            role="analyzer",
+            system_prompt="Analyze the session and propose changes.",
+            runner_config={
+                "mode": "success",
+                "summary_text": _report_text(
+                    [_profile_recommendation("developer")]
+                ),
+            },
+        )
+        _make_profile(database, "developer")
+        app_config = tmp_path / "defaults.toml"
+        app_config.write_text(
+            '[default]\nprovider = "instance-provider"\n'
+            'model = "instance-model"\n',
+            encoding="utf-8",
+        )
+        instance = OperationInstanceContext(
+            database=database,
+            artifact_root=tmp_path / "operations",
+            runner_argv_prefix=(sys.executable, str(FAKE_RUNNER)),
+            runtime_defaults=RuntimeDefaultsResolver(
+                app_config_path=app_config
+            ),
+        )
+        worker = _worker(database, instance)
+        _submit_analysis(database, "task-one")
+        outcome = worker.step()
+        assert outcome is not None and outcome.status == "succeeded", (
+            outcome.error if outcome else "no outcome"
+        )
+        roles = list(
+            (tmp_path / "operations" / "analysis").glob("*/runner_role.json")
+        )
+        assert roles, "analyzer role export missing"
+        role = json.loads(roles[-1].read_text(encoding="utf-8"))
+        assert role["provider"] == "instance-provider"
+        assert role["model"] == "instance-model"
+        assert role["pi_auth_provider"] == "instance-provider"
     finally:
         database.dispose()
 

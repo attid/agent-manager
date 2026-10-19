@@ -498,6 +498,7 @@ def default_analyzer_runner(instance: OperationInstanceContext) -> AnalyzerRunne
             ANALYZER_AGENT_ID,
             runner_argv_prefix=list(instance.runner_argv_prefix),
             artifact_root=artifact_root,
+            runtime_defaults=getattr(instance, "runtime_defaults", None),
             extra_instructions=(
                 [str(discovery_path)] if discovery_path is not None else None
             ),
@@ -978,9 +979,27 @@ class RecommendationService:
 
     def _apply_profile(self, recommendation: Recommendation) -> dict[str, Any]:
         proposed = recommendation.proposed_content
+        if isinstance(proposed, str):
+            # The analyzer output contract permits the full proposed text for a
+            # profile recommendation. Treat it as the replacement system
+            # prompt instead of rejecting a document the contract allowed.
+            if not proposed.strip():
+                raise AnalysisError(
+                    "profile recommendation proposed_content must be a "
+                    "non-empty string or an object"
+                )
+            proposed = {"system_prompt": proposed}
         if not isinstance(proposed, Mapping):
             raise AnalysisError(
-                "profile recommendation proposed_content must be an object"
+                "profile recommendation proposed_content must be an object or "
+                "a non-empty system prompt string"
+            )
+        system_prompt = proposed.get("system_prompt")
+        if system_prompt is not None and (
+            not isinstance(system_prompt, str) or not system_prompt.strip()
+        ):
+            raise AnalysisError(
+                "profile recommendation system_prompt must be a non-empty string"
             )
         allowed = {
             "name",
@@ -990,10 +1009,15 @@ class RecommendationService:
             "skills",
             "knowledge",
         }
+        # The analyzer commonly echoes the observed profile identity and
+        # revision into the proposal. Those fields are server-managed: the
+        # target is fixed by ``target_id`` and the apply re-checks
+        # ``target_revision``, so ignore them instead of failing the apply.
+        server_managed = {"agent_id", "revision"}
         replacements = {
             key: value for key, value in proposed.items() if key in allowed
         }
-        unknown = set(proposed) - allowed
+        unknown = set(proposed) - allowed - server_managed
         if unknown:
             raise AnalysisError(
                 f"profile recommendation has unsupported fields: "
