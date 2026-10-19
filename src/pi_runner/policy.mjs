@@ -160,9 +160,8 @@ export default function policy(pi) {
         agent_id: trimmedId,
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Агент "${trimmedId}" помечен для архивации и будет архивирован.` }]
-      };
+      return toolResult({ status: "pending", operation: "archive_agent", target: trimmedId,
+        instruction: "The archive request is queued and applies after this turn. Do not repeat it; read the profile to verify." });
     }
   });
 
@@ -225,12 +224,9 @@ export default function policy(pi) {
         timestamp: new Date().toISOString()
       };
       fs.writeFileSync(clarFile, JSON.stringify(record, null, 2) + "\n", "utf-8");
-      return {
-        content: [{
-          type: "text",
-          text: `Уточняющий вопрос зафиксирован:\n\n**${record.title}**\n${record.description}\n\nВопрос: ${record.question}\n\nСессия переводится в ожидание ответа пользователя.`
-        }]
-      };
+      return toolResult({ status: "awaiting_user", operation: "ask_clarification",
+        title: record.title, question: record.question,
+        instruction: "The clarification is recorded. Halt the current work and present this question to the user; do not guess an answer." });
     }
   });
 
@@ -255,9 +251,8 @@ export default function policy(pi) {
         summary: summary.trim(),
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Описание проекта "${name}" зафиксировано и будет сохранено в базе знаний.` }]
-      };
+      return toolResult({ status: "pending", operation: "save_project_summary", target: name.trim(),
+        instruction: "The project summary is queued and is saved after this turn. Do not repeat the write." });
     }
   });
 
@@ -472,40 +467,20 @@ export default function policy(pi) {
       message: Type.String({ description: "Clarifications, directions, or answers to resume execution with" })
     }),
     async execute(toolCallId, params) {
-      const cfg = getBackendConfig();
-      if (!cfg.backend_url) {
-        return { content: [{ type: "text", text: "Платформенный backend не настроен для этой инсталляции." }] };
-      }
-      try {
-        const headers = {
-          "Content-Type": "application/json",
-          ...(cfg.api_token ? { "Authorization": `Bearer ${cfg.api_token}` } : {})
-        };
-        // Retrieve current task metadata
-        const getRes = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, { headers });
-        if (!getRes.ok) return { content: [{ type: "text", text: `HTTP ${getRes.status}: ${await getRes.text()}` }] };
-        const task = await getRes.json();
-        const meta = task.metadata || {};
-        const additional = meta.additional_instructions || [];
-        additional.push({ text: params.message.trim(), timestamp: new Date().toISOString() });
-        meta.additional_instructions = additional;
-
-        // Patch back with in_progress status
-        const patchRes = await fetch(`${cfg.backend_url}/tasks/${encodeURIComponent(params.task_id)}`, {
-          method: "PATCH",
-          headers,
-          body: JSON.stringify({ status: "in_progress", metadata: meta })
-        });
-        if (!patchRes.ok) return { content: [{ type: "text", text: `HTTP ${patchRes.status}: ${await patchRes.text()}` }] };
-        return {
-          content: [{
-            type: "text",
-            text: `✅ Дополнительные указания добавлены к задаче #${params.task_id}. Задача возвращена в статус \`in_progress\` для продолжения работы.`
-          }]
-        };
-      } catch (err) {
-        return { content: [{ type: "text", text: `Ошибка возобновления задачи: ${err.message}` }] };
-      }
+      const current = await backendRequest("GET", `/tasks/${encodeURIComponent(params.task_id)}`);
+      if (current.status === "failed") return toolResult(current);
+      const meta = { ...(current.data.metadata || {}) };
+      const additional = Array.isArray(meta.additional_instructions) ? meta.additional_instructions : [];
+      additional.push({ text: params.message.trim(), timestamp: new Date().toISOString() });
+      meta.additional_instructions = additional;
+      const patched = await backendRequest("PATCH", `/tasks/${encodeURIComponent(params.task_id)}`, {
+        status: "in_progress",
+        metadata: meta
+      });
+      if (patched.status === "failed") return toolResult(patched);
+      return toolResult({ status: "applied", operation: "resume_task_session", target: params.task_id,
+        task_status: patched.data.status,
+        instruction: "The task is requeued as in_progress with the new instructions. Verify with get_task; do not repeat the write." });
     }
   });
 
@@ -606,9 +581,8 @@ export default function policy(pi) {
         source: params.source.trim(),
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Запрос на установку скила "${params.name}" из "${params.source}" зафиксирован и будет выполнен.` }]
-      };
+      return toolResult({ status: "pending", operation: "install_skill", target: params.name.trim(),
+        instruction: "The skill installation is queued and applies after this turn. Verify with list_skills in a later turn; do not repeat the write." });
     }
   });
 
@@ -631,9 +605,8 @@ export default function policy(pi) {
         scripts: params.scripts || {},
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Новый скил "${params.name}" зарегистрирован и будет сохранён в хранилище скилов.` }]
-      };
+      return toolResult({ status: "pending", operation: "create_skill", target: params.name.trim(),
+        instruction: "The skill is queued and is created after this turn. Verify with list_skills in a later turn; do not repeat the write." });
     }
   });
 
@@ -721,9 +694,8 @@ export default function policy(pi) {
         content: params.rules.trim(),
         timestamp: new Date().toISOString()
       });
-      return {
-        content: [{ type: "text", text: `Правила компонента "${params.component}" обновлены и будут сохранены в базе знаний.` }]
-      };
+      return toolResult({ status: "pending", operation: "update_component_rules", target: `${params.component.trim()}/rules.md`,
+        instruction: "The component rules are queued and are saved after this turn. Do not repeat the write." });
     }
   });
 

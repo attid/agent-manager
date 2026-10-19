@@ -121,9 +121,12 @@ def owner_for_grant(grant: "ExecutionGrant | None") -> str:
 
 #: Tool name -> backend action. Tools absent from this mapping are local
 #: (filesystem or session-file) tools and grant no backend action. Knowledge,
-#: skill, clarification, attachment, OpenViking and trigger tools all operate
-#: on local files or on the parent process and therefore grant no HTTP
-#: authority here. T01/T05 can add an action for a new HTTP-backed tool.
+#: skill, clarification, attachment, archive, OpenViking and trigger tools
+#: all operate on local files or on the parent process and therefore grant no
+#: HTTP authority here. A local tool must never be mapped to an action: that
+#: would silently widen a profile's raw-HTTP authority beyond the operations
+#: its tools actually perform. T01/T05 can add an action for a new
+#: HTTP-backed tool.
 ACTIONS_FOR_TOOLS: Mapping[str, str] = {
     "list_tasks": TASKS_READ,
     "get_task": TASKS_READ,
@@ -136,7 +139,6 @@ ACTIONS_FOR_TOOLS: Mapping[str, str] = {
     "get_agent": AGENTS_READ,
     "create_agent": AGENTS_WRITE,
     "update_agent": AGENTS_WRITE,
-    "archive_agent": AGENTS_WRITE,
     "trigger_review": REVIEW_TRIGGER,
     "trigger_analysis": ANALYSIS_TRIGGER,
     "trigger_commit_push": GIT_ACTIONS,

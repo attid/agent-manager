@@ -1,0 +1,9 @@
+# Immutable integration inputs
+
+T03 is complete: cherry-pick f62c663 then ddb3536 after the T02I range. Source branch platform/t03-review is immutable now. Preserve operation context runtime_defaults AND instance/permissions/owner. Reissue only read-only scoped grants for child review, revoke in finally; ensure selected task/runtime/workspace is correct. Worker reports 114 bounded tests passed; independently test the integrated path.
+
+T05D is complete: cherry-pick 3ec4847. It adds llms.txt and docs/handbook; its report lists snapshot gaps explicitly. Reconcile those docs with T02I/T03/T04 and your final inventory/runtime changes; remove obsolete pending/heuristic descriptions only when the relevant implementation is actually present.
+
+T04 is complete: cherry-pick 89424db then 330c033. All inputs are now final. T04 adds 0008_analysis alongside T02I's 0008_operation_owner: linearize the chain preserving both migrations and test historical upgrades. Its cli.py additions must not restore unconditional platform tools: expose new recommendation tools through explicit secretary configuration only, keep analyzer read-only. Map every new analysis/recommendation route to concrete permissions/resources, prevent unrelated evidence/read leaks, and enforce approval/apply authorization through raw HTTP as well as tool exposure. Its default analyzer runner uses freeze_profile_handler/PiReplyHandler: verify explicit instance/model/context propagation, no production fallbacks, scoped token cleanup and selected workspace.
+
+Integrate all listed immutable commits, complete T05, reconcile the docs snapshot and run the bounded integrated checks. User explicitly expects external AGY review after isolated E2E; preserve that gate in the final report. Root will run or delegate T06/full suite/T07 after your final commit, not before all integration is real.

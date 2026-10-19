@@ -598,3 +598,22 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
     assert data["verdict"] == "APPROVED"
     assert data["approved"] is True
     assert "duration_ms" in data
+
+    # The reviewer is a system agent: full handbook discovery is injected as
+    # an extra instruction file without replacing the customized prompt.
+    review_role = json.loads((exec_dir / "review" / "role_r1.json").read_text())
+    discovery = [
+        entry
+        for entry in review_role["instructions"]
+        if entry.endswith("platform_discovery.md")
+    ]
+    assert discovery, review_role["instructions"]
+    assert "docs/handbook/README.md" in Path(discovery[0]).read_text()
+    reviewer_prompt = Path(
+        next(
+            entry
+            for entry in review_role["instructions"]
+            if entry.endswith("reviewer_system_prompt_r1.md")
+        )
+    ).read_text()
+    assert "Custom Reviewer Rules" in reviewer_prompt

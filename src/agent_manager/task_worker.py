@@ -15,6 +15,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 import uuid
 
+from .capabilities import write_handbook_discovery
 from .instance import InstanceContext
 from .logging import bind_log_context
 from .permissions import (
@@ -228,6 +229,13 @@ class TaskExecutionWorker:
 
                 prompt_file = exec_dir / "system_prompt.md"
                 prompt_file.write_text(profile.system_prompt, encoding="utf-8")
+                discovery_path = write_handbook_discovery(
+                    exec_dir,
+                    agent_id=selected_agent_id,
+                    tools=list(runner_config.get("tools") or []),
+                )
+                if discovery_path is not None:
+                    instructions.append(str(discovery_path))
                 workspace_file = exec_dir / "workspace.md"
                 workspace_file.write_text(
                     f"# Execution workspace\nHost directory: {project_dir}\n"
@@ -604,6 +612,13 @@ class TaskExecutionWorker:
                     review_role_config["pi_command"] = rev_profile.runner_config["pi_command"]
                 if rev_profile.runner_config.get("runtime_paths"):
                     review_role_config["runtime_paths"] = rev_profile.runner_config["runtime_paths"]
+            discovery_path = write_handbook_discovery(
+                review_dir,
+                agent_id="system-code-reviewer",
+                tools=list(review_role_config.get("tools") or []),
+            )
+            if discovery_path is not None:
+                instructions_paths.append(str(discovery_path))
             if instructions_paths:
                 review_role_config["instructions"] = instructions_paths
 

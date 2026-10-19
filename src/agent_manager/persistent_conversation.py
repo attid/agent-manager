@@ -136,6 +136,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .capabilities import is_platform_agent, render_handbook_discovery
 from .instance import InstanceContext
 from .operation_worker import SESSION_ACTION_KINDS
 from .permissions import (
@@ -736,6 +737,12 @@ class PersistentConversationHandler:
                 pass
         if platform_secretary:
             catalog_text = SECRETARY_CONTRACT + "\n\n" + (catalog_text or "")
+        discovery_tools = list(resolved.role_config.get("tools") or [])
+        if is_platform_agent(self._agent_id, discovery_tools):
+            discovery = render_handbook_discovery(discovery_tools)
+            catalog_text = (
+                f"{catalog_text}\n\n{discovery}" if catalog_text else discovery
+            )
         execution_role_path = _write_execution_role(
             context.base_role_path, resolved.role_config, catalog_text
         )

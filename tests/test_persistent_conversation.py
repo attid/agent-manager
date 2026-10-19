@@ -1647,6 +1647,10 @@ def test_custom_secretary_receives_platform_contract_without_replacing_identity(
         assert 'До одобрения не вызывай create_agent' in instructions
         assert 'resolve_workspace(workspace, agent_id)' in instructions
         assert 'HTTP 405' in instructions
+        assert 'docs/handbook/README.md' in instructions
+        assert 'docs/handbook/capability-inventory.md' in instructions
+        assert 'Executable platform tools for this profile' in instructions
+        assert '`create_task`' in instructions
         roles = list((tmp_path / 'artifacts').rglob('executions/*/runner_role.json'))
         assert 'resolve_workspace' in json.loads(roles[0].read_text())['tools']
         stored = AgentProfileRepository(database).get_current('triage')

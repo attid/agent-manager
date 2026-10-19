@@ -27,6 +27,14 @@ SEND_FILE_PATTERN = re.compile(
     r"\[(?:SEND_FILE|ATTACH_FILE|FILE):\s*([^\]]+)\]", re.IGNORECASE
 )
 
+#: Repository ``docs/handbook`` directory copied into the knowledge root so a
+#: child execution can read the platform contract read-only at
+#: ``/knowledge/handbook``. Absent in an installed package: the sync is a
+#: no-op and the injected discovery still names the stable repository paths.
+DEFAULT_HANDBOOK_SOURCE = (
+    Path(__file__).resolve().parents[2] / "docs" / "handbook"
+)
+
 
 import shutil
 
@@ -202,6 +210,31 @@ class KnowledgeBase:
             logger.warning("Failed to commit knowledge base: %s", err)
             return False
 
+    def sync_handbook(self, source: Path | None = None) -> int:
+        """Copy the read-only platform handbook into the knowledge base.
+
+        The copy is content-idempotent: an unchanged document is never
+        rewritten, so a later handbook revision replaces stale content and a
+        repeated startup does not churn the tree. Returns the number of files
+        written (``0`` when no handbook source exists).
+        """
+        handbook_source = source or DEFAULT_HANDBOOK_SOURCE
+        if not handbook_source.is_dir():
+            return 0
+        target_dir = self.root_dir / "handbook"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for src in sorted(handbook_source.glob("*.md")):
+            destination = target_dir / src.name
+            content = src.read_text(encoding="utf-8")
+            if (
+                not destination.is_file()
+                or destination.read_text(encoding="utf-8") != content
+            ):
+                destination.write_text(content, encoding="utf-8")
+                written += 1
+        return written
+
     def get_catalog_index(self) -> str:
         """Generate a compact catalog of available projects, components, and agents."""
         lines = ["## Knowledge Base Catalog"]
@@ -312,6 +345,9 @@ class KnowledgeBase:
             self.ensure_default_profiles(database)
             self.sync_agents_from_files(database)
             self.sync_agents_from_db(database)
+
+        # 5. Publish the read-only platform handbook for agent discovery
+        self.sync_handbook()
 
         self.git_commit("Initialize knowledge base and agent profiles")
 
