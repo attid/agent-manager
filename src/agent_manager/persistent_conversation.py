@@ -141,6 +141,7 @@ from .operation_worker import SESSION_ACTION_KINDS
 from .permissions import (
     ExecutionPermissions,
     actions_for_tools,
+    execution_owner,
     resources_for_execution,
 )
 from .session_operations import unapplied_items
@@ -1045,6 +1046,10 @@ class PersistentConversationHandler:
                             "session_action": action_type,
                             "conversation_id": turn_input.conversation_id,
                         },
+                        owner=execution_owner(
+                            self._agent_id,
+                            f"conversation:{turn_input.conversation_id}",
+                        ),
                     )
                     logger.info(
                         "Queued %s as durable operation kind=%s task=%s",

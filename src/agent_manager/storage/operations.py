@@ -23,6 +23,15 @@ Protocol
 Statuses are execution-protocol values. A domain verdict (for example
 ``approved``/``changes_requested``) belongs in the JSON ``result`` and is not
 an operation status.
+
+Ownership
+---------
+
+Each row carries a nullable, non-secret ``owner``: ``admin`` for an
+administrative caller or ``execution:<agent>|<label>`` for a scoped execution
+grant. It lets a scoped caller read only its own operation and lets startup
+recovery resolve who submitted a running operation without ever persisting a
+bearer token in the operation JSON fields.
 """
 
 from __future__ import annotations
@@ -204,6 +213,7 @@ class OperationRepository:
         input: Mapping[str, Any] | None = None,
         idempotency_key: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        owner: str | None = None,
     ) -> OperationSubmitResult:
         """Durably record one queued operation.
 
@@ -213,6 +223,11 @@ class OperationRepository:
         comparison excludes generated ids and timestamps: an exact retry
         returns the stored operation, a different payload raises
         :class:`OperationConflictError`.
+
+        ``owner`` is the stable, non-secret caller identity persisted for
+        scoped status lookup and orphan recovery. It is deliberately excluded
+        from the idempotency comparison so the same call retried after a
+        grant re-issue still replays the original operation.
         """
         if not isinstance(kind, str) or not kind:
             raise ValueError("kind must be a non-empty string")
@@ -226,6 +241,7 @@ class OperationRepository:
                     id=operation_id,
                     kind=kind,
                     target_id=target_id,
+                    owner=owner,
                     input=input_payload,
                     status=OPERATION_STATUS_PENDING,
                     attempt_count=0,

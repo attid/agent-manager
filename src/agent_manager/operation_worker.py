@@ -48,7 +48,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .instance import InstanceContext
 from .logging import bind_log_context
+from .permissions import ExecutionPermissions
 from .storage import (
     Database,
     Operation,
@@ -83,7 +85,10 @@ class OperationInstanceContext:
     The composition root builds this once from its configuration and passes it
     to the worker. Executors receive it through :class:`OperationContext`; it is
     the stable place to extend with per-instance paths, backend settings and
-    permission grants as later tasks add them.
+    permission grants as later tasks add them. ``instance`` and
+    ``permissions`` are the same objects the rest of the runtime uses, so an
+    executor that resumes durable work can re-issue a scoped backend grant
+    from the persisted owner identity.
     """
 
     database: Database
@@ -92,6 +97,8 @@ class OperationInstanceContext:
     default_workspace: Path | None = None
     knowledge_base: Any | None = None
     workspace_map: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    instance: InstanceContext | None = None
+    permissions: ExecutionPermissions | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,6 +112,7 @@ class OperationContext:
     attempt_count: int
     metadata: Mapping[str, Any]
     instance: OperationInstanceContext
+    owner: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -274,6 +282,7 @@ class OperationWorker:
                 attempt_count=operation.attempt_count,
                 metadata=dict(operation.meta or {}),
                 instance=self._instance,
+                owner=operation.owner,
             )
             try:
                 result = self._invoke_handler(operation, context)

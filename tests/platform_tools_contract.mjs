@@ -15,8 +15,8 @@ fs.writeFileSync('/session/backend_api.json', JSON.stringify({ backend_url: back
 const { default: policy } = await import(pathToFileURL(policyPath));
 const tools = new Map();
 policy({ on() {}, registerTool(tool) { tools.set(tool.name, tool); } });
-const call = async (name, params) => {
-  const result = await tools.get(name).execute('test-call', params);
+const call = async (name, params, invocationId = 'test-call') => {
+  const result = await tools.get(name).execute(invocationId, params);
   return { ...JSON.parse(result.content[0].text), isError: result.isError };
 };
 const created = await call('create_agent', { agent_id: 'scout', name: 'Scout', role: 'analyzer', system_prompt: 'Approved scout.', tools: ['read', 'bash'], runner_config: { project: workspace, project_read_only: true, network: true } });
@@ -67,6 +67,17 @@ assert.deepEqual(review.data.input, { instructions: 'Check edge cases' });
 assert.equal(review.data.result, null);
 const reviewRetry = await call('trigger_review', { task_id: task.data.id, instructions: 'Check edge cases' });
 assert.equal(reviewRetry.data.id, review.data.id);
+// A separate intentional invocation (a new toolCallId) is not a retry: it
+// creates a new operation for the same task even with identical input, so a
+// later review after code changes is not suppressed forever.
+const reviewAgain = await call('trigger_review', { task_id: task.data.id, instructions: 'Check edge cases' }, 'test-call-2');
+assert.equal(reviewAgain.status, 'applied', JSON.stringify(reviewAgain));
+assert.notEqual(reviewAgain.data.id, review.data.id);
+// An explicit idempotency key is honored across invocations, so a caller that
+// wants a stable replay can still supply one.
+const explicitFirst = await call('trigger_review', { task_id: task.data.id, idempotency_key: 'shared-explicit-key' }, 'invocation-a');
+const explicitSecond = await call('trigger_review', { task_id: task.data.id, idempotency_key: 'shared-explicit-key' }, 'invocation-b');
+assert.equal(explicitFirst.data.id, explicitSecond.data.id);
 const analysis = await call('trigger_analysis', { task_id: task.data.id });
 assert.equal(analysis.status, 'applied', JSON.stringify(analysis));
 assert.equal(analysis.data.kind, 'analysis');

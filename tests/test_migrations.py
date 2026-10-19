@@ -39,6 +39,10 @@ def test_fresh_file_database_migrates_to_head(
             "updated_at",
             "metadata",
         }
+        operation_columns = {
+            column["name"] for column in inspector.get_columns("operations")
+        }
+        assert "owner" in operation_columns
     finally:
         database.dispose()
 
@@ -136,10 +140,11 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
         connection.close()
     # The single head moved from 0003 to 0004 when the agent_profiles table
     # was added, to 0005 when conversation_runtimes was added, to 0006 when the
-    # task assignment column was added, and to 0007 when the durable operations
-    # table was added; the assertion that exactly one version row is stored,
-    # and that it is the current head, is unchanged.
-    assert rows == [("0007_operations",)]
+    # task assignment column was added, to 0007 when the durable operations
+    # table was added, and to 0008 when the operation owner column was added;
+    # the assertion that exactly one version row is stored, and that it is the
+    # current head, is unchanged.
+    assert rows == [("0008_operation_owner",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

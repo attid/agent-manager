@@ -51,6 +51,8 @@ from ..logging import bind_log_context
 from ..permissions import (
     ExecutionGrant,
     ExecutionPermissions,
+    action_for_operation_kind,
+    owner_for_grant,
     resolve_requirement,
 )
 from ..workspaces import resolve_workspace
@@ -389,12 +391,7 @@ class BearerAuthMiddleware:
             return
 
         requirement = resolve_requirement(method, path)
-        if (
-            requirement is None
-            or not self.permissions.authorize(
-                token, requirement.action, requirement.resource
-            )
-        ):
+        if requirement is None:
             await self._deny(
                 scope,
                 receive,
@@ -406,6 +403,26 @@ class BearerAuthMiddleware:
                 event="forbidden_scope",
             )
             return
+        if not requirement.deferred:
+            allowed = (
+                self.permissions is not None
+                and requirement.action is not None
+                and self.permissions.authorize(
+                    token, requirement.action, requirement.resource
+                )
+            )
+            if not allowed:
+                await self._deny(
+                    scope,
+                    receive,
+                    send,
+                    status.HTTP_403_FORBIDDEN,
+                    "Forbidden: execution credential lacks the required scope",
+                    method,
+                    path,
+                    event="forbidden_scope",
+                )
+                return
 
         _set_execution_grant(scope, grant)
         await self.app(scope, receive, send)
@@ -449,6 +466,43 @@ class BearerAuthMiddleware:
 def _set_execution_grant(scope: Scope, grant: ExecutionGrant | None) -> None:
     """Expose the resolved execution grant to downstream handlers."""
     scope.setdefault("state", {})["execution_grant"] = grant
+
+
+def _execution_grant_for_request(request: Request) -> ExecutionGrant | None:
+    """Return the caller's execution grant, or ``None`` for admin/open mode."""
+    return getattr(request.state, "execution_grant", None)
+
+
+def _enforce_operation_submit_scope(
+    request: Request,
+    kind: str,
+    target_id: str | None,
+) -> None:
+    """Reject a scoped submission whose kind or target is out of scope.
+
+    ``POST /operations`` is a single generic route, so the kind-specific
+    action and the concrete ``task:<id>`` resource are resolved here. A grant
+    for review therefore cannot smuggle a Git action through the same route,
+    and a grant scoped to one task cannot target another.
+    """
+    grant = _execution_grant_for_request(request)
+    if grant is None:
+        return
+    action = action_for_operation_kind(kind)
+    resource = f"task:{target_id}" if target_id else None
+    permissions = getattr(request.app.state, "permissions", None)
+    if (
+        action is None
+        or permissions is None
+        or not permissions.authorize(grant.token, action, resource)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Forbidden: operation kind is outside the execution "
+                "credential scope"
+            ),
+        )
 
 
 class RequestCorrelationMiddleware:
@@ -1026,6 +1080,7 @@ def create_app(
         status_code=status.HTTP_202_ACCEPTED,
     )
     def submit_operation(
+        request: Request,
         payload: OperationSubmit,
         response: Response,
         repository: OperationRepository = Depends(
@@ -1042,6 +1097,10 @@ def create_app(
         same operation id. A submitted operation is never itself proof of a
         completed side effect; callers inspect ``status``/``result``/``error``.
         """
+        _enforce_operation_submit_scope(
+            request, payload.kind, payload.target_id
+        )
+        owner = owner_for_grant(_execution_grant_for_request(request))
         try:
             result = repository.submit(
                 kind=payload.kind,
@@ -1049,6 +1108,7 @@ def create_app(
                 input=payload.input,
                 idempotency_key=payload.idempotency_key,
                 metadata=payload.metadata,
+                owner=owner,
             )
         except OperationConflictError as error:
             raise HTTPException(
@@ -1061,6 +1121,7 @@ def create_app(
 
     @app.get("/operations", response_model=list[OperationRead])
     def list_operations(
+        request: Request,
         status_filter: str | None = Query(default=None, alias="status"),
         kind: str | None = Query(default=None),
         target_id: str | None = Query(default=None),
@@ -1070,6 +1131,16 @@ def create_app(
             get_operation_repository
         ),
     ) -> list[OperationRead]:
+        # A scoped execution may inspect only the operations it submitted, so
+        # it may never enumerate the whole queue.
+        if _execution_grant_for_request(request) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Forbidden: scoped credential cannot enumerate "
+                    "operations"
+                ),
+            )
         operations = repository.list(
             status=status_filter,
             kind=kind,
@@ -1081,14 +1152,23 @@ def create_app(
 
     @app.get("/operations/{operation_id}", response_model=OperationRead)
     def get_operation(
+        request: Request,
         operation_id: str,
         repository: OperationRepository = Depends(
             get_operation_repository
         ),
     ) -> OperationRead:
-        """Return one operation, including status, result and error."""
+        """Return one operation, including status, result and error.
+
+        A scoped caller may read only an operation it owns. A foreign or
+        legacy ownerless operation is reported as not found so the route does
+        not disclose the existence of another caller's operation.
+        """
         operation = repository.get(operation_id)
-        if operation is None:
+        grant = _execution_grant_for_request(request)
+        if operation is None or (
+            grant is not None and operation.owner != owner_for_grant(grant)
+        ):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"operation not found: {operation_id}",

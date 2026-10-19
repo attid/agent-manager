@@ -378,6 +378,8 @@ class AgentManagerServices:
             runner_argv_prefix=tuple(self.config.runner_argv_prefix),
             default_workspace=self.config.default_workspace,
             knowledge_base=self.knowledge_base,
+            instance=self.instance,
+            permissions=self.permissions,
         )
         self.operation_worker = OperationWorker(
             self.database,

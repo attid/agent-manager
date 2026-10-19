@@ -372,6 +372,12 @@ class Operation(Base):
     ``claim_token`` fences completion and failure: only the worker that holds
     the current token may move a ``running`` operation to a terminal state.
     ``attempt_count`` and ``worker_id`` retain the execution history.
+
+    ``owner`` is the stable, non-secret identity of the submitting caller
+    (``admin`` or an ``execution:<agent>|<label>`` principal). It is never a
+    bearer token, so an administrative credential is never serialized into
+    the operation input, result or metadata JSON. Scoped status lookups and
+    orphan recovery use it to resolve ownership.
     """
 
     __tablename__ = "operations"
@@ -390,6 +396,7 @@ class Operation(Base):
     id: Mapped[str] = mapped_column(String, nullable=False)
     kind: Mapped[str] = mapped_column(String, nullable=False)
     target_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    owner: Mapped[str | None] = mapped_column(String, nullable=True)
     input: Mapped[dict[str, Any]] = mapped_column(
         "input", JSON, nullable=False, default=dict, server_default="{}"
     )

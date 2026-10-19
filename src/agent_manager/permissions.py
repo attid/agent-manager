@@ -22,13 +22,15 @@ This module is the reusable authorization seam:
 T01/T05 seam
 ------------
 
-The operation endpoints and trigger dispatch added by T01/T05 must register
-their routes in :data:`_ROUTE_RULES` and call
-:meth:`ExecutionPermissions.authorize` (or use the middleware, which already
-does) with the action and ``operation:<id>``/``task:<id>`` resource. The
-middleware stores the resolved grant on ``scope['state']`` as
-``execution_grant`` so a handler can read the caller's exact scope through
-``request.state.execution_grant`` without re-parsing the token.
+The operation endpoints and trigger dispatch added by T01 are wired here:
+:data:`OPERATION_KIND_ACTIONS` maps a submitted operation kind to the exact
+action it needs, :func:`action_for_operation_kind` resolves it, and the
+``/operations`` routes are deliberately marked ``deferred`` so the API
+handler (not the generic route middleware) can enforce the kind-specific
+action and the concrete ``task:<id>`` target. The middleware still
+authenticates the token and exposes the resolved grant on
+``scope['state']['execution_grant']``. Callers read it through
+``request.state.execution_grant``.
 """
 
 from __future__ import annotations
@@ -42,11 +44,15 @@ from typing import Any
 
 __all__ = [
     "ACTIONS_FOR_TOOLS",
+    "ADMIN_OWNER",
     "ADMIN_RESOURCE",
     "ExecutionGrant",
     "ExecutionPermissions",
     "Requirement",
+    "action_for_operation_kind",
     "actions_for_tools",
+    "execution_owner",
+    "owner_for_grant",
     "resolve_requirement",
 ]
 
@@ -72,6 +78,46 @@ REVIEW_TRIGGER = "review.trigger"
 ANALYSIS_TRIGGER = "analysis.trigger"
 GIT_ACTIONS = "git.actions"
 
+#: Action required to submit each durable operation kind. The generic
+#: ``POST /operations`` route accepts several kinds, so the kind-specific
+#: action is resolved from the request body by the handler.
+OPERATION_KIND_ACTIONS: Mapping[str, str] = {
+    "review": REVIEW_TRIGGER,
+    "analysis": ANALYSIS_TRIGGER,
+    "git.commit_push": GIT_ACTIONS,
+    "git.rollback": GIT_ACTIONS,
+}
+
+#: Owner value recorded for operations submitted by an administrative caller.
+ADMIN_OWNER = "admin"
+
+
+def action_for_operation_kind(kind: str) -> str | None:
+    """Return the backend action required to submit ``kind``, or ``None``.
+
+    An unknown kind has no mapped action, so a scoped execution token may
+    never submit it; only an administrative caller is unrestricted.
+    """
+    return OPERATION_KIND_ACTIONS.get(kind)
+
+
+def execution_owner(agent_id: str, label: str | None = None) -> str:
+    """Return a stable, non-secret owner identity for an execution.
+
+    The value is persisted with the operation instead of the bearer token so
+    a restart can resolve ownership for status lookup and orphan recovery
+    without ever serializing an administrative credential into operation
+    JSON. ``agent_id`` is a profile identifier, never a credential.
+    """
+    return f"execution:{agent_id}|{label or ''}"
+
+
+def owner_for_grant(grant: "ExecutionGrant | None") -> str:
+    """Return the owner identity implied by a resolved execution grant."""
+    if grant is None:
+        return ADMIN_OWNER
+    return execution_owner(grant.agent_id, grant.label)
+
 
 #: Tool name -> backend action. Tools absent from this mapping are local
 #: (filesystem or session-file) tools and grant no backend action. Knowledge,
@@ -91,6 +137,10 @@ ACTIONS_FOR_TOOLS: Mapping[str, str] = {
     "create_agent": AGENTS_WRITE,
     "update_agent": AGENTS_WRITE,
     "archive_agent": AGENTS_WRITE,
+    "trigger_review": REVIEW_TRIGGER,
+    "trigger_analysis": ANALYSIS_TRIGGER,
+    "trigger_commit_push": GIT_ACTIONS,
+    "trigger_rollback": GIT_ACTIONS,
 }
 
 #: Actions that require broad (wildcard-resource) authority because they
@@ -178,11 +228,18 @@ class ExecutionGrant:
 
 @dataclasses.dataclass(frozen=True)
 class Requirement:
-    """Action and optional resource an HTTP route needs."""
+    """Action and optional resource an HTTP route needs.
 
-    action: str
+    ``deferred`` routes carry no generic requirement: the token is still
+authenticated, but the route handler resolves and enforces the action and
+resource itself (for example ``POST /operations`` where the action depends
+on the submitted kind).
+    """
+
+    action: str | None = None
     resource: str | None = None
     resource_kind: str | None = None
+    deferred: bool = False
 
 
 # Method, path pattern, action, resource kind. ``None`` resource kind means a
@@ -258,6 +315,15 @@ def resolve_requirement(method: str, path: str) -> Requirement | None:
     if path == "/health":
         return None
     path = path.rstrip("/") or "/"
+    # The operations routes carry several kinds and an ownership dimension
+    # the URL alone cannot express. They authenticate here and defer the
+    # concrete action/resource decision to the handler.
+    if path == "/operations":
+        if method in ("POST", "GET"):
+            return Requirement(deferred=True)
+        return None
+    if method == "GET" and _match("/operations/{operation_id}", path) is not None:
+        return Requirement(deferred=True)
     for rule_method, pattern, action, resource_kind in _ROUTE_RULES:
         if rule_method != method:
             continue

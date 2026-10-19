@@ -60,16 +60,18 @@ export default function policy(pi) {
     if (params.agent_id != null) query.set("agent_id", params.agent_id);
     return backendRequest("GET", `/workspaces/resolve?${query}`);
   }
-  function operationKey(kind, targetId, payload) {
-    return createHash("sha256").update(JSON.stringify([kind, targetId ?? null, payload ?? null])).digest("hex");
+  function operationKey(kind, targetId, payload, invocationId) {
+    return createHash("sha256").update(JSON.stringify([kind, targetId ?? null, payload ?? null, invocationId ?? null])).digest("hex");
   }
-  // Submit a durable operation. The default key is deterministic for the same
-  // kind/target/input, so an exact retry after a lost response resolves to the
-  // same operation instead of duplicating the side effect.
-  async function submitOperation(kind, targetId, payload, explicitKey) {
+  // Submit a durable operation. An explicit key is used verbatim. Otherwise
+  // the key is derived from the concrete tool invocation id, so a retry of the
+  // same invocation after a lost response resolves to the same operation while
+  // a later intentional call (a different toolCallId) can submit a new review
+  // or analysis for the same task and input after the code changed.
+  async function submitOperation(kind, targetId, payload, explicitKey, invocationId) {
     const body = { kind, input: payload ?? {} };
     if (targetId != null) body.target_id = targetId;
-    body.idempotency_key = explicitKey || operationKey(kind, targetId, payload);
+    body.idempotency_key = explicitKey || operationKey(kind, targetId, payload, invocationId);
     return backendRequest("POST", "/operations", body);
   }
 
@@ -736,7 +738,7 @@ export default function policy(pi) {
       idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      return toolResult(await submitOperation("review", params.task_id.trim(), { instructions: (params.instructions || "").trim() }, params.idempotency_key));
+      return toolResult(await submitOperation("review", params.task_id.trim(), { instructions: (params.instructions || "").trim() }, params.idempotency_key, toolCallId));
     }
   });
 
@@ -753,7 +755,7 @@ export default function policy(pi) {
     }),
     async execute(toolCallId, params) {
       const payload = { push: params.push !== false, message: (params.message || "").trim() };
-      return toolResult(await submitOperation("git.commit_push", params.task_id.trim(), payload, params.idempotency_key));
+      return toolResult(await submitOperation("git.commit_push", params.task_id.trim(), payload, params.idempotency_key, toolCallId));
     }
   });
 
@@ -767,7 +769,7 @@ export default function policy(pi) {
       idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      return toolResult(await submitOperation("git.rollback", params.task_id.trim(), {}, params.idempotency_key));
+      return toolResult(await submitOperation("git.rollback", params.task_id.trim(), {}, params.idempotency_key, toolCallId));
     }
   });
 
@@ -781,7 +783,7 @@ export default function policy(pi) {
       idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      return toolResult(await submitOperation("analysis", params.task_id.trim(), {}, params.idempotency_key));
+      return toolResult(await submitOperation("analysis", params.task_id.trim(), {}, params.idempotency_key, toolCallId));
     }
   });
 }
