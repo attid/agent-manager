@@ -657,3 +657,80 @@ def test_task_worker_malformed_review_fails_task(
     assert failure.is_file()
     diagnostics = json.loads(failure.read_text())
     assert diagnostics["reason"] == "malformed_runner_output"
+
+
+def test_review_changes_requested_resumes_original_developer_session(
+    migrated_db: Path, tmp_path: Path, fake_runner_argv: list[str]
+) -> None:
+    """A changes_requested review must resume the real native session.
+
+    This runs the real ``TaskExecutionWorker._run_review_cycle`` with the
+    deterministic child Runner over ``subprocess`` instead of mocking the
+    review cycle. The fake Runner enforces the same ``resume --session``
+    requirement as the production CLI, so a missing session id fails the task.
+    """
+    test_db = Database.from_path(migrated_db)
+    agent_repo = AgentProfileRepository(test_db)
+    session_id = "11111111-1111-1111-1111-111111111111"
+    argv_log = tmp_path / "dev_resume_argv.json"
+    agent_repo.create(
+        agent_id="agent-manager-developer",
+        name="Developer",
+        role="developer",
+        system_prompt="Coding prompt.",
+        runner_config={
+            "mode": "success",
+            "summary_text": "Initial implementation.",
+            "changed_files": ["src/x.py"],
+            "stateful_session": True,
+            "session_id_value": session_id,
+            "argv_log": str(argv_log),
+        },
+    )
+    agent_repo.create(
+        agent_id="system-code-reviewer",
+        name="System Reviewer",
+        role="reviewer",
+        system_prompt="Review prompt.",
+        runner_config={
+            "mode": "success",
+            "summary_text": (
+                "P1: src/x.py:1 -- null dereference\n"
+                "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ"
+            ),
+        },
+    )
+
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(
+        title="Review then fix",
+        status="in_progress",
+        metadata={"task_type": "coding", "requires_review": True},
+    )
+
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id="agent-manager-developer",
+        default_workspace=str(tmp_path),
+        runner_argv_prefix=fake_runner_argv,
+        runtime_defaults=RuntimeDefaultsResolver(
+            global_settings_path=tmp_path / "absent_settings.json"
+        ),
+    )
+
+    outcome = worker.step()
+
+    assert outcome is not None
+    # Three rejected rounds escalate to the user; the important part is that
+    # the task did not fail on an invalid resume command.
+    assert outcome.status == "waiting_for_input", outcome.error
+    reloaded = task_repo.get(task.id)
+    assert reloaded.status == "waiting_for_input"
+
+    logged = json.loads(argv_log.read_text())
+    resume_argv = logged["argv"]
+    assert resume_argv[1] == "resume"
+    assert "--session" in resume_argv
+    assert resume_argv[resume_argv.index("--session") + 1] == session_id
+    assert "--state-dir" in resume_argv

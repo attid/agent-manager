@@ -441,6 +441,7 @@ class TaskExecutionWorker:
                         role_file=role_file,
                         state_dir=state_dir,
                         child_env=child_env,
+                        session_id=session_id,
                     )
                     if review_outcome.get("needs_user_input"):
                         status = "waiting_for_input"
@@ -555,6 +556,7 @@ class TaskExecutionWorker:
         role_file: Path,
         state_dir: Path,
         child_env: dict[str, str],
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Run an independent, read-only review loop (up to 3 rounds).
 
@@ -562,6 +564,12 @@ class TaskExecutionWorker:
         ``review`` operation executor. A round that cannot produce an
         explicit valid verdict raises, so the task fails visibly instead of
         being approved by the absence of findings.
+
+        ``session_id`` is the native Runner session of the original developer
+        execution. When it is present, the fix round resumes that exact
+        session (same state directory, role/runtime and workspace) instead of
+        starting a fresh one. The injected ``runner_argv_prefix`` is used for
+        both the review and the resume child process.
         """
         review_dir = exec_dir / "review"
         review_dir.mkdir(parents=True, exist_ok=True)
@@ -661,16 +669,34 @@ class TaskExecutionWorker:
                 "Пожалуйста, исправь указанные критические замечания, проверь код тестами и предоставь обновленный отчёт.",
                 encoding="utf-8",
             )
-            dev_cmd = [
-                *self.runner_argv_prefix,
-                "resume",
-                "--state-dir",
-                str(state_dir),
-                "--agent",
-                str(role_file),
-                "--task",
-                str(dev_fix_task),
-            ]
+            if session_id:
+                # Resume the original developer session: the CLI requires the
+                # session id and rejects a resume without it. The same state
+                # directory, role/runtime and workspace are reused.
+                dev_cmd = [
+                    *self.runner_argv_prefix,
+                    "resume",
+                    "--state-dir",
+                    str(state_dir),
+                    "--session",
+                    str(session_id),
+                    "--agent",
+                    str(role_file),
+                    "--task",
+                    str(dev_fix_task),
+                ]
+            else:
+                # No resumable native session was reported, so the fix round
+                # runs as a fresh execution rather than invoking an invalid
+                # ``resume`` command.
+                dev_cmd = [
+                    *self.runner_argv_prefix,
+                    "run",
+                    "--agent",
+                    str(role_file),
+                    "--task",
+                    str(dev_fix_task),
+                ]
             dev_proc = subprocess.run(
                 dev_cmd,
                 capture_output=True,
