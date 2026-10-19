@@ -721,6 +721,11 @@ def test_cmd_analyze_renders_actual_report_not_hardcoded_findings() -> None:
         async def get_task(self, task_id: str) -> dict[str, Any]:
             return {"id": task_id, "title": "Real task", "status": "done"}
 
+        async def list_analysis_reports(
+            self, task_id: str
+        ) -> list[dict[str, Any]]:
+            return []
+
         async def trigger_analysis(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
             return {"id": "op-1", "status": "pending"}
 
@@ -773,6 +778,11 @@ def test_cmd_analyze_shows_pending_and_failure_truthfully() -> None:
             async def get_task(self, task_id: str) -> dict[str, Any]:
                 return {"id": task_id, "title": "Real task", "status": "done"}
 
+            async def list_analysis_reports(
+                self, task_id: str
+            ) -> list[dict[str, Any]]:
+                return []
+
             async def trigger_analysis(self, task_id: str, **kwargs: Any):
                 return {"id": "op-1", "status": "pending"}
 
@@ -807,3 +817,168 @@ def test_cmd_analyze_shows_pending_and_failure_truthfully() -> None:
     )
     assert "не удался" in failed
     assert "analyzer exploded" in failed
+
+
+def test_cmd_analyze_displays_stored_report_without_launching_analysis() -> None:
+    message = MagicMock()
+    message.text = "/analyze task-one"
+    message.answer = AsyncMock()
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.trigger_calls: list[dict[str, Any]] = []
+
+        async def get_task(self, task_id: str) -> dict[str, Any]:
+            return {"id": task_id, "title": "Real task", "status": "done"}
+
+        async def list_analysis_reports(
+            self, task_id: str
+        ) -> list[dict[str, Any]]:
+            return [{"id": "report-1"}]
+
+        async def trigger_analysis(self, task_id: str, **kwargs: Any):
+            self.trigger_calls.append(kwargs)
+            return {"id": "op-new", "status": "pending"}
+
+        async def get_analysis_report(self, report_id: str) -> dict[str, Any]:
+            return {
+                "id": report_id,
+                "agent_id": ANALYZER_AGENT_ID,
+                "profile_revision": 2,
+                "summary": "Stored analysis summary.",
+            }
+
+        async def list_report_recommendations(
+            self, report_id: str
+        ) -> list[dict[str, Any]]:
+            return []
+
+    client = StubClient()
+    asyncio.run(cmd_analyze(message, client=client))
+
+    # A stored result is rendered directly; no model call is submitted.
+    assert client.trigger_calls == []
+    rendered = message.answer.call_args[0][0]
+    assert "Stored analysis summary." in rendered
+    assert "refresh" in rendered
+
+
+def test_cmd_analyze_refresh_forces_a_new_analysis() -> None:
+    message = MagicMock()
+    message.text = "/analyze task-one refresh"
+    message.answer = AsyncMock()
+
+    class StubClient:
+        def __init__(self) -> None:
+            self.keys: list[str | None] = []
+
+        async def get_task(self, task_id: str) -> dict[str, Any]:
+            return {
+                "id": task_id,
+                "title": "Real task",
+                "status": "done",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+
+        async def list_analysis_reports(
+            self, task_id: str
+        ) -> list[dict[str, Any]]:
+            return [{"id": "report-old"}]
+
+        async def trigger_analysis(self, task_id: str, **kwargs: Any):
+            self.keys.append(kwargs.get("idempotency_key"))
+            return {"id": "op-new", "status": "pending"}
+
+        async def get_operation(self, operation_id: str) -> dict[str, Any]:
+            return {
+                "id": operation_id,
+                "status": "running",
+                "result": None,
+                "error": None,
+            }
+
+    client = StubClient()
+    asyncio.run(cmd_analyze(message, client=client))
+
+    # The explicit refresh bypasses the stored report and does not reuse a
+    # task-scoped idempotency key, so a fresh analysis can start.
+    assert client.keys == [None]
+
+
+def test_cmd_analyze_replays_pending_and_reads_existing_report(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Real handler/client: retries replay one operation, reads never launch."""
+    database = Database.from_path(migrated_db)
+    knowledge = KnowledgeBase(tmp_path / "knowledge")
+    try:
+        task = TaskRepository(database).create(
+            title="Analyze me", description="v1", status="done"
+        )
+        app = create_app(f"sqlite:///{migrated_db}", knowledge_base=knowledge)
+
+        async def submit_twice_and_change_evidence() -> None:
+            client = _backend_client(app)
+            try:
+                for _ in range(2):
+                    message = MagicMock()
+                    message.text = f"/analyze {task.id}"
+                    message.answer = AsyncMock()
+                    await cmd_analyze(message, client=client)
+                # Editing the task changes its revision, so the next request
+                # is an intentional fresh analysis, not a stale replay.
+                await client.patch_task(task.id, description="v2")
+                third = MagicMock()
+                third.text = f"/analyze {task.id}"
+                third.answer = AsyncMock()
+                await cmd_analyze(third, client=client)
+            finally:
+                await client.close()
+
+        with TestClient(app):
+            asyncio.run(submit_twice_and_change_evidence())
+
+        operations = OperationRepository(database).list(
+            kind=OPERATION_KIND_ANALYSIS, target_id=task.id
+        )
+        assert len(operations) == 2, [op.id for op in operations]
+
+        # A stored report is rendered without creating another operation.
+        AnalysisRepository(database).create_report(
+            task_id=task.id,
+            agent_id=ANALYZER_AGENT_ID,
+            profile_revision=1,
+            summary="Stored analysis summary.",
+            report={
+                "summary": "Stored analysis summary.",
+                "recommendations": [],
+            },
+            evidence={"task_id": task.id},
+        )
+
+        async def render_existing() -> str:
+            client = _backend_client(app)
+            try:
+                message = MagicMock()
+                message.text = f"/analyze {task.id}"
+                message.answer = AsyncMock()
+                await cmd_analyze(message, client=client)
+                return message.answer.call_args[0][0]
+            finally:
+                await client.close()
+
+        with TestClient(app):
+            rendered = asyncio.run(render_existing())
+
+        assert "Stored analysis summary." in rendered
+        assert (
+            len(
+                OperationRepository(database).list(
+                    kind=OPERATION_KIND_ANALYSIS, target_id=task.id
+                )
+            )
+            == 2
+        )
+    finally:
+        database.dispose()
+

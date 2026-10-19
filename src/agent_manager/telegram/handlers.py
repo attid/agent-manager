@@ -152,76 +152,14 @@ async def cmd_list(
     )
 
 
-@router.message(Command("analyze"))
-async def cmd_analyze(
+async def _render_analysis_report(
     message: Message,
     client: BackendClient,
+    task: dict[str, Any],
+    report_id: str,
+    task_id: str,
 ) -> None:
-    """Submit a real analysis operation and show its actual report.
-
-    The command never invents findings: it submits the durable ``analysis``
-    operation, reads its stored status, and, when it succeeded, renders the
-    persisted report and its evidence-linked recommendations. Pending and
-    failed outcomes are shown truthfully.
-    """
-    parts = (message.text or "").split(maxsplit=1)
-    task_id = parts[1].strip() if len(parts) > 1 else None
-
-    if not task_id:
-        tasks = await client.list_tasks(status="done")
-        if not tasks:
-            tasks = await client.list_tasks(status="failed")
-        if not tasks:
-            await message.answer("ℹ️ Нет завершённых задач для анализа. Укажите ID: <code>/analyze &lt;task_id&gt;</code>", parse_mode="HTML")
-            return
-        task_id = tasks[0]["id"]
-
-    try:
-        task = await client.get_task(task_id)
-    except Exception:
-        await message.answer(f"❌ Задача <code>{html.escape(task_id)}</code> не найдена.", parse_mode="HTML")
-        return
-
-    try:
-        operation = await client.trigger_analysis(task_id)
-        operation_id = operation.get("id")
-        if operation_id:
-            # Submission alone is not a result; read the stored status.
-            operation = await client.get_operation(operation_id)
-    except Exception as error:
-        await message.answer(
-            f"❌ Не удалось запустить анализ задачи "
-            f"<code>{html.escape(task_id)}</code>: "
-            f"<code>{html.escape(str(error))}</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    title = task.get("title", "")
-    status = operation.get("status")
-    result = operation.get("result") or {}
-    operation_id = operation.get("id", operation_id)
-
-    if status in {"pending", "accepted", "running"}:
-        await message.answer(
-            f"⏳ <b>Анализ задачи #{html.escape(task_id)} запущен</b>\n"
-            f"Операция <code>{html.escape(str(operation_id))}</code> в статусе "
-            f"<code>{html.escape(str(status))}</code>. Отчёт появится после "
-            "завершения операции; повторный просмотр не запускает модель.",
-            parse_mode="HTML",
-        )
-        return
-
-    if status != "succeeded" or not result.get("report_id"):
-        error = operation.get("error") or "анализ не завершился успешно"
-        await message.answer(
-            f"❌ <b>Анализ задачи #{html.escape(task_id)} не удался</b>\n"
-            f"<code>{html.escape(str(error))}</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    report_id = str(result["report_id"])
+    """Render a persisted analysis report and its recommendations."""
     try:
         report = await client.get_analysis_report(report_id)
         recommendations = await client.list_report_recommendations(report_id)
@@ -238,7 +176,7 @@ async def cmd_analyze(
     agent_id = report.get("agent_id") or "system-log-analyzer"
     revision = report.get("profile_revision")
     lines = [
-        f"📊 <b>Анализ задачи #{html.escape(task_id)}: {html.escape(title)}</b>",
+        f"📊 <b>Анализ задачи #{html.escape(task_id)}: {html.escape(task.get('title', ''))}</b>",
         "",
         f"• <b>Анализатор:</b> <code>{html.escape(str(agent_id))}</code>"
         + (f" (rev {revision})" if revision is not None else ""),
@@ -261,7 +199,9 @@ async def cmd_analyze(
     lines.append("")
     lines.append(
         "Одобрение и применение — отдельные явные действия; "
-        f"отчёт <code>{html.escape(report_id)}</code>."
+        f"для повторного анализа после изменений: "
+        f"<code>/analyze {html.escape(task_id)} refresh</code>. "
+        f"Отчёт <code>{html.escape(report_id)}</code>."
     )
 
     kb = InlineKeyboardMarkup(
@@ -275,6 +215,111 @@ async def cmd_analyze(
         ]
     )
     await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+@router.message(Command("analyze"))
+async def cmd_analyze(
+    message: Message,
+    client: BackendClient,
+) -> None:
+    """Show the existing analysis report or submit a durable analysis.
+
+    The command never invents findings and never launches a model when a
+    report is already stored. Pending, failed and completed outcomes are
+    shown truthfully. A repeated call while an analysis is pending replays
+    the same durable operation; ``/analyze <task_id> refresh`` explicitly
+    starts a new analysis after the evidence changed.
+    """
+    tokens = (message.text or "").split()
+    refresh_flags = {"refresh", "--refresh", "fresh"}
+    force_fresh = any(token.lower() in refresh_flags for token in tokens[1:])
+    positional = [
+        token for token in tokens[1:] if token.lower() not in refresh_flags
+    ]
+    task_id = positional[0].strip() if positional else None
+
+    if not task_id:
+        tasks = await client.list_tasks(status="done")
+        if not tasks:
+            tasks = await client.list_tasks(status="failed")
+        if not tasks:
+            await message.answer("ℹ️ Нет завершённых задач для анализа. Укажите ID: <code>/analyze &lt;task_id&gt;</code>", parse_mode="HTML")
+            return
+        task_id = tasks[0]["id"]
+
+    try:
+        task = await client.get_task(task_id)
+    except Exception:
+        await message.answer(f"❌ Задача <code>{html.escape(task_id)}</code> не найдена.", parse_mode="HTML")
+        return
+
+    # An existing report is a stored result: render it without a model call.
+    try:
+        reports = await client.list_analysis_reports(task_id)
+    except Exception:
+        reports = []
+    if reports and not force_fresh:
+        latest = reports[0]
+        report_id = latest.get("id")
+        if report_id:
+            await _render_analysis_report(
+                message, client, task, str(report_id), task_id
+            )
+            return
+
+    try:
+        # A repeated request for the same task evidence replays the same
+        # durable operation instead of launching another model. The key is
+        # bound to the task's current revision, so changed evidence (or an
+        # explicit ``refresh``) can still start a fresh analysis.
+        idempotency_key = None
+        if not force_fresh:
+            revision = str(task.get("updated_at") or "")
+            idempotency_key = f"telegram-analysis:{task_id}:{revision}"
+        operation = await client.trigger_analysis(
+            task_id, idempotency_key=idempotency_key
+        )
+        operation_id = operation.get("id")
+        if operation_id:
+            # Submission alone is not a result; read the stored status.
+            operation = await client.get_operation(operation_id)
+    except Exception as error:
+        await message.answer(
+            f"❌ Не удалось запустить анализ задачи "
+            f"<code>{html.escape(task_id)}</code>: "
+            f"<code>{html.escape(str(error))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    status = operation.get("status")
+    result = operation.get("result") or {}
+    operation_id = operation.get("id", operation_id)
+
+    if status in {"pending", "accepted", "running"}:
+        await message.answer(
+            f"⏳ <b>Анализ задачи #{html.escape(task_id)} запущен</b>\n"
+            f"Операция <code>{html.escape(str(operation_id))}</code> в статусе "
+            f"<code>{html.escape(str(status))}</code>. Отчёт появится после "
+            "завершения операции; повторный вызов читает ту же операцию и не "
+            "запускает модель. Для повторного анализа после изменений: "
+            f"<code>/analyze {html.escape(task_id)} refresh</code>.",
+            parse_mode="HTML",
+        )
+        return
+
+    if status != "succeeded" or not result.get("report_id"):
+        error = operation.get("error") or "анализ не завершился успешно"
+        await message.answer(
+            f"❌ <b>Анализ задачи #{html.escape(task_id)} не удался</b>\n"
+            f"<code>{html.escape(str(error))}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await _render_analysis_report(
+        message, client, task, str(result["report_id"]), task_id
+    )
 
 
 # -- Callbacks --
