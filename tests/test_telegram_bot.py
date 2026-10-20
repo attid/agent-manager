@@ -423,8 +423,8 @@ async def test_task_list_tabs_show_live_status_counts(
         for button in row
         if button.callback_data and button.callback_data.startswith("cat:")
     }
-    assert tabs["incoming"] == "• 📥 Входящие 2 •"
-    assert tabs["in_progress"] == "⚙️ В работе 1"
+    assert tabs["incoming"] == "• 📥 Новые 2 •"
+    assert tabs["in_progress"] == "⚙️ Работа 1"
     assert tabs["failed"] == "❌ Ошибки 0"
     assert tabs["archived"] == "📦 Архив"
 
@@ -437,8 +437,8 @@ async def test_task_list_tabs_show_live_status_counts(
         for button in row
         if button.callback_data and button.callback_data.startswith("cat:")
     }
-    assert tabs["in_progress"] == "• ⚙️ В работе 1 •"
-    assert tabs["incoming"] == "📥 Входящие 2"
+    assert tabs["in_progress"] == "• ⚙️ Работа 1 •"
+    assert tabs["incoming"] == "📥 Новые 2"
 
 
 @sync_test

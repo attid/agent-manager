@@ -30,11 +30,11 @@ def test_category_tabs_show_counts_except_archive() -> None:
     )
 
     assert _tabs(keyboard) == {
-        "incoming": "• 📥 Входящие 3 •",
-        "in_progress": "⚙️ В работе 1",
+        "incoming": "• 📥 Новые 3 •",
+        "in_progress": "⚙️ Работа 1",
         "failed": "❌ Ошибки 0",
-        "waiting_for_input": "⚠️ Уточнение 2",
-        "done": "✅ Завершённые 5",
+        "waiting_for_input": "⚠️ Вопросы 2",
+        "done": "✅ Готово 5",
         "archived": "📦 Архив",
     }
 
@@ -43,13 +43,40 @@ def test_category_counts_default_missing_statuses_to_zero() -> None:
     keyboard = task_categories_keyboard(active_category="done", counts={})
 
     assert _tabs(keyboard) == {
-        "incoming": "📥 Входящие 0",
-        "in_progress": "⚙️ В работе 0",
+        "incoming": "📥 Новые 0",
+        "in_progress": "⚙️ Работа 0",
         "failed": "❌ Ошибки 0",
-        "waiting_for_input": "⚠️ Уточнение 0",
-        "done": "• ✅ Завершённые 0 •",
+        "waiting_for_input": "⚠️ Вопросы 0",
+        "done": "• ✅ Готово 0 •",
         "archived": "📦 Архив",
     }
+
+
+def test_done_counter_is_visible_for_zero_and_nonzero_counts() -> None:
+    zero_tabs = _tabs(task_categories_keyboard(counts={"done": 0}))
+    nonzero_tabs = _tabs(task_categories_keyboard(counts={"done": 42}))
+
+    assert zero_tabs["done"] == "✅ Готово 0"
+    assert nonzero_tabs["done"] == "✅ Готово 42"
+
+
+def test_compact_labels_do_not_return_long_category_titles() -> None:
+    labels = _tabs(
+        task_categories_keyboard(
+            active_category="done",
+            counts={
+                "incoming": 1,
+                "in_progress": 2,
+                "failed": 3,
+                "waiting_for_input": 4,
+                "done": 5,
+                "archived": 6,
+            },
+        )
+    )
+
+    for long_title in ("Входящие", "В работе", "Уточнение", "Завершённые"):
+        assert all(long_title not in label for label in labels.values())
 
 
 def test_archive_count_is_never_rendered_even_when_active() -> None:
@@ -59,7 +86,7 @@ def test_archive_count_is_never_rendered_even_when_active() -> None:
     )
 
     assert _tabs(keyboard)["archived"] == "• 📦 Архив •"
-    assert _tabs(keyboard)["incoming"] == "📥 Входящие 2"
+    assert _tabs(keyboard)["incoming"] == "📥 Новые 2"
 
 
 def test_callback_data_is_not_changed_by_counts() -> None:
@@ -84,6 +111,6 @@ def test_callback_data_is_not_changed_by_counts() -> None:
 def test_without_counts_labels_keep_legacy_plain_text() -> None:
     keyboard = task_categories_keyboard(active_category="incoming")
 
-    assert _tabs(keyboard)["incoming"] == "• 📥 Входящие •"
+    assert _tabs(keyboard)["incoming"] == "• 📥 Новые •"
     assert _tabs(keyboard)["failed"] == "❌ Ошибки"
     assert _tabs(keyboard)["archived"] == "📦 Архив"

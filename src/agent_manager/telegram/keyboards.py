@@ -126,11 +126,11 @@ def task_categories_keyboard(
     in the active workflow.
     """
     categories = [
-        ("incoming", "📥 Входящие"),
-        ("in_progress", "⚙️ В работе"),
+        ("incoming", "📥 Новые"),
+        ("in_progress", "⚙️ Работа"),
         ("failed", "❌ Ошибки"),
-        ("waiting_for_input", "⚠️ Уточнение"),
-        ("done", "✅ Завершённые"),
+        ("waiting_for_input", "⚠️ Вопросы"),
+        ("done", "✅ Готово"),
         ("archived", "📦 Архив"),
     ]
 
