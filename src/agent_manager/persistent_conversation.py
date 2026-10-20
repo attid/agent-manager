@@ -168,6 +168,7 @@ from .secretary import REPLY_SOURCE, TurnInput
 from .storage import (
     CORE_SYSTEM_AGENTS,
     AgentProfileRepository,
+    ConversationRepository,
     ConversationRuntimeRepository,
     Database,
     OperationRepository,
@@ -471,6 +472,7 @@ class PersistentConversationHandler:
                 app_config_path=defaults_config_path
             )
         self._repository = ConversationRuntimeRepository(database)
+        self._conversations = ConversationRepository(database)
         self._last_execution: PiRunProvenance | Mapping[str, Any] | None = None
 
     @property
@@ -839,15 +841,24 @@ class PersistentConversationHandler:
     ) -> str:
         """Invoke the child once, then store the successful native session."""
         handler = prepared.handler
-        effective_input = turn_input
+        metadata = dict(turn_input.metadata)
+        conversation = self._conversations.get_conversation(
+            turn_input.conversation_id
+        )
+        if conversation is not None:
+            conversation_metadata = dict(conversation.meta or {})
+            for key in ("task_id", "task_number", "task_title"):
+                if key not in metadata and key in conversation_metadata:
+                    metadata[key] = conversation_metadata[key]
         if prepared.attachment_context is not None:
-            metadata = dict(turn_input.metadata)
             metadata["attachment_context"] = prepared.attachment_context
             if prepared.attachment_manifest is not None:
                 metadata["attachment_manifest"] = prepared.attachment_manifest
-            effective_input = dataclasses.replace(
-                turn_input, metadata=metadata
-            )
+        effective_input = (
+            dataclasses.replace(turn_input, metadata=metadata)
+            if metadata != dict(turn_input.metadata)
+            else turn_input
+        )
 
         try:
             reply_text = handler(effective_input)

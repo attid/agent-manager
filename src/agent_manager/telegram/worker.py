@@ -27,6 +27,16 @@ def secretary_error_summary(error: str) -> str:
     return html.escape(lines[-1] if lines else "Неизвестная ошибка выполнения.")
 
 
+def task_context_header(
+    *, task_id: Any, task_number: Any, task_title: Any
+) -> str:
+    """Render the explicit task marker prepended to a contextual message."""
+    return (
+        f"[Контекст задачи #{task_number}: «{task_title}» "
+        f"(id: {task_id})]"
+    )
+
+
 class QueueProcessor:
     """Processes messages sequentially per conversation."""
 
@@ -165,26 +175,35 @@ class QueueProcessor:
                         chat_id, status_msg_id, "⏳ Жду ответ секретаря..."
                     )
 
-            # 2. Append user message to backend. Inbound media stays in the
+            # 2. Resolve the task context before appending. Without this
+            # header the secretary only sees the bare user question and
+            # cannot know which task the conversation is bound to.
+            text, task_metadata = await self._task_context_for_message(
+                queued_msg, text
+            )
+
+            # 3. Append user message to backend. Inbound media stays in the
             # explicit Telegram media directory; the persistent conversation
             # handler is the single owner that stages it into the
             # conversation/turn-scoped attachment store.
+            metadata = {
+                "telegram_message_id": queued_msg.telegram_message_id,
+                "media_type": queued_msg.media_type,
+                "media_path": queued_msg.media_path,
+            }
+            metadata.update(task_metadata)
             append_res = await self.client.append_message(
                 conv_id,
                 text=text,
-                metadata={
-                    "telegram_message_id": queued_msg.telegram_message_id,
-                    "media_type": queued_msg.media_type,
-                    "media_path": queued_msg.media_path,
-                },
+                metadata=metadata,
             )
             input_message_id = append_res["id"]
 
-            # 3. Enqueue turn on backend
+            # 4. Enqueue turn on backend
             turn = await self.client.create_turn(conv_id, input_message_id)
             turn_id = turn["id"]
 
-            # 4. Wait for turn to finish (polling dispatcher outcome)
+            # 5. Wait for turn to finish (polling dispatcher outcome)
             elapsed = 0.0
             reply_text: str | None = None
             turn_error: str | None = None
@@ -407,6 +426,48 @@ class QueueProcessor:
                         reply_markup=None,
                     )
                 asyncio.create_task(self.process_message(next_msg))
+
+    async def _task_context_for_message(
+        self, queued_msg: QueuedMessage, text: str
+    ) -> tuple[str, dict[str, Any]]:
+        """Return the message text plus explicit task context metadata.
+
+        Only task-bound conversations are enriched. A failed lookup is
+        logged and leaves the message unchanged so a transient task read
+        failure cannot block the user's conversation.
+        """
+        if (
+            queued_msg.context_mode != "task"
+            or not queued_msg.context_task_id
+        ):
+            return text, {}
+        try:
+            task = await self.client.get_task(queued_msg.context_task_id)
+        except Exception as error:
+            logger.warning(
+                "Failed to load context for task %s: %s",
+                queued_msg.context_task_id,
+                error,
+            )
+            return text, {}
+
+        task_id = task.get("id") or queued_msg.context_task_id
+        task_number = task.get("number")
+        if task_number is None:
+            task_number = task_id
+        task_title = task.get("title") or ""
+        header = task_context_header(
+            task_id=task_id,
+            task_number=task_number,
+            task_title=task_title,
+        )
+        if header not in text:
+            text = f"{header}\n\n{text}"
+        return text, {
+            "task_id": task_id,
+            "task_number": task_number,
+            "task_title": task_title,
+        }
 
     async def _safe_edit_text(
         self,

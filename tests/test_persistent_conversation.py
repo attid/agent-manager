@@ -351,6 +351,51 @@ def test_first_run_then_resume_reuses_session_and_role_export(
         database.dispose()
 
 
+def test_conversation_task_binding_is_rendered_in_runner_task_text(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A conversation-level task binding must still reach the child prompt."""
+    artifact_root = tmp_path / "exports"
+    database = Database.from_path(migrated_db)
+    try:
+        ConversationRepository(database).create_conversation(
+            id="conv-1",
+            metadata={
+                "task_id": "task-123",
+                "task_number": 42,
+                "task_title": "Проверить деплой",
+            },
+        )
+        _profile(
+            database,
+            runner_config=_base_runner_config(
+                state_dir=tmp_path / "runner-state",
+            ),
+        )
+        processor = TurnProcessor(database)
+        message = _append_user(database, text="че там с задачей?")
+        _enqueue(
+            processor,
+            conversation_id="conv-1",
+            input_message_id=message.id,
+        )
+        handler = _handler(database, artifact_root)
+        result = processor.run_once(handler, conversation_id="conv-1")
+        assert result.status == "completed", result.error
+
+        execution = handler.last_execution
+        assert execution is not None
+        task_text = execution.task_path.read_text(encoding="utf-8")
+        context = (
+            "[Контекст задачи #42: «Проверить деплой» (id: task-123)]"
+        )
+        assert context in task_text
+        assert task_text.count(context) == 1
+        assert task_text.endswith("че там с задачей?")
+    finally:
+        database.dispose()
+
+
 # -- pinned revision survives registry edits ------------------------------
 
 

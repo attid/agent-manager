@@ -844,12 +844,51 @@ def _session_id_or_none(value: Any) -> str | None:
     return None
 
 
+def _render_task_context(metadata: Mapping[str, Any]) -> str | None:
+    """Render the task context carried by turn metadata, if any.
+
+    The Telegram worker stamps the message with ``task_id``,
+    ``task_number`` and ``task_title`` when the conversation is bound to a
+    task. Conversations can also carry the binding in their own metadata;
+    the persistent handler copies those fields into the turn metadata. The
+    rendered marker intentionally matches the worker's user-visible header,
+    so a message that already starts with it is not duplicated here.
+    """
+    task_id = metadata.get("task_id")
+    task_number = metadata.get("task_number")
+    task_title = metadata.get("task_title")
+    if task_id is None and task_number is None and task_title is None:
+        return None
+
+    id_text = str(task_id).strip() if task_id is not None else ""
+    number_text = (
+        str(task_number).strip() if task_number is not None else ""
+    )
+    title_text = str(task_title).strip() if task_title is not None else ""
+
+    if number_text and title_text:
+        context = f"[Контекст задачи #{number_text}: «{title_text}»"
+    elif number_text:
+        context = f"[Контекст задачи #{number_text}"
+    elif title_text:
+        context = f"[Контекст задачи: «{title_text}»"
+    else:
+        context = "[Контекст задачи"
+    if id_text:
+        context += f" (id: {id_text})"
+    return context + "]"
+
+
 def _render_task_text(turn_input: TurnInput) -> str:
     """Return the exact text passed to the Runner via ``--task``.
 
     The header records the turn/conversation/input-message ids and attempt
     count; the incoming message text follows the blank line verbatim. No size
-    limit is imposed. When the handler supplies an ``attachment_context``
+    limit is imposed. When the turn metadata carries a task binding, its
+    explicit context marker is rendered before the message so the secretary
+    always knows which task the user is discussing. The marker is omitted
+    when the incoming text already contains it (the Telegram worker prepends
+    the same header). When the handler supplies an ``attachment_context``
     metadata string, it is rendered between the header and the message so the
     child prompt and the attachment manifest always agree.
     """
@@ -860,9 +899,19 @@ def _render_task_text(turn_input: TurnInput) -> str:
         f"attempt_count: {turn_input.attempt_count}\n"
         f"role: {turn_input.role}\n"
     )
+    context_blocks: list[str] = []
+    task_context = _render_task_context(turn_input.metadata)
+    if task_context is not None and task_context not in turn_input.text:
+        context_blocks.append(task_context)
     attachment_context = turn_input.metadata.get("attachment_context")
     if isinstance(attachment_context, str) and attachment_context.strip():
-        return f"{header}\n{attachment_context}\n\n{turn_input.text}"
+        context_blocks.append(attachment_context)
+    if context_blocks:
+        return (
+            f"{header}\n"
+            + "\n".join(context_blocks)
+            + f"\n\n{turn_input.text}"
+        )
     return f"{header}\n{turn_input.text}"
 
 

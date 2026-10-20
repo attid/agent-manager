@@ -92,6 +92,7 @@ def _turn_input(
     conversation_id: str = "conv-1",
     input_message_id: str = "message-1",
     attempt_count: int = 1,
+    metadata: dict[str, object] | None = None,
 ) -> TurnInput:
     return TurnInput(
         turn_id=turn_id,
@@ -99,7 +100,7 @@ def _turn_input(
         input_message_id=input_message_id,
         role="user",
         text=text,
-        metadata={},
+        metadata=metadata or {},
         attempt_count=attempt_count,
     )
 
@@ -168,6 +169,61 @@ def test_success_returns_summary_and_writes_artifacts(
     # Unique artifact subdirectory below the configured root.
     assert record.artifact_dir.parent == (tmp_path / "artifacts").absolute()
     assert record.artifact_dir.name.endswith(record.run_id)
+
+
+def test_task_context_is_rendered_in_runner_task_text(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The secretary must receive the task identity from turn metadata."""
+    handler = _handler(tmp_path, mode="success")
+    incoming = "че там с задачей?"
+    context = (
+        "[Контекст задачи #42: «Проверить деплой» (id: task-123)]"
+    )
+    handler(
+        _turn_input(
+            text=incoming,
+            metadata={
+                "task_id": "task-123",
+                "task_number": 42,
+                "task_title": "Проверить деплой",
+            },
+        )
+    )
+
+    record = handler.last_execution
+    assert record is not None
+    task_text = record.task_path.read_text(encoding="utf-8")
+    assert context in task_text
+    assert task_text.count(context) == 1
+    assert task_text.endswith(incoming)
+
+
+def test_task_context_is_not_duplicated_when_message_already_has_it(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The Telegram worker's user-visible header must reach the child once."""
+    handler = _handler(tmp_path, mode="success")
+    context = (
+        "[Контекст задачи #42: «Проверить деплой» (id: task-123)]"
+    )
+    incoming = f"{context}\n\nче там с задачей?"
+    handler(
+        _turn_input(
+            text=incoming,
+            metadata={
+                "task_id": "task-123",
+                "task_number": 42,
+                "task_title": "Проверить деплой",
+            },
+        )
+    )
+
+    record = handler.last_execution
+    assert record is not None
+    task_text = record.task_path.read_text(encoding="utf-8")
+    assert task_text.count(context) == 1
+    assert task_text.endswith(incoming)
 
 
 # -- strict Runner output protocol --------------------------------------
