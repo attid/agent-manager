@@ -406,6 +406,42 @@ async def test_failed_tasks_are_accessible_from_task_list(
 
 
 @sync_test
+async def test_task_list_tabs_show_live_status_counts(
+    test_backend_client: BackendClient,
+) -> None:
+    await test_backend_client.create_task(title="First incoming", status="incoming")
+    await test_backend_client.create_task(title="Second incoming", status="incoming")
+    await test_backend_client.create_task(title="Active", status="in_progress")
+    await test_backend_client.create_task(title="Old", status="archived")
+
+    message = _make_message(text="/list")
+    await cmd_list(message, client=test_backend_client)
+    keyboard = message.answer.call_args.kwargs["reply_markup"]
+    tabs = {
+        button.callback_data.split(":")[1]: button.text
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("cat:")
+    }
+    assert tabs["incoming"] == "• 📥 Входящие 2 •"
+    assert tabs["in_progress"] == "⚙️ В работе 1"
+    assert tabs["failed"] == "❌ Ошибки 0"
+    assert tabs["archived"] == "📦 Архив"
+
+    callback = _make_callback_query("cat:in_progress:1")
+    await on_category_switch(callback, client=test_backend_client)
+    keyboard = callback.message.edit_reply_markup.call_args.kwargs["reply_markup"]
+    tabs = {
+        button.callback_data.split(":")[1]: button.text
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("cat:")
+    }
+    assert tabs["in_progress"] == "• ⚙️ В работе 1 •"
+    assert tabs["incoming"] == "📥 Входящие 2"
+
+
+@sync_test
 async def test_task_card_escapes_html_from_task_content(
     user_storage: UserStateStorage,
     test_backend_client: BackendClient,

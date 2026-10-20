@@ -329,6 +329,24 @@ class TaskRepository:
         with self._database.session() as session:
             return list(session.scalars(statement))
 
+    def get_status_counts(self) -> dict[str, int]:
+        """Return the number of tasks for every stored status.
+
+        Statuses with no tasks are omitted; callers that render a fixed status
+        list should treat a missing key as zero. The aggregation runs in
+        SQLite so the task rows themselves are not loaded.
+        """
+        statement = (
+            select(Task.status, func.count())
+            .group_by(Task.status)
+            .order_by(Task.status)
+        )
+        with self._database.session() as session:
+            return {
+                str(status): int(count)
+                for status, count in session.execute(statement)
+            }
+
     def update(
         self,
         task_id: str,

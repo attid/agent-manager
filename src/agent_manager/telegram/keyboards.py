@@ -116,8 +116,15 @@ def task_categories_keyboard(
     tasks: list[dict[str, Any]] | None = None,
     page: int = 1,
     page_size: int = 8,
+    counts: dict[str, int] | None = None,
 ) -> InlineKeyboardMarkup:
-    """Category tabs and paginated task list buttons."""
+    """Category tabs and paginated task list buttons.
+
+    ``counts`` maps a task status to its task count. Every category except the
+    archive shows its count (missing statuses are rendered as zero). Archive
+    remains a plain label because its contents are intentionally not tracked
+    in the active workflow.
+    """
     categories = [
         ("incoming", "📥 Входящие"),
         ("in_progress", "⚙️ В работе"),
@@ -127,14 +134,23 @@ def task_categories_keyboard(
         ("archived", "📦 Архив"),
     ]
 
+    def category_label(category: str, label: str) -> str:
+        if counts is None or category == "archived":
+            return label
+        return f"{label} {counts.get(category, 0)}"
+
     # Category tabs
-    cat_buttons = [
-        InlineKeyboardButton(
-            text=f"• {label} •" if cat == active_category else label,
-            callback_data=f"cat:{cat}:1",
+    cat_buttons = []
+    for category, label in categories:
+        text = category_label(category, label)
+        if category == active_category:
+            text = f"• {text} •"
+        cat_buttons.append(
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"cat:{category}:1",
+            )
         )
-        for cat, label in categories
-    ]
     # Split into 2 rows (3 and 2)
     keyboard = [cat_buttons[:3], cat_buttons[3:]]
 

@@ -1068,6 +1068,13 @@ def create_app(
         )
         return [task_to_read(task) for task in tasks]
 
+    @app.get("/tasks/counts", response_model=dict[str, int])
+    def get_task_counts(
+        repository: TaskRepository = Depends(get_repository),
+    ) -> dict[str, int]:
+        """Return task counts keyed by status."""
+        return repository.get_status_counts()
+
     @app.get("/tasks/{task_id}", response_model=TaskRead)
     def get_task(
         task_id: str,

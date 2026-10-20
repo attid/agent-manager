@@ -146,10 +146,11 @@ async def cmd_list(
     client: BackendClient,
 ) -> None:
     tasks = await client.list_tasks(status="incoming")
+    counts = await client.get_task_counts()
     await message.answer(
         "📋 <b>Список задач</b>\nВыберите категорию или карточку:",
         parse_mode="HTML",
-        reply_markup=task_categories_keyboard("incoming", tasks),
+        reply_markup=task_categories_keyboard("incoming", tasks, counts=counts),
     )
 
 
@@ -371,8 +372,11 @@ async def on_category_switch(
     category = parts[1]
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
     tasks = await client.list_tasks(status=category)
+    counts = await client.get_task_counts()
     await callback.message.edit_reply_markup(
-        reply_markup=task_categories_keyboard(category, tasks, page=page)
+        reply_markup=task_categories_keyboard(
+            category, tasks, page=page, counts=counts
+        )
     )
     await callback.answer()
 
@@ -692,10 +696,11 @@ async def on_action_list_tasks(
     client: BackendClient,
 ) -> None:
     tasks = await client.list_tasks(status="incoming")
+    counts = await client.get_task_counts()
     await callback.message.answer(
         "📋 <b>Список задач:</b>",
         parse_mode="HTML",
-        reply_markup=task_categories_keyboard("incoming", tasks),
+        reply_markup=task_categories_keyboard("incoming", tasks, counts=counts),
     )
     await callback.answer()
 

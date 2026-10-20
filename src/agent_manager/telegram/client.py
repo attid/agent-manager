@@ -135,6 +135,10 @@ class BackendClient:
     async def get_task(self, task_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/tasks/{task_id}")
 
+    async def get_task_counts(self) -> dict[str, int]:
+        """Return task counts keyed by status."""
+        return await self._request("GET", "/tasks/counts")
+
     async def patch_task(
         self,
         task_id: str,

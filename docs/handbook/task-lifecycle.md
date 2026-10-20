@@ -55,6 +55,9 @@ secretary must use `status="in_progress"` (or `update_task(..., status=
 ## Creating and editing
 
 - `POST /tasks` with `id` optional; duplicate caller ids return `409`. Accepts optional `attachments` list.
+- `GET /tasks/counts` returns `{status: count}` for every stored status. It is a
+  single grouped SQL aggregate, so callers do not load task rows merely to
+  render category counters.
 - `PATCH /tasks/{task_id}` updates only supplied fields
   (`title`, `description`, `status`, `workspace`, `agent_id`, `metadata`, `attachments`);
   `metadata` is shallow-merged into the stored object, preserving keys that

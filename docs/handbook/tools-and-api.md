@@ -15,6 +15,7 @@ Current surface (`src/agent_manager/api/app.py`):
 | `GET` | `/workspaces/resolve` | `200`, `404`, `409`, `422` | Read-only execution preflight. |
 | `POST` | `/tasks` | `201`, `409`, `422` | Create task. |
 | `GET` | `/tasks` | `200` | Filters: `status`, `workspace`, `limit`, `offset`. |
+| `GET` | `/tasks/counts` | `200` | Task counts keyed by status. |
 | `GET` | `/tasks/{task_id}` | `200`, `404` | Read one task. |
 | `PATCH` | `/tasks/{task_id}` | `200`, `404` | Partial update. |
 | `POST` | `/tasks/{task_id}/attachments` | `201`, `401`, `403`, `404`, `422` | Authenticated multipart/form-data upload route; records file in task artifacts and metadata. |

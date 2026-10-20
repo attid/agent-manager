@@ -615,6 +615,13 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
     ),
     _endpoint(
         "GET",
+        "/tasks/counts",
+        action="tasks.read",
+        doc="task-lifecycle.md",
+        summary="task counts keyed by status",
+    ),
+    _endpoint(
+        "GET",
         "/tasks/{task_id}",
         action="tasks.read",
         response_schema="TaskRead",

@@ -78,7 +78,8 @@ Executors run outside any database transaction. Registration seam:
 ## REST inventory
 
 Source: `src/agent_manager/api/app.py`. Groups: health;
-workspaces/resolve; tasks (create/read/list/patch/import, attachment upload via
+workspaces/resolve; tasks (create/read/list/patch/import, status counts via
+`GET /tasks/counts`, attachment upload via
 `POST /tasks/{task_id}/attachments`, artifacts and per-task analysis);
 conversations and messages; turns; operations (submit/list/read);
 analysis reports; recommendations (list/preview/approve/apply); agents
