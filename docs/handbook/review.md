@@ -9,6 +9,20 @@ There are two entry points to one implementation. Do not confuse them.
 task cycle and the durable operation use it, so a manual review and an
 automatic review validate the same way.
 
+The execution engine comes from the reviewer profile's
+`runner_config.engine`:
+
+- `pi` (default) runs `pi_runner run --agent <role.json> --task <prompt.md>`
+  with the standard read-only Pi role and provider/model resolution;
+- `agy` runs `agy --mode plan --dangerously-skip-permissions --effort <effort>
+  -p <prompt>` with a 180-second default timeout;
+- `codex` runs `codex review --uncommitted <prompt>`.
+
+Native engines are looked up on `PATH` and then in `~/.local/bin`. Their raw
+stdout/stderr are stored as `stdout.txt`/`stderr.txt` and
+`review_report_r<round>.md`, and the same `parse_review_report` validator
+parses the verdict. A missing binary is a clear `ReviewExecutionError`.
+
 A review approves only when the reviewer produced an explicit, well-formed
 verdict:
 

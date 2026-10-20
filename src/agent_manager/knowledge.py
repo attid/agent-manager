@@ -117,7 +117,15 @@ def format_agent_profile_markdown(profile: AgentProfile) -> str:
 
     policy = {
         key: profile.runner_config[key]
-        for key in ("project", "workdir", "project_read_only", "network", "allowed_hosts")
+        for key in (
+            "project",
+            "workdir",
+            "project_read_only",
+            "network",
+            "allowed_hosts",
+            "engine",
+            "effort",
+        )
         if key in (profile.runner_config or {})
     }
     policy_json = json.dumps(policy, ensure_ascii=False)
@@ -634,6 +642,10 @@ class KnowledgeBase:
             "tools": ["read", "bash"],
             "network": True,
             "project_read_only": True,
+            # Native AGY reviewer by default; set ``engine`` to ``pi`` or
+            # ``codex`` in the profile to switch the review backend.
+            "engine": "agy",
+            "effort": "high",
         }
         reviewer_prompt = (
             "# System Code Reviewer\n\n"
@@ -663,18 +675,28 @@ class KnowledgeBase:
                     system_prompt=reviewer_prompt,
                     runner_config=rev_cfg,
                 )
-            elif not (reviewer.runner_config or {}).get("runtime_paths"):
+            else:
                 updated_cfg = dict(reviewer.runner_config or {})
-                updated_cfg["state_dir"] = str(rev_state)
-                updated_cfg["pi_command"] = default_cmd
-                updated_cfg["runtime_paths"] = default_runtime
-                if "project" not in updated_cfg:
-                    updated_cfg["project"] = str(rev_ws)
-                repo.update(
-                    agent_id="system-code-reviewer",
-                    expected_revision=reviewer.revision,
-                    runner_config=updated_cfg,
-                )
+                changed = False
+                if not updated_cfg.get("runtime_paths"):
+                    updated_cfg["state_dir"] = str(rev_state)
+                    updated_cfg["pi_command"] = default_cmd
+                    updated_cfg["runtime_paths"] = default_runtime
+                    if "project" not in updated_cfg:
+                        updated_cfg["project"] = str(rev_ws)
+                    changed = True
+                # Existing profiles without an explicit engine adopt the new
+                # default once; a user-selected engine is never overwritten.
+                if "engine" not in updated_cfg:
+                    updated_cfg["engine"] = "agy"
+                    updated_cfg.setdefault("effort", "high")
+                    changed = True
+                if changed:
+                    repo.update(
+                        agent_id="system-code-reviewer",
+                        expected_revision=reviewer.revision,
+                        runner_config=updated_cfg,
+                    )
         except Exception as err:
             logger.warning("Could not ensure reviewer profile: %s", err)
 

@@ -516,3 +516,196 @@ def test_execute_requires_artifact_dir(tmp_path: Path) -> None:
     request = _request(tmp_path, artifact_dir=None)
     with pytest.raises(ValueError):
         executor.execute(request)
+
+
+# -- multi-engine reviewer backends -------------------------------------
+
+
+def _engine_request(
+    tmp_path: Path,
+    engine: str | None,
+    *,
+    effort: str | None = None,
+    timeout_seconds: float | None = None,
+):
+    config: dict[str, object] = {}
+    if engine is not None:
+        config["engine"] = engine
+    if effort is not None:
+        config["effort"] = effort
+    return _request(
+        tmp_path,
+        reviewer_runner_config=config,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _capturing_runner(
+    stdout: str,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+):
+    captured: dict[str, object] = {}
+
+    def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+
+    return run, captured
+
+
+def test_agy_backend_uses_plan_mode_high_effort_and_project_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner(
+        "Проверено, критичных замечаний нет.\nВЕРДИКТ: ОДОБРЕНО\n"
+    )
+    request = _engine_request(tmp_path, "agy")
+    result = _executor(runner).execute(request)
+
+    cmd = captured["cmd"]
+    assert cmd[0] == "/fake/bin/agy"
+    assert cmd[1:6] == [
+        "--mode",
+        "plan",
+        "--dangerously-skip-permissions",
+        "--effort",
+        "high",
+    ]
+    assert cmd[6] == "-p"
+    assert "# Code Review: Task #task-1" in cmd[7]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["timeout"] == 180.0
+    assert result.verdict == VERDICT_APPROVED
+    assert result.runtime["engine"] == "agy"
+    review_dir = tmp_path / "artifacts" / "task-1" / "review"
+    assert (review_dir / "stdout.txt").is_file()
+    assert (review_dir / "stderr.txt").is_file()
+    assert (review_dir / "review_report_r1.md").is_file()
+
+
+def test_agy_backend_uses_configured_effort_and_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner("ВЕРДИКТ: ОДОБРЕНО\n")
+    request = _engine_request(
+        tmp_path, "agy", effort="medium", timeout_seconds=42
+    )
+    _executor(runner).execute(request)
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--effort") + 1] == "medium"
+    assert captured["kwargs"]["timeout"] == 42
+
+
+def test_codex_backend_uses_review_uncommitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner(
+        "P1: src/app.py:9 — missing null check\n"
+        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    request = _engine_request(tmp_path, "codex")
+    result = _executor(runner).execute(request)
+
+    cmd = captured["cmd"]
+    assert cmd[0] == "/fake/bin/codex"
+    assert cmd[1] == "review"
+    assert cmd[2] == "--uncommitted"
+    assert "# Code Review: Task #task-1" in cmd[3]
+    assert captured["kwargs"]["cwd"] == str(tmp_path)
+    assert result.verdict == VERDICT_CHANGES_REQUESTED
+    assert result.findings[0].file == "src/app.py"
+    assert result.findings[0].line == 9
+    assert result.runtime["engine"] == "codex"
+
+
+def test_unknown_engine_fails_with_persisted_diagnostics(tmp_path: Path) -> None:
+    runner, _captured = _capturing_runner("ВЕРДИКТ: ОДОБРЕНО\n")
+    with pytest.raises(ReviewExecutionError) as excinfo:
+        _executor(runner).execute(_engine_request(tmp_path, "unknown"))
+    assert excinfo.value.diagnostics["reason"] == "unknown_reviewer_engine"
+    assert "unknown reviewer engine" in str(excinfo.value)
+
+
+def test_missing_external_engine_binary_fails_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which", lambda _name: None
+    )
+    monkeypatch.setattr(
+        "agent_manager.review_executor.Path.home", lambda: tmp_path / "home"
+    )
+    runner, captured = _capturing_runner("unused")
+    with pytest.raises(ReviewExecutionError) as excinfo:
+        _executor(runner).execute(_engine_request(tmp_path, "agy"))
+    assert str(excinfo.value) == "Reviewer engine 'agy' binary not found"
+    assert excinfo.value.diagnostics["reason"] == "engine_binary_not_found"
+    assert "cmd" not in captured
+
+
+def test_default_engine_uses_pi_runner_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary = tmp_path / "summary.md"
+    summary.write_text("ВЕРДИКТ: ОДОБРЕНО\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps(
+                {"status": "completed", "summary_path": str(summary)}
+            ),
+            "",
+        )
+
+    # A missing external binary must not matter: no engine means the Pi runner.
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which", lambda _name: None
+    )
+    result = _executor(run).execute(_engine_request(tmp_path, None))
+
+    cmd = captured["cmd"]
+    assert cmd[0] == "fake-runner"
+    assert cmd[1] == "run"
+    assert "--agent" in cmd
+    assert "--task" in cmd
+    assert result.verdict == VERDICT_APPROVED
+    assert result.runtime["engine"] == "pi"
+
+
+def test_external_nonzero_exit_persists_stdout_and_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, _captured = _capturing_runner(
+        "partial output", returncode=7, stderr="engine crashed"
+    )
+    with pytest.raises(ReviewExecutionError) as excinfo:
+        _executor(runner).execute(_engine_request(tmp_path, "codex"))
+    assert excinfo.value.diagnostics["reason"] == "reviewer_nonzero_exit"
+    review_dir = tmp_path / "artifacts" / "task-1" / "review"
+    assert (review_dir / "stdout.txt").read_text(encoding="utf-8") == "partial output"
+    assert (review_dir / "stderr.txt").read_text(encoding="utf-8") == "engine crashed"

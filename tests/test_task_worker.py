@@ -980,3 +980,77 @@ def test_review_fix_round_unions_changed_files(
 
     assert result["needs_user_input"] is False
     assert result["changed_files"] == ["src/old.py", "src/first.py", "src/fix.py"]
+
+
+def test_review_cycle_uses_reviewer_profile_engine(
+    migrated_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored ``runner_config.engine`` must reach the review executor."""
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    test_db = Database.from_path(migrated_db)
+    agent_repo = AgentProfileRepository(test_db)
+    agent_repo.create(
+        agent_id="system-code-reviewer",
+        name="System Reviewer",
+        role="reviewer",
+        system_prompt="Review prompt.",
+        runner_config={"engine": "codex", "effort": "high"},
+    )
+
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(
+        title="Engine selection",
+        status="in_progress",
+        metadata={"task_type": "coding", "requires_review": True},
+    )
+
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id="agent-manager-developer",
+        default_workspace=str(tmp_path),
+        runner_argv_prefix=["true"],
+    )
+
+    exec_dir = tmp_path / "exec"
+    exec_dir.mkdir(parents=True)
+    role_file = exec_dir / "role.json"
+    role_file.write_text("{}")
+    state_dir = exec_dir / "state"
+    state_dir.mkdir()
+
+    review_proc = MagicMock(
+        returncode=0,
+        stdout="Проверено.\nВЕРДИКТ: ОДОБРЕНО\n",
+        stderr="",
+    )
+
+    with patch("subprocess.run", return_value=review_proc) as run_mock:
+        result = worker._run_review_cycle(
+            task=task,
+            project_dir=tmp_path,
+            changed_files=["file1.py"],
+            developer_summary="Implemented feature.",
+            exec_dir=exec_dir,
+            role_file=role_file,
+            state_dir=state_dir,
+            child_env={},
+        )
+
+    assert result["needs_user_input"] is False
+    cmd = run_mock.call_args.args[0]
+    assert cmd[0] == "/fake/bin/codex"
+    assert cmd[1:3] == ["review", "--uncommitted"]
+    metrics = json.loads(
+        (
+            tmp_path
+            / "artifacts"
+            / str(task.id)
+            / "review"
+            / "round_1.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert metrics["runtime"]["engine"] == "codex"

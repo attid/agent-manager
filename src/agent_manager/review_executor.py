@@ -38,7 +38,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
@@ -60,14 +62,24 @@ __all__ = [
     "REVIEW_VERDICTS",
     "VERDICT_APPROVED",
     "VERDICT_CHANGES_REQUESTED",
+    "AgyReviewerBackend",
+    "CodexReviewerBackend",
+    "PiReviewerBackend",
     "ReviewExecutionError",
     "ReviewExecutor",
     "ReviewFinding",
     "ReviewFormatError",
     "ReviewRequest",
     "ReviewResult",
+    "find_reviewer_binary",
     "parse_review_report",
 ]
+
+#: Default timeout for external reviewer engines that have no Runner contract.
+DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS = 180.0
+
+#: Supported values of ``runner_config.engine``.
+REVIEW_ENGINES = frozenset({"pi", "agy", "codex"})
 
 #: Registry identity of the independent reviewer.
 REVIEWER_AGENT_ID = "system-code-reviewer"
@@ -232,6 +244,77 @@ class ReviewRequest:
     artifact_dir: Path | None = None
     task_artifact_dir: Path | None = None
     timeout_seconds: float | None = None
+
+    @property
+    def engine(self) -> str:
+        """The configured reviewer engine, defaulting to the Pi runner."""
+        config = self.reviewer_runner_config or {}
+        if not isinstance(config, Mapping):
+            return "pi"
+        value = config.get("engine")
+        return str(value or "pi").strip().lower() or "pi"
+
+
+def find_reviewer_binary(engine: str) -> Path | None:
+    """Locate an external reviewer binary on ``PATH`` or in ``~/.local/bin``.
+
+    ``shutil.which`` already verifies that a ``PATH`` hit is executable, so it
+    is trusted as-is. The conventional user-local location is checked only
+    when it is a real executable file.
+    """
+    discovered = shutil.which(engine)
+    if discovered:
+        return Path(discovered)
+    fallback = Path.home() / ".local" / "bin" / engine
+    if fallback.is_file() and os.access(fallback, os.X_OK):
+        return fallback
+    return None
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReviewerRunContext:
+    """Prepared, engine-independent inputs for one review round."""
+
+    request: ReviewRequest
+    round_number: int
+    review_artifact_dir: Path
+    task_prompt_path: Path
+    prompt_text: str
+    role_path: Path
+    runtime_payload: Mapping[str, Any]
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReviewerBackendResult:
+    """The output one reviewer backend produced for the executor to validate."""
+
+    report_text: str
+    returncode: int
+    runtime: Mapping[str, Any]
+    stdout: str = ""
+    stderr: str = ""
+
+
+class _ReviewerBackendFailure(Exception):
+    """An internal, typed failure that the executor persists as diagnostics."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.cause = cause
 
 
 def _utcnow_iso() -> str:
@@ -514,10 +597,16 @@ class ReviewExecutor:
     def execute(self, request: ReviewRequest) -> ReviewResult:
         """Run and validate one review round, persisting its artifacts.
 
+        The configured ``runner_config.engine`` selects the backend:
+        :class:`PiReviewerBackend` (default), :class:`AgyReviewerBackend` or
+        :class:`CodexReviewerBackend`. Every backend feeds the same strict
+        report validation, so the verdict contract never depends on the tool.
+
         Raises:
-            ReviewExecutionError: for a nonzero exit, failed Runner status,
-                empty/malformed output, an absent/invalid verdict or any
-                missing report. The diagnostics are persisted to disk first.
+            ReviewExecutionError: for a missing engine binary, a nonzero exit,
+                failed Runner status, empty/malformed output, an absent or
+                invalid verdict or any missing report. The diagnostics are
+                persisted to disk first.
         """
         started = time.perf_counter()
         if request.artifact_dir is None:
@@ -544,160 +633,94 @@ class ReviewExecutor:
             request.reviewer_system_prompt or DEFAULT_REVIEWER_PROMPT,
             encoding="utf-8",
         )
+        prompt_text = self._build_review_prompt(request)
         task_prompt_path = artifact_dir / f"review_prompt_r{round_number}.md"
-        task_prompt_path.write_text(
-            self._build_review_prompt(request), encoding="utf-8"
-        )
+        task_prompt_path.write_text(prompt_text, encoding="utf-8")
 
-        role_config = self._build_review_role_config(request, state_dir=state_dir)
-        runtime_selection = self._runtime_defaults.resolve(role_config)
-        role_config = runtime_selection.role_config
-        role_config = _build_role_config(
-            role_config,
-            agent_id=REVIEWER_AGENT_ID,
-            prompt_path=system_prompt_path,
-        )
-        discovery_path = write_handbook_discovery(
-            artifact_dir,
-            agent_id=REVIEWER_AGENT_ID,
-            tools=list(role_config.get("tools") or []),
-        )
-        if discovery_path is not None:
-            instructions = list(role_config.get("instructions") or [])
-            instructions.append(str(discovery_path))
-            role_config["instructions"] = instructions
+        engine = request.engine
         role_path = artifact_dir / f"role_r{round_number}.json"
-        role_path.write_text(
-            json.dumps(role_config, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        runtime_payload: dict[str, Any] = {"engine": engine}
+        if engine == "pi":
+            # Only the Pi Runner needs the read-only role document and the
+            # provider/model runtime selection; native engines are standalone.
+            role_config = self._build_review_role_config(
+                request, state_dir=state_dir
+            )
+            runtime_selection = self._runtime_defaults.resolve(role_config)
+            role_config = runtime_selection.role_config
+            role_config = _build_role_config(
+                role_config,
+                agent_id=REVIEWER_AGENT_ID,
+                prompt_path=system_prompt_path,
+            )
+            discovery_path = write_handbook_discovery(
+                artifact_dir,
+                agent_id=REVIEWER_AGENT_ID,
+                tools=list(role_config.get("tools") or []),
+            )
+            if discovery_path is not None:
+                instructions = list(role_config.get("instructions") or [])
+                instructions.append(str(discovery_path))
+                role_config["instructions"] = instructions
+            role_path.write_text(
+                json.dumps(role_config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            runtime_payload.update(
+                {
+                    "provider": runtime_selection.provider,
+                    "model": runtime_selection.model,
+                    "pi_auth_provider": runtime_selection.pi_auth_provider,
+                    "models_file": runtime_selection.models_file,
+                    "selection": runtime_selection.selection_dict(),
+                }
+            )
+
+        context = _ReviewerRunContext(
+            request=request,
+            round_number=round_number,
+            review_artifact_dir=review_artifact_dir,
+            task_prompt_path=task_prompt_path,
+            prompt_text=prompt_text,
+            role_path=role_path,
+            runtime_payload=runtime_payload,
         )
 
-        runtime_payload: dict[str, Any] = {
-            "provider": runtime_selection.provider,
-            "model": runtime_selection.model,
-            "pi_auth_provider": runtime_selection.pi_auth_provider,
-            "models_file": runtime_selection.models_file,
-            "selection": runtime_selection.selection_dict(),
-        }
-
-        cmd = [
-            *self._runner_argv_prefix,
-            "run",
-            "--agent",
-            str(role_path),
-            "--task",
-            str(task_prompt_path),
-        ]
-        try:
-            proc = self._invoke(cmd, cwd=request.project_dir, timeout=request.timeout_seconds)
-        except Exception as error:  # noqa: BLE001 - recorded as diagnostics
+        backend = self._backend_for(engine)
+        if backend is None:
             duration_ms = (time.perf_counter() - started) * 1000.0
             raise self._failure(
                 request,
                 round_number,
                 review_artifact_dir,
-                reason="runner_launch_failed",
-                message=f"failed to launch reviewer: {type(error).__name__}: {error}",
+                reason="unknown_reviewer_engine",
+                message=f"unknown reviewer engine: {engine!r}",
                 duration_ms=duration_ms,
-                runtime=runtime_payload,
-            ) from error
-
-        duration_ms = (time.perf_counter() - started) * 1000.0
-
-        if proc.returncode != 0:
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="runner_nonzero_exit",
-                message=(
-                    f"reviewer process exited with code {proc.returncode}"
-                ),
-                duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                runtime=runtime_payload,
-            )
-
-        payload = _extract_last_json_object(proc.stdout or "")
-        if payload is None:
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="malformed_runner_output",
-                message="reviewer produced no parseable JSON result object",
-                duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                runtime=runtime_payload,
-            )
-
-        status = payload.get("status")
-        if status != "completed":
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="runner_status_not_completed",
-                message=f"reviewer reported status {status!r}",
-                duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                runtime=runtime_payload,
-            )
-
-        summary_path_raw = payload.get("summary_path")
-        summary_path = Path(summary_path_raw) if summary_path_raw else None
-        if summary_path is None or not summary_path.is_file():
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="missing_report",
-                message=(
-                    "reviewer completed without a readable report file: "
-                    f"{summary_path_raw!r}"
-                ),
-                duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
                 runtime=runtime_payload,
             )
 
         try:
-            report_text = summary_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError) as error:
-            raise self._failure(
+            outcome = backend.run(context)
+        except _ReviewerBackendFailure as failure:
+            duration_ms = (time.perf_counter() - started) * 1000.0
+            error = self._failure(
                 request,
                 round_number,
                 review_artifact_dir,
-                reason="unreadable_report",
-                message=f"cannot read reviewer report: {type(error).__name__}: {error}",
+                reason=failure.reason,
+                message=failure.message,
                 duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                runtime=runtime_payload,
-            ) from error
-
-        if not report_text:
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="empty_report",
-                message="reviewer report is empty",
-                duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                returncode=failure.returncode,
+                stdout=failure.stdout,
+                stderr=failure.stderr,
                 runtime=runtime_payload,
             )
+            if failure.cause is not None:
+                raise error from failure.cause
+            raise error
+
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        report_text = outcome.report_text
 
         try:
             verdict, findings = parse_review_report(report_text)
@@ -709,10 +732,10 @@ class ReviewExecutor:
                 reason="invalid_report",
                 message=str(error),
                 duration_ms=duration_ms,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                runtime=runtime_payload,
+                returncode=outcome.returncode,
+                stdout=outcome.stdout,
+                stderr=outcome.stderr,
+                runtime=outcome.runtime,
             ) from error
 
         report_path = review_artifact_dir / f"round_{round_number}.md"
@@ -729,12 +752,12 @@ class ReviewExecutor:
             "domain_verdict": verdict,
             "approved": verdict == VERDICT_APPROVED,
             "findings": [finding.to_dict() for finding in findings],
-            "returncode": proc.returncode,
+            "returncode": outcome.returncode,
             "report_file": str(report_path),
             "duration_ms": duration_ms,
             "timestamp": _utcnow_iso(),
             "reviewer_agent_id": REVIEWER_AGENT_ID,
-            "runtime": runtime_payload,
+            "runtime": dict(outcome.runtime),
         }
         metrics_path = review_artifact_dir / f"round_{round_number}.json"
         metrics_path.write_text(
@@ -743,15 +766,17 @@ class ReviewExecutor:
         )
 
         logger.info(
-            "review round completed task=%s round=%d verdict=%s findings=%d",
+            "review round completed task=%s round=%d engine=%s verdict=%s findings=%d",
             request.task_id,
             round_number,
+            engine,
             verdict,
             len(findings),
             extra={
                 "event": "review_round_completed",
                 "task_id": request.task_id,
                 "round": round_number,
+                "engine": engine,
                 "verdict": verdict,
                 "findings": len(findings),
             },
@@ -766,9 +791,19 @@ class ReviewExecutor:
             metrics_path=str(metrics_path),
             round_number=round_number,
             duration_ms=duration_ms,
-            returncode=proc.returncode,
-            runtime=runtime_payload,
+            returncode=outcome.returncode,
+            runtime=dict(outcome.runtime),
         )
+
+    def _backend_for(self, engine: str) -> "_ReviewerBackend | None":
+        """Return the backend implementing ``engine`` or ``None`` if unknown."""
+        if engine == "pi":
+            return PiReviewerBackend(self)
+        if engine == "agy":
+            return AgyReviewerBackend(self)
+        if engine == "codex":
+            return CodexReviewerBackend(self)
+        return None
 
     # -- internals -------------------------------------------------------
 
@@ -851,3 +886,269 @@ class ReviewExecutor:
             diagnostics=diagnostics,
             diagnostics_path=str(diagnostics_path),
         )
+
+
+class _ReviewerBackend:
+    """Base class for one concrete reviewer execution engine."""
+
+    engine = ""
+
+    def __init__(self, executor: ReviewExecutor) -> None:
+        self._executor = executor
+
+    def run(self, context: _ReviewerRunContext) -> _ReviewerBackendResult:
+        raise NotImplementedError
+
+
+class PiReviewerBackend(_ReviewerBackend):
+    """Run the reviewer through the standard Pi Runner profile contract."""
+
+    engine = "pi"
+
+    def run(self, context: _ReviewerRunContext) -> _ReviewerBackendResult:
+        request = context.request
+        cmd = [
+            *self._executor._runner_argv_prefix,
+            "run",
+            "--agent",
+            str(context.role_path),
+            "--task",
+            str(context.task_prompt_path),
+        ]
+        try:
+            proc = self._executor._invoke(
+                cmd,
+                cwd=request.project_dir,
+                timeout=request.timeout_seconds,
+            )
+        except Exception as error:  # noqa: BLE001 - surfaced as diagnostics
+            raise _ReviewerBackendFailure(
+                "runner_launch_failed",
+                f"failed to launch reviewer: {type(error).__name__}: {error}",
+                cause=error,
+            ) from error
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        if proc.returncode != 0:
+            raise _ReviewerBackendFailure(
+                "runner_nonzero_exit",
+                f"reviewer process exited with code {proc.returncode}",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        payload = _extract_last_json_object(stdout)
+        if payload is None:
+            raise _ReviewerBackendFailure(
+                "malformed_runner_output",
+                "reviewer produced no parseable JSON result object",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        status = payload.get("status")
+        if status != "completed":
+            raise _ReviewerBackendFailure(
+                "runner_status_not_completed",
+                f"reviewer reported status {status!r}",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        summary_path_raw = payload.get("summary_path")
+        summary_path = Path(summary_path_raw) if summary_path_raw else None
+        if summary_path is None or not summary_path.is_file():
+            raise _ReviewerBackendFailure(
+                "missing_report",
+                "reviewer completed without a readable report file: "
+                f"{summary_path_raw!r}",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        try:
+            report_text = summary_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise _ReviewerBackendFailure(
+                "unreadable_report",
+                f"cannot read reviewer report: {type(error).__name__}: {error}",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+                cause=error,
+            ) from error
+
+        if not report_text:
+            raise _ReviewerBackendFailure(
+                "empty_report",
+                "reviewer report is empty",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        return _ReviewerBackendResult(
+            report_text=report_text,
+            returncode=proc.returncode,
+            runtime=context.runtime_payload,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+
+class _ExternalReviewerBackend(_ReviewerBackend):
+    """Common contract for reviewer CLIs that print the report on stdout."""
+
+    def _build_command(
+        self,
+        binary: Path,
+        prompt: str,
+        context: _ReviewerRunContext,
+    ) -> list[str]:
+        raise NotImplementedError
+
+    def _runtime_details(
+        self, context: _ReviewerRunContext
+    ) -> Mapping[str, Any]:
+        return {}
+
+    def _binary_not_found(self) -> _ReviewerBackendFailure:
+        return _ReviewerBackendFailure(
+            "engine_binary_not_found",
+            f"Reviewer engine '{self.engine}' binary not found",
+        )
+
+    def run(self, context: _ReviewerRunContext) -> _ReviewerBackendResult:
+        binary = find_reviewer_binary(self.engine)
+        if binary is None:
+            raise self._binary_not_found()
+
+        request = context.request
+        cmd = self._build_command(binary, context.prompt_text, context)
+        timeout = (
+            request.timeout_seconds
+            if request.timeout_seconds is not None
+            else DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS
+        )
+        try:
+            proc = self._executor._invoke(
+                cmd,
+                cwd=request.project_dir,
+                timeout=timeout,
+            )
+        except Exception as error:  # noqa: BLE001 - surfaced as diagnostics
+            raise _ReviewerBackendFailure(
+                "reviewer_launch_failed",
+                f"failed to launch reviewer engine '{self.engine}': "
+                f"{type(error).__name__}: {error}",
+                cause=error,
+            ) from error
+
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        (context.review_artifact_dir / "stdout.txt").write_text(
+            stdout, encoding="utf-8"
+        )
+        (context.review_artifact_dir / "stderr.txt").write_text(
+            stderr, encoding="utf-8"
+        )
+        report_text = stdout.strip()
+        report_path = (
+            context.review_artifact_dir
+            / f"review_report_r{context.round_number}.md"
+        )
+        report_path.write_text(report_text, encoding="utf-8")
+
+        if proc.returncode != 0:
+            raise _ReviewerBackendFailure(
+                "reviewer_nonzero_exit",
+                f"reviewer engine '{self.engine}' exited with code "
+                f"{proc.returncode}",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        if not report_text:
+            raise _ReviewerBackendFailure(
+                "empty_report",
+                f"reviewer engine '{self.engine}' produced an empty report",
+                returncode=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        runtime = dict(context.runtime_payload)
+        runtime.update(
+            {
+                "engine": self.engine,
+                "binary": str(binary),
+                "timeout_seconds": timeout,
+            }
+        )
+        runtime.update(self._runtime_details(context))
+        return _ReviewerBackendResult(
+            report_text=report_text,
+            returncode=proc.returncode,
+            runtime=runtime,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+
+class AgyReviewerBackend(_ExternalReviewerBackend):
+    """Run the native ``agy`` plan-mode reviewer."""
+
+    engine = "agy"
+
+    @staticmethod
+    def _effort(context: _ReviewerRunContext) -> str:
+        runner_config = context.request.reviewer_runner_config or {}
+        requested = (
+            runner_config.get("effort")
+            if isinstance(runner_config, Mapping)
+            else None
+        )
+        return str(requested or "high")
+
+    def _runtime_details(
+        self, context: _ReviewerRunContext
+    ) -> Mapping[str, Any]:
+        return {"effort": self._effort(context)}
+
+    def _build_command(
+        self,
+        binary: Path,
+        prompt: str,
+        context: _ReviewerRunContext,
+    ) -> list[str]:
+        effort = self._effort(context)
+        return [
+            str(binary),
+            "--mode",
+            "plan",
+            "--dangerously-skip-permissions",
+            "--effort",
+            effort,
+            "-p",
+            prompt,
+        ]
+
+
+class CodexReviewerBackend(_ExternalReviewerBackend):
+    """Run the native ``codex review --uncommitted`` reviewer."""
+
+    engine = "codex"
+
+    def _build_command(
+        self,
+        binary: Path,
+        prompt: str,
+        context: _ReviewerRunContext,
+    ) -> list[str]:
+        return [str(binary), "review", "--uncommitted", prompt]

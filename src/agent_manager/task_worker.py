@@ -796,11 +796,11 @@ class TaskExecutionWorker:
 
         rev_profile = self._agent_repository.get_current("system-code-reviewer")
         reviewer_system_prompt = rev_profile.system_prompt if rev_profile else ""
-        reviewer_runner_config = (
-            dict(rev_profile.runner_config)
-            if rev_profile and isinstance(rev_profile.runner_config, dict)
-            else {}
-        )
+        # Pass the stored profile configuration through unchanged: the review
+        # executor reads ``engine``/``effort`` from it to select the backend.
+        reviewer_runner_config: dict[str, Any] = {}
+        if rev_profile is not None and isinstance(rev_profile.runner_config, Mapping):
+            reviewer_runner_config = dict(rev_profile.runner_config)
 
         executor = ReviewExecutor(
             runner_argv_prefix=self.runner_argv_prefix,

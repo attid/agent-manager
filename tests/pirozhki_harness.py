@@ -262,6 +262,7 @@ def _seed_deterministic_runner_configs(
             ),
         },
         "system-code-reviewer": {
+            "engine": "pi",
             "provider": "test-provider",
             "model": "test-model",
             "mode": "success",

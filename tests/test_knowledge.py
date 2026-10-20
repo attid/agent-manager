@@ -552,3 +552,42 @@ def test_delete_document_commits_removal_to_knowledge_repository(
     ).stdout
     assert status == ""
     assert latin.is_file()
+
+
+def test_default_reviewer_engine_is_agy_and_explicit_choice_is_preserved(
+    tmp_path: Path, migrated_db: Path
+) -> None:
+    db = Database.from_path(migrated_db)
+    try:
+        kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+        kb.ensure_default_profiles(db)
+        repo = AgentProfileRepository(db)
+
+        reviewer = repo.get_current("system-code-reviewer")
+        assert reviewer is not None
+        assert reviewer.runner_config["engine"] == "agy"
+        assert reviewer.runner_config["effort"] == "high"
+
+        exported = (
+            tmp_path / "knowledge" / "agents" / "system-code-reviewer.md"
+        )
+        kb.save_agent_profile(reviewer)
+        content = exported.read_text(encoding="utf-8")
+        assert '"engine": "agy"' in content
+        assert '"effort": "high"' in content
+
+        # An explicitly selected engine survives repeated bootstrap so the
+        # reviewer can be switched back to the standard Pi runner.
+        switched = dict(reviewer.runner_config)
+        switched["engine"] = "pi"
+        repo.update(
+            agent_id="system-code-reviewer",
+            expected_revision=reviewer.revision,
+            runner_config=switched,
+        )
+        kb.ensure_default_profiles(db)
+        current = repo.get_current("system-code-reviewer")
+        assert current is not None
+        assert current.runner_config["engine"] == "pi"
+    finally:
+        db.dispose()
