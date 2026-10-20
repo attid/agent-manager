@@ -185,7 +185,9 @@ class TaskPatch(BaseModel):
     replace the stored value. ``metadata`` is shallow-merged into the stored
     metadata mapping, so unrelated keys are preserved. Setting ``status`` to
     ``in_progress`` clears any previous ``metadata.execution_status`` so a
-    resumed task is claimable by the worker again.
+    resumed task is claimable by the worker again. A task that is already
+    ``running`` keeps its active execution marker; the API rejects such a
+    request with ``409 Conflict`` instead of making it claimable again.
     """
 
     model_config = ConfigDict(extra="forbid")

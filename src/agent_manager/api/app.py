@@ -87,6 +87,7 @@ from ..storage import (
     OperationRepository,
     RecommendationNotFoundError,
     RecommendationStateError,
+    TaskAlreadyRunningError,
     TaskNotFoundError,
     TaskRepository,
 )
@@ -1316,8 +1317,14 @@ def create_app(
         try:
             task = repository.update(
                 task_id=task_id,
+                reject_if_running=True,
                 **payload.replacements(),
             )
+        except TaskAlreadyRunningError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
         except TaskNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

@@ -67,7 +67,10 @@ process-local lock and an immediate SQLite write transaction, so:
 - tasks in one explicit workspace execute strictly sequentially;
 - tasks without a workspace form one serialized group, because they resolve to
   the same default or profile project directory;
-- concurrent workers cannot claim the same task or the same workspace group.
+- concurrent workers cannot claim the same task or the same workspace group;
+- a task whose `metadata.execution_status` is already `running` is not
+  claimable again, and `PATCH /tasks/{id}` with `status=in_progress` preserves
+  that marker and returns `409 Conflict`.
 
 Workspace names are the grouping key. Distinct names that a caller maps to the
 same filesystem directory are not automatically merged into one execution

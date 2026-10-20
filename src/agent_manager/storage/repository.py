@@ -41,6 +41,18 @@ class DuplicateTaskIdError(Exception):
         self.task_id = task_id
 
 
+class TaskAlreadyRunningError(Exception):
+    """Raised when a call asks to restart a task with an active claim."""
+
+    def __init__(self, task_id: str, worker_id: str | None = None) -> None:
+        worker = worker_id or "unknown worker"
+        super().__init__(
+            f"task is already executing on worker {worker}: {task_id}"
+        )
+        self.task_id = task_id
+        self.worker_id = worker_id
+
+
 def _is_task_id_conflict(error: IntegrityError) -> bool:
     """Return whether ``error`` is a duplicate ``tasks.id`` violation.
 
@@ -358,6 +370,7 @@ class TaskRepository:
         agent_id: Any = _UNSET,
         metadata: Any = _UNSET,
         attachments: Any = _UNSET,
+        reject_if_running: bool = False,
     ) -> Task:
         """Update mutable fields of an existing task and return the record.
 
@@ -371,18 +384,49 @@ class TaskRepository:
             metadata: Metadata fields merged into the stored mapping if
                 supplied. Existing keys not present here are preserved.
             attachments: Replacement attachments list if supplied.
+            reject_if_running: When true, a request that would move a task
+                with an active ``execution_status == "running"`` claim to
+                ``in_progress`` raises :class:`TaskAlreadyRunningError`
+                instead of returning the unchanged running task.
 
-        Moving a task to ``in_progress`` clears any stored
-        ``execution_status`` (including a stale ``"completed"``) so the worker
-        can claim the task again after new instructions arrive.
+        Moving a task to ``in_progress`` clears any stale stored
+        ``execution_status`` (including ``"completed"``) so the worker can
+        claim the task again after new instructions arrive. An active
+        ``"running"`` claim is never cleared: the task remains owned by its
+        current worker and cannot be claimed a second time.
 
         Raises:
             TaskNotFoundError: when the task does not exist.
+            TaskAlreadyRunningError: when ``reject_if_running`` is true and
+                the task is already running.
         """
+        moves_to_in_progress = (
+            status is not _UNSET and str(status) == "in_progress"
+        )
         with self._database.session() as session:
+            if moves_to_in_progress:
+                # Serialize with claim_in_progress before reading. A deferred
+                # read could otherwise observe a task before a concurrent
+                # claim commits and then overwrite the fresh running marker.
+                session.execute(text("BEGIN IMMEDIATE"))
             task = self._find(session, task_id)
             if task is None:
                 raise TaskNotFoundError(task_id)
+            initial_meta = dict(task.meta or {})
+            was_running = initial_meta.get("execution_status") == "running"
+            if moves_to_in_progress and was_running and reject_if_running:
+                raise TaskAlreadyRunningError(
+                    task.id, initial_meta.get("execution_worker_id")
+                )
+            running_marker = {
+                key: initial_meta[key]
+                for key in (
+                    "execution_status",
+                    "execution_worker_id",
+                    "execution_claimed_at",
+                )
+                if key in initial_meta
+            }
             if title is not _UNSET:
                 task.title = str(title)
             if description is not _UNSET:
@@ -407,11 +451,16 @@ class TaskRepository:
                         for a in attachments
                     ]
                 task.meta = current_meta
-            if status is not _UNSET and str(status) == "in_progress":
+            if moves_to_in_progress:
                 # Applied after the merge so a caller cannot reintroduce a
-                # terminal execution_status together with the new status.
+                # terminal execution_status together with the new status. If a
+                # worker already owns this execution, restore its complete
+                # marker instead of making the task claimable again.
                 current_meta = dict(task.meta or {})
-                current_meta["execution_status"] = None
+                if was_running:
+                    current_meta.update(running_marker)
+                else:
+                    current_meta["execution_status"] = None
                 task.meta = current_meta
             task.updated_at = utcnow()
             session.flush()
@@ -427,8 +476,10 @@ class TaskRepository:
         """Atomically claim the next eligible in_progress task.
 
         Eligible tasks have status="in_progress" and their metadata does not
-        indicate an active execution_status of "running" or "completed".
-        A candidate is skipped while another task in the same workspace is
+        indicate an active execution_status of "running" or a terminal
+        "completed" marker. A running task remains owned by its current worker
+        and is never claimed again. A candidate is skipped while another task
+        in the same workspace is
         "ready_to_commit" or actively running. Tasks without a workspace form
         their own group: they resolve to the same default/project directory at
         execution time, so they are serialized as one workspace.
@@ -454,6 +505,8 @@ class TaskRepository:
                 candidates = list(session.scalars(statement))
                 for candidate in candidates:
                     meta = dict(candidate.meta or {})
+                    # Never re-claim an execution that already has an owner.
+                    # The same predicate also skips terminal completed tasks.
                     if meta.get("execution_status") in ("running", "completed"):
                         continue
 

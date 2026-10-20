@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_manager.api import create_app
+from agent_manager.storage import Database, TaskRepository
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -253,6 +254,49 @@ def test_patch_task_merges_metadata_and_clears_stale_execution_status(
 
         fetched = client.get(f"/tasks/{task_id}").json()
         assert fetched["metadata"] == patched["metadata"]
+
+
+def test_patch_running_task_to_in_progress_returns_409(
+    migrated_db: pathlib.Path,
+) -> None:
+    with TestClient(_app(migrated_db)) as client:
+        created = client.post(
+            "/tasks",
+            json={"title": "Running task", "status": "in_progress"},
+        ).json()
+        task_id = created["id"]
+
+        database = Database.from_path(migrated_db)
+        try:
+            claimed = TaskRepository(database).claim_in_progress(
+                worker_id="worker-live"
+            )
+            assert claimed is not None
+            assert claimed.id == task_id
+        finally:
+            database.dispose()
+
+        resumed = client.patch(
+            f"/tasks/{task_id}",
+            json={
+                "status": "in_progress",
+                "metadata": {
+                    "additional_instructions": [
+                        {"text": "Do not run twice.", "timestamp": "2025-01-02T03:04:05Z"}
+                    ]
+                },
+            },
+        )
+        assert resumed.status_code == 409
+        detail = resumed.json()["detail"]
+        assert "already executing" in detail
+        assert "worker-live" in detail
+
+        fetched = client.get(f"/tasks/{task_id}").json()
+        assert fetched["status"] == "in_progress"
+        assert fetched["metadata"]["execution_status"] == "running"
+        assert fetched["metadata"]["execution_worker_id"] == "worker-live"
+        assert "additional_instructions" not in fetched["metadata"]
 
 
 def test_patch_task_returns_404_for_unknown_task(

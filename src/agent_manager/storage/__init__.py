@@ -6,6 +6,7 @@ Public interfaces:
     agent_manager.storage.Task                        -- SQLAlchemy ORM row for the ``tasks`` table.
     agent_manager.storage.TaskImportResult            -- created/skipped task import counts.
     agent_manager.storage.DuplicateTaskIdError        -- duplicate caller-supplied task id.
+    agent_manager.storage.TaskAlreadyRunningError     -- attempt to restart an actively running task.
     agent_manager.storage.ConversationRepository      -- create/get/list conversations and append/list messages.
     agent_manager.storage.Conversation                -- SQLAlchemy ORM row for the ``conversations`` table.
     agent_manager.storage.Message                     -- SQLAlchemy ORM row for the ``messages`` table.
@@ -106,6 +107,7 @@ from .repository import (
     DuplicateTaskIdError,
     MessageAppendResult,
     MessageConflictError,
+    TaskAlreadyRunningError,
     TaskImportResult,
     TaskNotFoundError,
     TaskRepository,
@@ -173,6 +175,7 @@ __all__ = [
     "RecommendationStateError",
     "RuntimeReservation",
     "Task",
+    "TaskAlreadyRunningError",
     "TaskImportResult",
     "TaskNotFoundError",
     "TaskRepository",

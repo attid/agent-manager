@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from agent_manager.storage import (
     Database,
     DuplicateTaskIdError,
+    TaskAlreadyRunningError,
     TaskImportResult,
     TaskNotFoundError,
     TaskRepository,
@@ -263,6 +264,84 @@ def test_update_merges_metadata_and_resumes_completed_task(
         assert claimed is not None
         assert claimed.id == created.id
         assert claimed.meta["execution_status"] == "running"
+    finally:
+        database.dispose()
+
+
+def test_update_in_progress_preserves_active_running_claim(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        created = repository.create(
+            title="Already running",
+            status="in_progress",
+            workspace="running-workspace",
+        )
+        claimed = repository.claim_in_progress(worker_id="worker-active")
+        assert claimed is not None
+        assert claimed.id == created.id
+        claimed_at = claimed.meta["execution_claimed_at"]
+
+        # A stale card or retried button may patch in_progress again while the
+        # first worker still owns the execution. The active marker must survive,
+        # even when the payload tries to reintroduce a terminal status.
+        updated = repository.update(
+            created.id,
+            status="in_progress",
+            metadata={
+                "execution_status": "completed",
+                "execution_worker_id": "stale-worker",
+                "additional_instructions": [
+                    {"text": "New input exactly once.", "timestamp": "2025-01-02T03:04:05Z"}
+                ],
+            },
+        )
+        assert updated.status == "in_progress"
+        assert updated.meta["execution_status"] == "running"
+        assert updated.meta["execution_worker_id"] == "worker-active"
+        assert updated.meta["execution_claimed_at"] == claimed_at
+        assert updated.meta["additional_instructions"][0]["text"] == (
+            "New input exactly once."
+        )
+
+        # The task cannot be claimed a second time while the first claim lives.
+        assert repository.claim_in_progress(worker_id="worker-raced") is None
+        reloaded = repository.get(created.id)
+        assert reloaded is not None
+        assert reloaded.meta["execution_status"] == "running"
+        assert reloaded.meta["execution_worker_id"] == "worker-active"
+    finally:
+        database.dispose()
+
+
+def test_update_in_progress_can_reject_active_running_claim(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        created = repository.create(title="Reject running", status="in_progress")
+        claimed = repository.claim_in_progress(worker_id="worker-active")
+        assert claimed is not None
+
+        with pytest.raises(TaskAlreadyRunningError) as exc:
+            repository.update(
+                created.id,
+                status="in_progress",
+                metadata={"execution_status": None},
+                reject_if_running=True,
+            )
+        assert exc.value.task_id == created.id
+        assert exc.value.worker_id == "worker-active"
+        assert "already executing" in str(exc.value)
+
+        # Rejected updates leave both the claim marker and payload untouched.
+        reloaded = repository.get(created.id)
+        assert reloaded is not None
+        assert reloaded.meta == claimed.meta
+        assert repository.claim_in_progress(worker_id="worker-raced") is None
     finally:
         database.dispose()
 

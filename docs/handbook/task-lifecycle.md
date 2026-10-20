@@ -63,7 +63,11 @@ secretary must use `status="in_progress"` (or `update_task(..., status=
   `metadata` is shallow-merged into the stored object, preserving keys that
   are not supplied. Setting `status="in_progress"` clears a previous
   `metadata.execution_status` (for example `completed`) so the worker claims
-  the task again and a resumed session starts from the new instructions.
+  the task again and a resumed session starts from the new instructions. If the
+  task already has an active `execution_status == "running"` claim, that marker
+  is preserved and `PATCH` returns `409 Conflict`
+  (`task is already executing on worker <worker_id>: <task_id>`) instead of
+  making the task claimable a second time.
 - `POST /tasks/{task_id}/attachments` accepts multipart/form-data upload (`file: UploadFile`), writes the file to the task artifact store, registers it in `task.metadata["attachments"]`, and returns `TaskArtifactRead` with `201 Created`.
 - `POST /imports/tasks` imports historical tasks by stable id. Replaying the
   same ids never duplicates or overwrites, and validation rejects the whole
@@ -76,8 +80,10 @@ secretary must use `status="in_progress"` (or `update_task(..., status=
 
 `TaskRepository.claim_in_progress` (`src/agent_manager/storage/repository.py`)
 skips a candidate when another task in the same `workspace` is
-`ready_to_commit` or already `in_progress`. This serializes work per
-workspace while allowing different workspaces to run in parallel.
+`ready_to_commit` or already `in_progress`. A candidate whose metadata already
+contains `execution_status == "running"` is never claimed again: it remains
+owned by the worker that set the marker. This serializes work per workspace
+while allowing different workspaces to run in parallel.
 
 ## Execution
 
@@ -121,9 +127,12 @@ pending standalone review executor.
 
 It does not itself run the model; it feeds the next worker claim, which
 resumes the prior native session when the executor and workspace are
-unchanged. The `PATCH` to `in_progress` clears `metadata.execution_status`,
-so a terminal `completed` value cannot keep the task out of the claim
-predicate. The worker renders `task.md` from the original description, every
+unchanged. The `PATCH` to `in_progress` clears a terminal `metadata.execution_status`
+(for example `completed`), so it cannot keep the task out of the claim
+predicate. An active `running` claim is different: the repository preserves
+the marker and the API rejects the request with `409 Conflict`, because the
+current worker still owns the execution and must not be raced by a second
+claim. The worker renders `task.md` from the original description, every
 `additional_instructions` entry with its timestamp, and the current
 `review_feedback`.
 
