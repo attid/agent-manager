@@ -89,6 +89,7 @@ def git_commit_push_handler(
     meta = dict(task.meta or {})
     custom_message = str(context.input.get("message") or "").strip() or None
     push = bool(context.input.get("push", True))
+    require_ci = bool(context.input.get("require_ci", False))
     engine = GitEngine(default_workspace=workspace)
     common: dict[str, Any] = {
         "workspace": workspace,
@@ -99,7 +100,7 @@ def git_commit_push_handler(
         "custom_message": custom_message,
     }
     if push:
-        result = engine.commit_and_push(**common)
+        result = engine.commit_and_push(**common, require_ci=require_ci)
     else:
         result = engine.commit_local(**common)
     if not result.success:
@@ -113,6 +114,7 @@ def git_commit_push_handler(
         "commit_hash": result.commit_hash,
         "branch": result.branch,
         "ci_status": result.ci_status,
+        "ci_required": require_ci,
         "pushed": push,
         "task_status": "done",
     }

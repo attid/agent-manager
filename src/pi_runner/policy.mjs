@@ -827,10 +827,11 @@ export default function policy(pi) {
       task_id: Type.String({ description: "Task ID" }),
       push: Type.Optional(Type.Boolean({ description: "Push to remote after local commit (default: true)" })),
       message: Type.Optional(Type.String({ description: "Custom commit message" })),
+      require_ci: Type.Optional(Type.Boolean({ description: "Require an active GitHub Actions workflow; fail when none is found (default: false)" })),
       idempotency_key: Type.Optional(Type.String({ description: "Optional stable key; an exact retry reuses the same operation" }))
     }),
     async execute(toolCallId, params) {
-      const payload = { push: params.push !== false, message: (params.message || "").trim() };
+      const payload = { push: params.push !== false, message: (params.message || "").trim(), require_ci: params.require_ci === true };
       return toolResult(await submitOperation("git.commit_push", params.task_id.trim(), payload, params.idempotency_key, toolCallId));
     }
   });

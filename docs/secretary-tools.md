@@ -131,8 +131,8 @@
 ### `trigger_review(task_id, instructions)`
 - **Назначение**: Принудительный перезапуск раунда Code Review независимым ревьюером (`system-code-reviewer`).
 
-### `trigger_commit_push(task_id, push, message)`
-- **Назначение**: Безопасный коммит измененных файлов через `GitEngine` с проверкой GitHub Actions CI (`gh run watch`).
+### `trigger_commit_push(task_id, push, message, require_ci)`
+- **Назначение**: Безопасный коммит измененных файлов через `GitEngine` с проверкой GitHub Actions CI (`gh run watch`). Если workflows для ветки не настроены, пуш считается успешным, а в результате сохраняется информационный `ci_status: not_found`. Строгий режим включается необязательным флагом `require_ci: true`.
 
 ### `trigger_rollback(task_id)`
 - **Назначение**: Безопасный откат незакоммиченных изменений (`git restore --staged --worktree`) и удаление созданных файлов.

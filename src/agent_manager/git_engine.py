@@ -33,10 +33,22 @@ class GitEngineResult:
 
 
 class GitEngine:
-    """Executes safe git operations within a workspace directory."""
+    """Executes safe git operations within a workspace directory.
 
-    def __init__(self, default_workspace: Path | str | None = None) -> None:
+    ``require_ci`` is the default strictness for CI monitoring. A per-call
+    ``require_ci=True`` enables strict mode for that call; the default keeps
+    successful pushes to repositories without GitHub Actions workflows
+    successful.
+    """
+
+    def __init__(
+        self,
+        default_workspace: Path | str | None = None,
+        *,
+        require_ci: bool = False,
+    ) -> None:
         self.default_workspace = Path(default_workspace) if default_workspace else None
+        self.require_ci = require_ci
 
     def _resolve_workspace(self, workspace: Path | str | None) -> Path:
         ws = Path(workspace) if workspace else self.default_workspace
@@ -199,8 +211,14 @@ class GitEngine:
         remote: str = "origin",
         watch_ci: bool = True,
         ci_timeout_sec: int = 600,
+        require_ci: bool = False,
     ) -> GitEngineResult:
-        """Commit changes locally, push to remote, and optionally monitor GitHub Actions."""
+        """Commit changes locally, push to remote, and optionally monitor GitHub Actions.
+
+        A missing CI configuration is not a push failure unless ``require_ci``
+        (or the engine-level setting) is enabled. The result then carries
+        ``ci_status="not_found"`` as an informational marker.
+        """
         ws = self._resolve_workspace(workspace)
 
         # 1. Local commit
@@ -240,13 +258,43 @@ class GitEngine:
 
         # 3. GitHub Actions CI Monitoring
         ci_outcome = self._monitor_github_actions(ws, branch=branch, timeout_sec=ci_timeout_sec)
+        ci_status = ci_outcome.get("status")
+        strict_ci = self.require_ci or require_ci
+
+        if ci_status == "not_found":
+            if strict_ci:
+                return GitEngineResult(
+                    success=False,
+                    action="commit_push",
+                    message=(
+                        "Изменения отправлены в GitHub, но CI обязателен: "
+                        "активных Actions workflows для ветки не обнаружено."
+                    ),
+                    commit_hash=commit_res.commit_hash,
+                    branch=branch,
+                    ci_status=ci_status,
+                    ci_logs=ci_outcome.get("logs"),
+                )
+            return GitEngineResult(
+                success=True,
+                action="commit_push",
+                message=(
+                    f"Изменения успешно закоммичены и отправлены в {remote}/{branch} "
+                    "(GitHub Actions workflows не настроены; CI не требуется)."
+                ),
+                commit_hash=commit_res.commit_hash,
+                branch=branch,
+                ci_status=ci_status,
+                ci_logs=ci_outcome.get("logs"),
+            )
+
         return GitEngineResult(
-            success=(ci_outcome.get("status") == "success"),
+            success=(ci_status == "success"),
             action="commit_push",
             message=ci_outcome.get("message", "CI завершён."),
             commit_hash=commit_res.commit_hash,
             branch=branch,
-            ci_status=ci_outcome.get("status"),
+            ci_status=ci_status,
             ci_logs=ci_outcome.get("logs"),
         )
 

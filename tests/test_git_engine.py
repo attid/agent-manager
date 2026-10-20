@@ -9,6 +9,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent_manager.git_engine import GitEngine, GitEngineResult
+from agent_manager.operation_handlers import git_commit_push_handler
+from agent_manager.operation_worker import (
+    OPERATION_KIND_GIT_COMMIT_PUSH,
+    OperationContext,
+    OperationInstanceContext,
+)
+from agent_manager.storage import Database, TaskRepository
 
 
 @pytest.fixture
@@ -115,6 +122,91 @@ def test_commit_and_push_with_ci_success(temp_git_repo: Path) -> None:
     assert "GitHub Actions успешно пройдены" in res.message
 
 
+def test_commit_and_push_without_workflows_succeeds(temp_git_repo: Path) -> None:
+    """A successful push to a repository without Actions workflows is not a failure."""
+    engine = GitEngine(default_workspace=temp_git_repo)
+    (temp_git_repo / "README.md").write_text("# No CI\n")
+
+    def fake_subprocess_run(args, **kwargs):
+        if "push" in args:
+            return MagicMock(returncode=0, stdout="pushed", stderr="")
+        elif "list" in args and "gh" in args:
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return subprocess.run(args, **kwargs)
+
+    with patch.object(engine, "_run_cmd", side_effect=fake_subprocess_run):
+        res = engine.commit_and_push(
+            workspace=temp_git_repo,
+            task_id="task-101",
+            title="Push without CI",
+            changed_files=["README.md"],
+            watch_ci=True,
+        )
+
+    assert res.success is True
+    assert res.ci_status == "not_found"
+    assert "CI не требуется" in res.message
+    assert res.commit_hash is not None
+
+
+def test_commit_and_push_without_workflows_can_require_ci(temp_git_repo: Path) -> None:
+    """The opt-in strict mode still reports missing CI as a failure."""
+    engine = GitEngine(default_workspace=temp_git_repo)
+    (temp_git_repo / "README.md").write_text("# Strict CI\n")
+
+    def fake_subprocess_run(args, **kwargs):
+        if "push" in args:
+            return MagicMock(returncode=0, stdout="pushed", stderr="")
+        elif "list" in args and "gh" in args:
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return subprocess.run(args, **kwargs)
+
+    with patch.object(engine, "_run_cmd", side_effect=fake_subprocess_run):
+        res = engine.commit_and_push(
+            workspace=temp_git_repo,
+            task_id="task-102",
+            title="Push with required CI",
+            changed_files=["README.md"],
+            watch_ci=True,
+            require_ci=True,
+        )
+
+    assert res.success is False
+    assert res.ci_status == "not_found"
+    assert "CI обязателен" in res.message
+
+
+def test_engine_level_require_ci_setting_is_applied(temp_git_repo: Path) -> None:
+    """The engine-level setting makes CI strict without a per-call flag."""
+    engine = GitEngine(default_workspace=temp_git_repo, require_ci=True)
+    (temp_git_repo / "README.md").write_text("# Engine strict CI\n")
+
+    def fake_subprocess_run(args, **kwargs):
+        if "push" in args:
+            return MagicMock(returncode=0, stdout="pushed", stderr="")
+        elif "list" in args and "gh" in args:
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        return subprocess.run(args, **kwargs)
+
+    with patch.object(engine, "_run_cmd", side_effect=fake_subprocess_run):
+        res = engine.commit_and_push(
+            workspace=temp_git_repo,
+            task_id="task-103",
+            title="Engine-level required CI",
+            changed_files=["README.md"],
+            watch_ci=True,
+        )
+
+    assert res.success is False
+    assert res.ci_status == "not_found"
+
+
 def test_commit_and_push_ci_failure(temp_git_repo: Path) -> None:
     engine = GitEngine(default_workspace=temp_git_repo)
     (temp_git_repo / "README.md").write_text("# Broken\n")
@@ -144,3 +236,53 @@ def test_commit_and_push_ci_failure(temp_git_repo: Path) -> None:
     assert res.success is False
     assert res.ci_status == "failure"
     assert "tests failed at line 42" in (res.ci_logs or "")
+
+
+def test_commit_push_handler_marks_task_done_without_workflows(
+    migrated_db: Path,
+    temp_git_repo: Path,
+) -> None:
+    """Missing CI must not leave the task stuck in ``ready_to_commit``."""
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        task = repository.create(
+            title="Push without CI",
+            status="ready_to_commit",
+            workspace=str(temp_git_repo),
+            metadata={"changed_files": ["README.md"]},
+        )
+        (temp_git_repo / "README.md").write_text("# Handler no CI\n")
+        instance = OperationInstanceContext(
+            database=database,
+            artifact_root=temp_git_repo / "operations",
+            default_workspace=temp_git_repo,
+        )
+        context = OperationContext(
+            operation_id="op-no-ci",
+            kind=OPERATION_KIND_GIT_COMMIT_PUSH,
+            target_id=task.id,
+            input={"push": True},
+            attempt_count=1,
+            metadata={},
+            instance=instance,
+        )
+
+        def fake_subprocess_run(args, **kwargs):
+            if "push" in args:
+                return MagicMock(returncode=0, stdout="pushed", stderr="")
+            elif "list" in args and "gh" in args:
+                return MagicMock(returncode=0, stdout="[]", stderr="")
+            kwargs.setdefault("capture_output", True)
+            kwargs.setdefault("text", True)
+            return subprocess.run(args, **kwargs)
+
+        with patch.object(GitEngine, "_run_cmd", side_effect=fake_subprocess_run):
+            result = git_commit_push_handler(context)
+
+        assert result["task_status"] == "done"
+        assert result["ci_status"] == "not_found"
+        assert result["pushed"] is True
+        assert repository.get(task.id).status == "done"
+    finally:
+        database.dispose()

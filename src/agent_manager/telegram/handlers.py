@@ -527,9 +527,15 @@ async def on_commit_push(
     )
 
     if res.success:
+        if res.ci_status == "success":
+            outcome = "успешно закоммичена, запушена и прошла CI!"
+        elif res.ci_status == "not_found":
+            outcome = "успешно закоммичена и запушена (CI не настроен)."
+        else:
+            outcome = "успешно закоммичена и запушена."
         await client.patch_task(task_id, status="done")
         await status_msg.edit_text(
-            f"🎉 <b>Задача #{html.escape(task_display_number(task))} успешно закоммичена, запушена и прошла CI!</b>\n\n"
+            f"🎉 <b>Задача #{html.escape(task_display_number(task))} {outcome}</b>\n\n"
             f"Ветка: <code>{html.escape(res.branch or 'HEAD')}</code>\n"
             f"Коммит: <code>{html.escape(res.commit_hash or '—')}</code>\n\n"
             f"<i>{html.escape(res.message)}</i>",

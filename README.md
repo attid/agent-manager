@@ -4,7 +4,7 @@ Task-oriented agent orchestration system and engineering platform. This reposito
 - **Durable Storage**: File-backed SQLite with WAL mode, Alembic migrations, task repository, conversation/message storage, and immutable versioned agent-profile repository.
 - **Task Worker & Sandbox**: Background `TaskExecutionWorker` with strict workspace isolation running tasks inside Bubblewrap sandbox via `pi-runner`.
 - **Automated Code Review**: Multi-round independent reviewer (`system-code-reviewer`) with hot-reloadable prompts and metrics persisted in task artifacts.
-- **Git Engine**: Atomic explicit file staging (no `git add .`), rollback capability, and commit & push with GitHub Actions CI monitoring (`gh run watch`).
+- **Git Engine**: Atomic explicit file staging (no `git add .`), rollback capability, and commit & push with GitHub Actions CI monitoring (`gh run watch`). A repository without workflows is treated as successfully pushed; strict CI enforcement is opt-in via `require_ci`.
 - **Telegram Secretary & Controller**: Interactive Telegram bot (aiogram 3) supporting text, voice transcription (Deepgram ASR), and inline confirmation cards.
 - **OpenViking Integration**: Long-term memory search and reading for agents.
 - **Knowledge Base**: Versioned Git-backed markdown repository for project summaries, component rules, and agent profiles.
