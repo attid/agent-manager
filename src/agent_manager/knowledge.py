@@ -32,6 +32,14 @@ class KnowledgePathError(ValueError):
     """A requested knowledge target would escape its instance-owned subtree."""
 
 
+class KnowledgeProtectedPathError(KnowledgePathError):
+    """A knowledge path belongs to a subtree with an API-managed lifecycle."""
+
+
+class KnowledgeDocumentNotFoundError(FileNotFoundError):
+    """A requested knowledge document does not exist."""
+
+
 def contained_target_path(
     base_dir: str | os.PathLike[str],
     target_id: str,
@@ -388,6 +396,7 @@ class KnowledgeBase:
         sec_tools = [
             "read", "attach_document", "create_agent", "update_agent", "archive_agent", "list_agents", "get_agent",
             "save_project_summary", "read_knowledge", "list_knowledge", "write_knowledge",
+            "delete_knowledge",
             "update_component_rules", "openviking_search", "openviking_read",
             "resolve_workspace", "list_tasks", "get_task", "create_task", "update_task", "get_task_logs", "resume_task_session",
             "list_skills", "install_skill", "create_skill",
@@ -432,6 +441,7 @@ class KnowledgeBase:
             "- `list_knowledge(category)`: просмотр структуры базы знаний.\n"
             "- `read_knowledge(query)`: чтение документов, описаний проектов и правил компонентов.\n"
             "- `write_knowledge(category, name, content)`: сохранение или обновление документов БЗ.\n"
+            "- `delete_knowledge(path)`: удаление одного явно указанного Markdown-файла БЗ после явного подтверждения пользователя.\n"
             "- `save_project_summary(name, summary)`: сохранение/обновление саммари проекта.\n"
             "- `update_component_rules(component, rules)`: сохранение правил архитектурных компонентов.\n"
             "- `attach_document(target)`: отправка файла пользователю в Telegram.\n"
@@ -999,4 +1009,86 @@ class KnowledgeBase:
         candidate.write_text(content.strip() + "\n", encoding="utf-8")
         msg = commit_message or f"Update knowledge document: {clean_path}"
         self.git_commit(msg)
+        return candidate
+
+    def delete_document(
+        self, relative_path: str, commit_message: str | None = None
+    ) -> Path:
+        """Delete one explicitly named Markdown document from the knowledge base.
+
+        Only a single existing ``.md`` file inside :attr:`root_dir` is
+        accepted. Absolute paths, empty or ``.``/``..`` segments, wildcard
+        characters, directories and symlinks are rejected, as is any path
+        under ``agents/`` because profiles are managed by the profile API.
+        The exact file is unlinked; no wildcard or recursive deletion exists.
+        When the knowledge tree is a git repository the removal is committed
+        with the same helper used by document writes.
+        """
+        raw_path = relative_path.strip() if isinstance(relative_path, str) else ""
+        if not raw_path:
+            raise KnowledgePathError("Knowledge document path is required")
+        if "\x00" in raw_path or "\\" in raw_path:
+            raise KnowledgePathError(
+                f"Invalid knowledge document path: {relative_path!r}"
+            )
+        if raw_path.startswith("/") or Path(raw_path).is_absolute():
+            raise KnowledgePathError(
+                f"Knowledge document path must be relative: {relative_path!r}"
+            )
+
+        parts = raw_path.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            raise KnowledgePathError(
+                f"Knowledge document path must name one exact file: {relative_path!r}"
+            )
+        if any(any(char in part for char in "*?[]") for part in parts):
+            raise KnowledgePathError(
+                "Wildcard knowledge deletion is not supported; name one exact file"
+            )
+        if not parts[-1].endswith(".md") or parts[-1] == ".md":
+            raise KnowledgePathError(
+                "Only an explicitly named Markdown document can be deleted"
+            )
+        if parts[0] == "agents":
+            raise KnowledgeProtectedPathError(
+                "Agent profile files are managed by the profile API and cannot "
+                "be deleted as knowledge documents"
+            )
+
+        # Reject a symlink at any component so a path cannot be redirected
+        # into another tree. ``resolve`` below additionally catches a symlink
+        # race and verifies the real target stays inside the knowledge root.
+        unresolved = self.root_dir
+        for part in parts:
+            unresolved = unresolved / part
+            if unresolved.is_symlink():
+                raise KnowledgePathError(
+                    f"Knowledge document path must not use symlinks: {relative_path!r}"
+                )
+
+        candidate = unresolved.resolve()
+        if not candidate.is_relative_to(self.root_dir):
+            raise KnowledgePathError(
+                f"Knowledge document path escapes the knowledge root: {relative_path!r}"
+            )
+        if candidate.is_relative_to(self.agents_dir.resolve()):
+            raise KnowledgeProtectedPathError(
+                "Agent profile files are managed by the profile API and cannot "
+                "be deleted as knowledge documents"
+            )
+        if not candidate.exists():
+            raise KnowledgeDocumentNotFoundError(
+                f"Knowledge document not found: {relative_path}"
+            )
+        if not candidate.is_file():
+            raise KnowledgePathError(
+                "Only an explicitly named Markdown file can be deleted, not a "
+                "directory or special file"
+            )
+
+        candidate.unlink()
+        clean_path = "/".join(parts)
+        self.git_commit(
+            commit_message or f"Delete knowledge document: {clean_path}"
+        )
         return candidate

@@ -651,6 +651,11 @@ class KnowledgeDocumentWrite(BaseModel):
     commit_message: str | None = None
 
 
+class KnowledgeDocumentDeleted(BaseModel):
+    path: str
+    deleted: bool = True
+
+
 class AskRequest(BaseModel):
     message: str
     agent_id: str = "system-secretary"

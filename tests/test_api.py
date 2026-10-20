@@ -306,6 +306,48 @@ def test_knowledge_api_endpoints(migrated_db: pathlib.Path, tmp_path: pathlib.Pa
         missing_res = client.get("/knowledge/absent/file.md")
         assert missing_res.status_code == 404
 
+        # The exact Cyrillic file can be deleted without touching a similar
+        # Latin path.
+        client.put(
+            "/knowledge/инструкции/секретарь.md",
+            json={"content": "# Секретарь"},
+        )
+        client.put(
+            "/knowledge/instructions/secretary.md",
+            json={"content": "# Secretary"},
+        )
+        delete_res = client.delete("/knowledge/инструкции/секретарь.md")
+        assert delete_res.status_code == 200
+        assert delete_res.json() == {
+            "path": "инструкции/секретарь.md",
+            "deleted": True,
+        }
+        assert client.get("/knowledge/инструкции/секретарь.md").status_code == 404
+        sibling = client.get("/knowledge/instructions/secretary.md")
+        assert sibling.status_code == 200
+        assert sibling.json()["content"] == "# Secretary\n"
+
+        # Missing file is a 404, never a silent success.
+        missing_delete = client.delete("/knowledge/инструкции/секретарь.md")
+        assert missing_delete.status_code == 404
+
+        # Profile files are managed by the profile API, not knowledge deletion.
+        profile_file = kb.agents_dir / "custom-worker.md"
+        profile_file.write_text("# Custom worker\n", encoding="utf-8")
+        protected = client.delete("/knowledge/agents/custom-worker.md")
+        assert protected.status_code == 400
+        assert profile_file.is_file()
+
+        # Wildcards, traversal and directories are rejected before any unlink.
+        for path in (
+            "/knowledge/docs/*.md",
+            "/knowledge/docs",
+            "/knowledge/projects/%2E%2E/%2E%2E/outside.md",
+        ):
+            rejected = client.delete(path)
+            assert rejected.status_code == 400, (path, rejected.text)
+        assert not (tmp_path / "outside.md").exists()
+
 
 def test_task_artifacts_endpoints(migrated_db: pathlib.Path, tmp_path: pathlib.Path) -> None:
     artifact_root = tmp_path / "artifacts"

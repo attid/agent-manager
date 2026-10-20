@@ -10,7 +10,9 @@ from aiogram.types import FSInputFile
 from agent_manager.knowledge import (
     DEFAULT_KNOWLEDGE_DIR,
     KnowledgeBase,
+    KnowledgeDocumentNotFoundError,
     KnowledgePathError,
+    KnowledgeProtectedPathError,
     contained_target_path,
     format_agent_profile_markdown,
 )
@@ -79,6 +81,7 @@ def test_knowledge_base_sync_agents(tmp_path: Path, migrated_db: Path) -> None:
     assert exported_file.is_file()
     content = exported_file.read_text(encoding="utf-8")
     assert "create_agent" in content
+    assert "delete_knowledge" in content
     assert 'agent_id: "system-secretary"' in content
 
     dev_file = tmp_path / "knowledge/agents/agent-manager-developer.md"
@@ -365,3 +368,187 @@ def test_contained_target_path_rejects_escapes_and_allows_nested_names(
     with pytest.raises(KnowledgePathError):
         kb.create_or_update_project_summary("../escape", "must not land")
     assert not (tmp_path / "escape").exists()
+
+
+def test_delete_document_removes_only_one_exact_markdown_file(
+    tmp_path: Path,
+) -> None:
+    """The Cyrillic filename is deleted without touching its Latin sibling."""
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+
+    cyrillic = kb.root_dir / "инструкции/секретарь.md"
+    latin = kb.root_dir / "instructions/secretary.md"
+    cyrillic.parent.mkdir(parents=True)
+    latin.parent.mkdir(parents=True)
+    cyrillic.write_text("# Секретарь\n", encoding="utf-8")
+    latin.write_text("# Secretary\n", encoding="utf-8")
+
+    deleted = kb.delete_document("инструкции/секретарь.md")
+
+    assert deleted == cyrillic.resolve()
+    assert not cyrillic.exists()
+    assert latin.is_file()
+    assert latin.read_text(encoding="utf-8") == "# Secretary\n"
+
+    with pytest.raises(KnowledgeDocumentNotFoundError):
+        kb.delete_document("инструкции/секретарь.md")
+
+
+def test_delete_document_rejects_agents_profiles(tmp_path: Path) -> None:
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+    profile = kb.agents_dir / "custom-worker.md"
+    profile.write_text("# Profile\n", encoding="utf-8")
+
+    with pytest.raises(KnowledgeProtectedPathError):
+        kb.delete_document("agents/custom-worker.md")
+
+    assert profile.is_file()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "instructions",
+        "instructions/",
+        "instructions/secretary.txt",
+        "instructions/../secretary.md",
+        "./instructions/secretary.md",
+        "instructions//secretary.md",
+        "instructions/*.md",
+        "instructions/secretary?.md",
+        "instructions/[ab].md",
+        "/instructions/secretary.md",
+        r"instructions\secretary.md",
+    ],
+)
+def test_delete_document_rejects_non_explicit_paths(
+    tmp_path: Path, path: str
+) -> None:
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+    target = kb.root_dir / "instructions/secretary.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Secretary\n", encoding="utf-8")
+
+    with pytest.raises(KnowledgePathError):
+        kb.delete_document(path)
+
+    assert target.is_file()
+
+
+def test_delete_document_rejects_symlink_escape(tmp_path: Path) -> None:
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_file = outside_dir / "secret.md"
+    outside_file.write_text("# Outside\n", encoding="utf-8")
+
+    file_link = kb.root_dir / "linked.md"
+    file_link.symlink_to(outside_file)
+    with pytest.raises(KnowledgePathError):
+        kb.delete_document("linked.md")
+    assert outside_file.is_file()
+    assert file_link.is_symlink()
+
+    directory_link = kb.root_dir / "linked-dir"
+    directory_link.symlink_to(outside_dir, target_is_directory=True)
+    with pytest.raises(KnowledgePathError):
+        kb.delete_document("linked-dir/secret.md")
+    assert outside_file.is_file()
+
+
+def test_delete_document_does_not_delete_directories_or_globs(
+    tmp_path: Path,
+) -> None:
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+    docs = kb.root_dir / "docs"
+    docs.mkdir()
+    first = docs / "one.md"
+    second = docs / "two.md"
+    first.write_text("# One\n", encoding="utf-8")
+    second.write_text("# Two\n", encoding="utf-8")
+    nested_dir = docs / "folder.md"
+    nested_dir.mkdir()
+
+    for path in ("docs", "docs/", "docs/*", "docs/*.md", "docs/folder.md"):
+        with pytest.raises(KnowledgePathError):
+            kb.delete_document(path)
+
+    assert docs.is_dir()
+    assert nested_dir.is_dir()
+    assert first.is_file()
+    assert second.is_file()
+
+
+def test_delete_document_commits_removal_to_knowledge_repository(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
+    kb.initialize()
+    cyrillic = kb.root_dir / "инструкции/секретарь.md"
+    latin = kb.root_dir / "instructions/secretary.md"
+    cyrillic.parent.mkdir(parents=True)
+    latin.parent.mkdir(parents=True)
+    cyrillic.write_text("# Секретарь\n", encoding="utf-8")
+    latin.write_text("# Secretary\n", encoding="utf-8")
+
+    subprocess.run(
+        ["git", "init"], cwd=str(kb.root_dir), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Knowledge Test"],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "knowledge@test.local"],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "add", "-A"], cwd=str(kb.root_dir), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "Initial knowledge"],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+    )
+
+    kb.delete_document("инструкции/секретарь.md")
+
+    subject = subprocess.run(
+        ["git", "log", "-1", "--pretty=%s"],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert subject == "Delete knowledge document: инструкции/секретарь.md"
+    changed = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "show", "--name-status", "--format="],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "D\tинструкции/секретарь.md" in changed
+    assert "instructions/secretary.md" not in changed
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(kb.root_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == ""
+    assert latin.is_file()

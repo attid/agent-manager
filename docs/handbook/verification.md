@@ -20,6 +20,7 @@ PYTHONPATH=src .venv/bin/python -m pytest \
   tests/test_review_operation.py \
   tests/test_analysis.py \
   tests/test_session_trace.py \
+  tests/test_knowledge.py \
   tests/test_api.py \
   tests/test_api_auth.py \
   tests/test_execution_contract.py \
@@ -47,6 +48,8 @@ Interpretation:
 - `test_session_trace.py` — target-task session/event trace, missing artifacts,
   path isolation, secret redaction and content-argument omission.
 - `test_api.py` / `test_api_auth.py` — REST contract and stable Bearer auth.
+- `test_knowledge.py` — knowledge writes, containment and exact-file deletion
+  (traversal, symlinks, `agents/`, wildcards and git commits).
 - `test_execution_contract.py` — workspace/execution context.
 - `test_persistent_conversation.py` — session binding, deferred drains,
   operation submission from session actions and discovery injection.

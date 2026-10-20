@@ -99,6 +99,7 @@ from .schemas import (
     AskResponse,
     ConversationCreate,
     ConversationRead,
+    KnowledgeDocumentDeleted,
     KnowledgeDocumentRead,
     KnowledgeDocumentWrite,
     KnowledgeListResponse,
@@ -131,7 +132,11 @@ from .schemas import (
     task_to_read,
     turn_to_read,
 )
-from ..knowledge import KnowledgeBase
+from ..knowledge import (
+    KnowledgeBase,
+    KnowledgeDocumentNotFoundError,
+    KnowledgePathError,
+)
 
 
 ENV_VAR = "AGENT_MANAGER_DB_URL"
@@ -888,6 +893,25 @@ def create_app(
             ) from err
         content = kb.read_document(path)
         return KnowledgeDocumentRead(path=path, content=content or payload.content)
+
+    @app.delete("/knowledge/{path:path}", response_model=KnowledgeDocumentDeleted)
+    def delete_knowledge(
+        path: str,
+        kb: KnowledgeBase = Depends(get_knowledge_base),
+    ) -> KnowledgeDocumentDeleted:
+        try:
+            kb.delete_document(path)
+        except KnowledgeDocumentNotFoundError as err:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(err),
+            ) from err
+        except KnowledgePathError as err:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(err),
+            ) from err
+        return KnowledgeDocumentDeleted(path=path, deleted=True)
 
     @app.post("/ask", response_model=AskResponse)
     @app.post("/conversations/ask", response_model=AskResponse)

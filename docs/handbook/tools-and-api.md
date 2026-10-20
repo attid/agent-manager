@@ -43,6 +43,10 @@ Current surface (`src/agent_manager/api/app.py`):
 | `GET` | `/agents/{id}/revisions/{revision}` | `200`, `404` | One snapshot. |
 | `PATCH` | `/agents/{id}` | `200`, `404`, `409` | Append revision after optimistic check. |
 | `DELETE` | `/agents/{id}` | `200`, `400`, `404` | Archive; core system agents rejected. |
+| `GET` | `/knowledge` | `200` | List Markdown documents, optional `category`. |
+| `GET` | `/knowledge/{path}` | `200`, `404` | Read one document. |
+| `PUT` | `/knowledge/{path}` | `200`, `400` | Write/update one document and commit when git-backed. |
+| `DELETE` | `/knowledge/{path}` | `200`, `400`, `404` | Delete one exact Markdown file; `agents/`, wildcards, directories, traversal and symlinks rejected. |
 
 ## Authentication
 
@@ -93,14 +97,14 @@ invocations.
 
 ## Registered JS tools
 
-Defined in `src/pi_runner/policy.mjs`. There are 34 tools. Grouped by
+Defined in `src/pi_runner/policy.mjs`. There are 37 tools. Grouped by
 behaviour:
 
 **API-backed reads/writes** (return `ok`/`applied`/`failed`):
 
 `list_tasks`, `get_task`, `get_task_logs`, `resolve_workspace`, `create_task`,
 `update_task`, `resume_task_session`, `list_agents`, `get_agent`,
-`update_agent`, `create_agent`. Note: `create_task` and `update_task` accept an optional typed `attachments` array to stage input files into `/inbox`.
+`update_agent`, `create_agent`, `delete_knowledge`. Note: `create_task` and `update_task` accept an optional typed `attachments` array to stage input files into `/inbox`. `delete_knowledge` removes exactly one explicitly confirmed `.md` file through `DELETE /knowledge/{path}` and never accepts `agents/`, wildcards or directories.
 
 **Durable operation submissions** (return the operation; inspect it to learn
 the outcome): `trigger_review`, `trigger_analysis`, `trigger_commit_push`,

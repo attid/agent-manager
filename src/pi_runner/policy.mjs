@@ -744,6 +744,42 @@ export default function policy(pi) {
     }
   });
 
+  // 22b. Custom Tool: delete_knowledge
+  pi.registerTool({
+    name: "delete_knowledge",
+    label: "Delete Knowledge",
+    description: "Delete exactly one existing Markdown document from the knowledge base. Call this tool only after the user explicitly confirmed the exact path. Profiles under agents/ are managed by the profile API and cannot be deleted here; directories, wildcards and recursive or batch deletion are forbidden.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Exact relative path to one .md file (e.g. 'инструкции/секретарь.md'). No wildcards or directory names." })
+    }),
+    async execute(toolCallId, params) {
+      const rawPath = (params.path || "").trim();
+      const reject = message => ({
+        isError: true,
+        content: [{ type: "text", text: JSON.stringify({ status: "failed", error: message }) }]
+      });
+      if (!rawPath) return reject("path is required");
+      if (path.isAbsolute(rawPath) || rawPath.startsWith("/") || rawPath.includes("\\")) {
+        return reject("Document path must be relative to the knowledge root.");
+      }
+      const parts = rawPath.split("/");
+      if (parts.some(part => !part || part === "." || part === "..")) {
+        return reject("Document path must name one exact file without traversal segments.");
+      }
+      if (parts.some(part => /[*?[\]]/.test(part))) {
+        return reject("Wildcard deletion is not supported; name one exact file.");
+      }
+      if (!parts[parts.length - 1].endsWith(".md") || parts[parts.length - 1] === ".md") {
+        return reject("Only an explicitly named Markdown document can be deleted.");
+      }
+      if (parts[0] === "agents") {
+        return reject("Agent profile files are managed by the profile API and cannot be deleted as knowledge documents.");
+      }
+      const encodedPath = parts.map(encodeURIComponent).join("/");
+      return toolResult(await backendRequest("DELETE", `/knowledge/${encodedPath}`));
+    }
+  });
+
   // 23. Custom Tool: update_component_rules
   pi.registerTool({
     name: "update_component_rules",

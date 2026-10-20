@@ -33,6 +33,12 @@ def test_platform_tools_against_http_backend(tmp_path: Path, migrated_db: Path):
     (workspace / "other").mkdir()
     kb = KnowledgeBase(tmp_path / "knowledge")
     kb.agents_dir.mkdir(parents=True)
+    cyrillic = kb.root_dir / "инструкции/секретарь.md"
+    latin = kb.root_dir / "instructions/secretary.md"
+    cyrillic.parent.mkdir(parents=True)
+    latin.parent.mkdir(parents=True)
+    cyrillic.write_text("# Секретарь\n", encoding="utf-8")
+    latin.write_text("# Secretary\n", encoding="utf-8")
     app = create_app(f"sqlite:///{migrated_db}", knowledge_base=kb)
     server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
     with socket.socket() as sock:
@@ -57,6 +63,7 @@ def test_platform_tools_against_http_backend(tmp_path: Path, migrated_db: Path):
                     str(session),
                     f"http://127.0.0.1:{sock.getsockname()[1]}",
                     str(workspace),
+                    str(kb.root_dir),
                 ],
                 check=False,
                 capture_output=True,
@@ -67,6 +74,8 @@ def test_platform_tools_against_http_backend(tmp_path: Path, migrated_db: Path):
             saved = (kb.agents_dir / "scout.md").read_text()
             assert "Approved revision." in saved
             assert "revision: 2" in saved
+            assert not cyrillic.exists()
+            assert latin.is_file()
         finally:
             server.should_exit = True
             thread.join(10)

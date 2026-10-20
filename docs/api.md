@@ -214,7 +214,40 @@ curl -X PATCH http://127.0.0.1:18767/agents/crypto-bot-developer \
 
 ---
 
-## 7. Интеграция с OpenViking
+## 7. База знаний (Knowledge Base)
+
+### 7.1. Список документов: `GET /knowledge`
+Возвращает Markdown-документы базы знаний. Необязательный параметр `category` ограничивает выборку подкаталогом (`projects`, `components`, `docs`).
+
+### 7.2. Чтение документа: `GET /knowledge/{path}`
+Путь задаётся относительно корня базы знаний. Отсутствующий документ возвращает `404`.
+
+### 7.3. Запись документа: `PUT /knowledge/{path}`
+```bash
+curl -X PUT http://127.0.0.1:18767/knowledge/projects/demo/summary.md \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Demo", "commit_message": "Update demo summary"}'
+```
+
+### 7.4. Удаление одного документа: `DELETE /knowledge/{path}`
+Удаляет ровно один существующий Markdown-файл. Путь должен быть относительным и явно указывать файл с расширением `.md`. Запрещены абсолютные пути, сегменты `..`, шаблоны (`*`, `?`, `[]`), каталоги, symlink-компоненты и файлы `agents/` — профилями управляет API профилей. Удаление не рекурсивное и не пакетное; при наличии Git-репозитория изменение фиксируется коммитом.
+
+```bash
+curl -X DELETE http://127.0.0.1:18767/knowledge/инструкции/секретарь.md \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Ответ (`200 OK`):**
+```json
+{"path": "инструкции/секретарь.md", "deleted": true}
+```
+
+**Ошибки:** `404`, если файла нет; `400` для недопустимого, защищённого или не-Markdown пути; `401`/`403` при отсутствии нужного токена или права `knowledge.write`. Удаление `инструкции/секретарь.md` не затрагивает `instructions/secretary.md`.
+
+---
+
+## 8. Интеграция с OpenViking
 
 В рантайме агентам доступен сервис OpenViking:
 - **Базовый URL**: `http://127.0.0.1:1933`

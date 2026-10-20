@@ -39,6 +39,33 @@ Two kinds of write exist:
    the session directory (`/session/<name>.json`). After the turn completes,
    `PersistentConversationHandler` drains those files.
 
+### Deleting one document
+
+`DELETE /knowledge/{path}` removes exactly one existing Markdown document.
+The secretary tool `delete_knowledge(path)` calls that route, so the same
+server-side rules apply to a tool call and to raw HTTP:
+
+- the path is relative to the knowledge root and must end in `.md`;
+- absolute paths, empty/`.`/`..` segments, backslashes, wildcard characters
+  and directory names are rejected;
+- any symlink component is rejected, and the resolved target must stay inside
+  the knowledge root;
+- `agents/` is protected because profiles are managed by the profile API;
+- a missing file returns `404`; invalid or protected paths return `400`;
+- the exact file is unlinked, then `git_commit` records the removal when the
+  knowledge tree is a git repository.
+
+There is no wildcard or recursive deletion. Deleting
+`инструкции/секретарь.md` never touches `instructions/secretary.md`. The
+policy requires an explicit user confirmation of the exact path before the
+tool is called; this is a dialog rule in the tool description and
+`SECRETARY_CONTRACT`, not a separate server-attested approval token. The tool
+is exposed only when it appears in the profile's `tools` list and its
+`knowledge.write` action is granted to that execution. A new default secretary
+profile includes it; bootstrap does not silently add it to an existing
+customized tool list, so such a profile must be updated explicitly through the
+profile API.
+
 ### Deferred write acknowledgement
 
 `src/agent_manager/session_operations.py` (`unapplied_items`) yields each

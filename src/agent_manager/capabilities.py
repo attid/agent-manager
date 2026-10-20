@@ -368,6 +368,15 @@ _TOOL_CAPABILITIES: tuple[Capability, ...] = (
         doc="profiles-runtime-skills.md",
         summary="append a revision after an optimistic revision check",
     ),
+    _tool(
+        "delete_knowledge",
+        method="DELETE",
+        path="/knowledge/{path}",
+        action="knowledge.write",
+        result_statuses=("applied", "failed", "unknown"),
+        doc="knowledge-and-integrations.md",
+        summary="delete one explicitly confirmed Markdown document (not agents/)",
+    ),
     # -- Durable operation submissions -----------------------------------
     _tool(
         "trigger_review",
@@ -915,9 +924,17 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         doc="knowledge-and-integrations.md",
         summary="write or update a knowledge document",
     ),
+    _endpoint(
+        "DELETE",
+        "/knowledge/{path}",
+        action="knowledge.write",
+        response_schema="KnowledgeDocumentDeleted",
+        doc="knowledge-and-integrations.md",
+        summary="delete one explicitly named Markdown document (not agents/)",
+    ),
 )
 
-#: The complete advertised surface: 28 tools plus every REST endpoint.
+#: The complete advertised surface: 37 tools plus every REST endpoint.
 CAPABILITIES: tuple[Capability, ...] = (
     *(_endpoint(
         method, "/tasks/{task_id}/subscriptions", deferred=True,

@@ -142,6 +142,11 @@ def test_local_tools_grant_no_backend_action() -> None:
     assert actions_for_tools(["read", "bash", "write_knowledge"]) == frozenset()
     # Real HTTP-backed tools keep their action.
     assert actions_for_tools(["get_task"]) == frozenset({"tasks.read"})
+    # Deletion goes through DELETE /knowledge/{path}, so it carries the same
+    # write authority as the API route rather than bypassing authorization.
+    assert actions_for_tools(["delete_knowledge"]) == frozenset(
+        {"knowledge.write"}
+    )
 
 
 def test_permission_mapping_matches_inventory_actions() -> None:

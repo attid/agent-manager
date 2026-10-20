@@ -131,3 +131,58 @@ def test_backend_client_with_bearer_token(migrated_db: Path) -> None:
         with pytest.raises(BackendError) as exc_info:
             asyncio.run(bad_client.list_tasks())
         assert exc_info.value.status_code == 401
+
+
+def test_delete_knowledge_requires_knowledge_write_scope(
+    migrated_db: Path, tmp_path: Path
+) -> None:
+    from agent_manager.knowledge import KnowledgeBase
+    from agent_manager.permissions import (
+        ExecutionPermissions,
+        actions_for_tools,
+        resources_for_execution,
+    )
+
+    knowledge = KnowledgeBase(tmp_path / "knowledge")
+    knowledge.initialize()
+    document = knowledge.root_dir / "docs/obsolete.md"
+    document.parent.mkdir(parents=True)
+    document.write_text("# Obsolete\n", encoding="utf-8")
+
+    permissions = ExecutionPermissions()
+    reader = permissions.issue(
+        agent_id="system-secretary",
+        actions=actions_for_tools(["read_knowledge", "list_knowledge"]),
+        resources=resources_for_execution(
+            actions_for_tools(["read_knowledge", "list_knowledge"])
+        ),
+    )
+    writer_actions = actions_for_tools(["delete_knowledge"])
+    assert writer_actions == frozenset({"knowledge.write"})
+    writer = permissions.issue(
+        agent_id="system-secretary",
+        actions=writer_actions,
+        resources=resources_for_execution(writer_actions),
+    )
+
+    app = create_app(
+        f"sqlite:///{migrated_db}",
+        knowledge_base=knowledge,
+        permissions=permissions,
+    )
+    with TestClient(app) as client:
+        assert client.delete("/knowledge/docs/obsolete.md").status_code == 401
+
+        denied = client.delete(
+            "/knowledge/docs/obsolete.md",
+            headers={"Authorization": f"Bearer {reader.token}"},
+        )
+        assert denied.status_code == 403
+        assert document.is_file()
+
+        allowed = client.delete(
+            "/knowledge/docs/obsolete.md",
+            headers={"Authorization": f"Bearer {writer.token}"},
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert not document.exists()

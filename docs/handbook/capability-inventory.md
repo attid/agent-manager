@@ -9,7 +9,7 @@ declaration with the generated OpenAPI document, the real tools registered by
 runs it. An undeclared tool, unsupported route, schema drift or silent
 privilege widening fails the check.
 
-## Tool inventory (34 tools)
+## Tool inventory (37 tools)
 
 Source: `src/pi_runner/policy.mjs`. "Deferred" means the tool writes a session
 receipt that `PersistentConversationHandler` applies after the turn. A local
@@ -21,10 +21,13 @@ tool grants no backend action, so it cannot widen raw-HTTP authority.
 | `create_agent` | API write | `POST /agents` | `applied` | `agents.write` |
 | `archive_agent` | Deferred | `/session/archived_agents.json` | `pending` | local |
 | `read_knowledge` | Local read | knowledge root | `ok` | local |
+| `delete_knowledge` | API write | `DELETE /knowledge/{path}` | `applied` | `knowledge.write` |
 | `ask_clarification` | Deferred signal | `/session/clarification.json` | `awaiting_user` | local |
 | `save_project_summary` | Deferred | `/session/saved_projects.json` | `pending` | local |
 | `openviking_search` | Direct HTTP | OpenViking search API | `ok`/`failed` | local (config) |
 | `openviking_read` | Direct HTTP | OpenViking content API | `ok`/`failed` | local (config) |
+| `subscribe_task` | API write | `POST /tasks/{id}/subscriptions` | `applied` | `tasks.write` |
+| `unsubscribe_task` | API write | `DELETE /tasks/{id}/subscriptions` | `applied` | `tasks.write` |
 | `list_tasks` | API read | `GET /tasks` | `ok` | `tasks.read` |
 | `get_task` | API read | `GET /tasks/{id}` | `ok` | `tasks.read` |
 | `resolve_workspace` | API read | `GET /workspaces/resolve` | `ok` | `workspaces.read` |
@@ -79,8 +82,8 @@ workspaces/resolve; tasks (create/read/list/patch/import, attachment upload via
 `POST /tasks/{task_id}/attachments`, artifacts and per-task analysis);
 conversations and messages; turns; operations (submit/list/read);
 analysis reports; recommendations (list/preview/approve/apply); agents
-(create/read/list/patch/archive/history). See
-[Tools and API discovery](tools-and-api.md#rest-endpoints).
+(create/read/list/patch/archive/history); knowledge (list/read/write/delete).
+See [Tools and API discovery](tools-and-api.md#rest-endpoints).
 
 ## Worker inventory
 
