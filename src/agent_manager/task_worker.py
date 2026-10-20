@@ -42,6 +42,10 @@ from .storage import (
 
 logger = logging.getLogger(__name__)
 
+#: Upper bound for the task worker pool. Each worker is an OS thread and may
+#: launch a sandboxed child process, so unbounded values are rejected early.
+MAX_TASK_CONCURRENCY = 32
+
 
 def _metadata_text(value: Any) -> str:
     """Render an arbitrary metadata value as readable task-prompt text."""
@@ -947,11 +951,36 @@ class TaskExecutionWorker:
             logger.info("Starting background TaskExecutionWorker thread: %s", self._thread.name)
             self._thread.start()
 
-    def stop(self, timeout: float | None = None) -> None:
-        """Gracefully stop the worker after current task completes."""
+    @property
+    def is_running(self) -> bool:
+        """Return whether the background loop thread is alive."""
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    @property
+    def thread(self) -> threading.Thread | None:
+        """The background loop thread, or None before :meth:`start`."""
+        return self._thread
+
+    def request_stop(self) -> None:
+        """Signal the loop to stop without waiting for the active task."""
         event = self._stop_event
         if event is not None:
             event.set()
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for the loop thread to finish, up to ``timeout`` seconds."""
+        thread = self._thread
+        if (
+            thread is not None
+            and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            thread.join(timeout)
+
+    def stop(self, timeout: float | None = None) -> None:
+        """Gracefully stop the worker after current task completes."""
+        self.request_stop()
         thread = self._thread
         if (
             thread is not None
@@ -959,7 +988,7 @@ class TaskExecutionWorker:
             and thread is not threading.current_thread()
         ):
             logger.info("Stopping background TaskExecutionWorker thread: %s", thread.name)
-            thread.join(timeout)
+        self.join(timeout)
 
     def run_loop(self, stop_event: threading.Event | None = None) -> None:
         """Poll and execute in_progress tasks until stopped."""
@@ -978,3 +1007,180 @@ class TaskExecutionWorker:
             if outcome is None:
                 event.wait(self.poll_interval_seconds)
         logger.info("TaskExecutionWorker run_loop finished: worker_id=%s", self.worker_id)
+
+
+class TaskExecutionWorkerPool:
+    """Run several :class:`TaskExecutionWorker` loops concurrently.
+
+    Each worker owns an independent loop, stop event and worker id. Tasks in
+    different workspaces can therefore execute in parallel, while
+    :meth:`TaskRepository.claim_in_progress` keeps tasks from the same
+    workspace strictly sequential and prevents duplicate claims. Tasks without
+    a workspace form one serialized group because they resolve to the same
+    default/project directory.
+
+    Args:
+        concurrency: Number of worker threads, from 1 to
+            :data:`MAX_TASK_CONCURRENCY`.
+        worker_id: Stable pool prefix; every thread gets
+            ``<worker_id>-<index>``.
+        **worker_kwargs: Keyword arguments forwarded unchanged to every
+            :class:`TaskExecutionWorker`.
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        artifact_root: str | os.PathLike[str],
+        *,
+        concurrency: int = 3,
+        worker_id: str | None = None,
+        **worker_kwargs: Any,
+    ) -> None:
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+            raise ValueError("concurrency must be an integer")
+        if concurrency < 1 or concurrency > MAX_TASK_CONCURRENCY:
+            raise ValueError(
+                f"concurrency must be between 1 and {MAX_TASK_CONCURRENCY}"
+            )
+
+        self.concurrency = concurrency
+        self.worker_id = worker_id or f"task-worker-{uuid.uuid4().hex[:8]}"
+        self._workers = tuple(
+            TaskExecutionWorker(
+                database,
+                artifact_root,
+                worker_id=f"{self.worker_id}-{index}",
+                **worker_kwargs,
+            )
+            for index in range(concurrency)
+        )
+        self._lifecycle_lock = threading.Lock()
+        self._state = "stopped"
+
+    @property
+    def workers(self) -> tuple[TaskExecutionWorker, ...]:
+        """Workers owned by the pool, in index order."""
+        return self._workers
+
+    @property
+    def threads(self) -> tuple[threading.Thread, ...]:
+        """Started worker threads, in index order."""
+        return tuple(
+            worker.thread
+            for worker in self._workers
+            if worker.thread is not None
+        )
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether every worker loop is alive."""
+        return all(worker.is_running for worker in self._workers)
+
+    @property
+    def state(self) -> str:
+        """Current lifecycle state: ``stopped``, ``starting``, ``running`` or
+        ``stopping``."""
+        return self._state
+
+    def start(self) -> None:
+        """Start every worker loop; an already running pool is a no-op."""
+        with self._lifecycle_lock:
+            if self._state == "running":
+                if all(worker.is_running for worker in self._workers):
+                    return
+                logger.warning(
+                    "TaskExecutionWorkerPool %s is partially running; "
+                    "start() is ignored while any worker thread is alive",
+                    self.worker_id,
+                )
+                return
+            if self._state == "starting":
+                logger.warning(
+                    "TaskExecutionWorkerPool %s is starting; start() is ignored",
+                    self.worker_id,
+                )
+                return
+            if self._state == "stopping":
+                if any(worker.is_running for worker in self._workers):
+                    logger.warning(
+                        "TaskExecutionWorkerPool %s is still stopping; "
+                        "start() is ignored",
+                        self.worker_id,
+                    )
+                    return
+                # A previous timed-out stop has finished; the pool may start
+                # again now that every worker thread has exited.
+                self._state = "stopped"
+            if any(worker.is_running for worker in self._workers):
+                logger.warning(
+                    "TaskExecutionWorkerPool %s still has worker threads "
+                    "finishing a previous stop(); start() is ignored",
+                    self.worker_id,
+                )
+                return
+
+            self._state = "starting"
+            logger.info(
+                "Starting TaskExecutionWorkerPool: worker_id=%s concurrency=%d",
+                self.worker_id,
+                self.concurrency,
+            )
+            try:
+                for worker in self._workers:
+                    worker.start()
+            except Exception:
+                for worker in self._workers:
+                    worker.request_stop()
+                self._state = "stopped"
+                raise
+
+            if all(worker.is_running for worker in self._workers):
+                self._state = "running"
+            else:
+                self._state = "stopped"
+                logger.warning(
+                    "TaskExecutionWorkerPool %s did not start every worker",
+                    self.worker_id,
+                )
+
+    def stop(self, timeout: float | None = None) -> None:
+        """Stop all workers and wait for active executions up to ``timeout``.
+
+        Stop is requested for every worker first, so idle workers exit
+        immediately while busy workers finish their current task. The whole
+        pool shares one timeout budget instead of waiting ``timeout`` per
+        worker. When the budget expires, stop returns but the remaining worker
+        threads keep their stop request and exit after the active task.
+        """
+        with self._lifecycle_lock:
+            self._state = "stopping"
+            for worker in self._workers:
+                worker.request_stop()
+            deadline = (
+                None if timeout is None else time.monotonic() + max(0.0, timeout)
+            )
+            for worker in self._workers:
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                worker.join(remaining)
+
+            alive = [
+                worker for worker in self._workers if worker.is_running
+            ]
+            self._state = "stopping" if alive else "stopped"
+            if alive:
+                logger.warning(
+                    "TaskExecutionWorkerPool %s stopped with %d worker "
+                    "thread(s) still finishing active tasks",
+                    self.worker_id,
+                    len(alive),
+                )
+            else:
+                logger.info(
+                    "TaskExecutionWorkerPool stopped: worker_id=%s",
+                    self.worker_id,
+                )

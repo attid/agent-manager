@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import dataclasses
 import sqlite3
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -176,6 +177,11 @@ class TaskRepository:
 
     def __init__(self, database: Database) -> None:
         self._database = database
+        # Serializes claims between threads that share this repository
+        # instance. SQLite's ``BEGIN IMMEDIATE`` below additionally serializes
+        # writers across repository instances and processes, so a claim never
+        # reads a stale task/workspace snapshot.
+        self._claim_lock = threading.Lock()
 
     def create(
         self,
@@ -404,29 +410,49 @@ class TaskRepository:
 
         Eligible tasks have status="in_progress" and their metadata does not
         indicate an active execution_status of "running" or "completed".
-        If a candidate task specifies a workspace, it is skipped if another
-        task in the same workspace is currently "ready_to_commit" or actively running.
-        """
-        with self._database.session() as session:
-            statement = (
-                select(Task)
-                .where(Task.status == "in_progress")
-                .order_by(Task.created_at)
-            )
-            if workspace is not None:
-                statement = statement.where(Task.workspace == workspace)
-            candidates = list(session.scalars(statement))
-            for candidate in candidates:
-                meta = dict(candidate.meta or {})
-                if meta.get("execution_status") in ("running", "completed"):
-                    continue
+        A candidate is skipped while another task in the same workspace is
+        "ready_to_commit" or actively running. Tasks without a workspace form
+        their own group: they resolve to the same default/project directory at
+        execution time, so they are serialized as one workspace.
 
-                if candidate.workspace:
+        The claim starts an immediate SQLite write transaction before reading
+        candidates. Concurrent worker threads and processes therefore observe
+        each other's committed claims; two workers cannot claim tasks from the
+        same workspace group and no task can be claimed twice.
+        """
+        with self._claim_lock:
+            with self._database.session() as session:
+                # Acquire the write lock before reading. A deferred transaction
+                # could otherwise keep a stale snapshot and either claim a
+                # task twice or fail to upgrade its read transaction.
+                session.execute(text("BEGIN IMMEDIATE"))
+                statement = (
+                    select(Task)
+                    .where(Task.status == "in_progress")
+                    .order_by(Task.created_at)
+                )
+                if workspace is not None:
+                    statement = statement.where(Task.workspace == workspace)
+                candidates = list(session.scalars(statement))
+                for candidate in candidates:
+                    meta = dict(candidate.meta or {})
+                    if meta.get("execution_status") in ("running", "completed"):
+                        continue
+
+                    # None is a real workspace group, not a wildcard. Such
+                    # tasks resolve to the default/profile project directory,
+                    # so they must not execute concurrently either.
+                    workspace_group = (
+                        Task.workspace.is_(None)
+                        if candidate.workspace is None
+                        else Task.workspace == candidate.workspace
+                    )
+
                     # Check for any task blocking this workspace in 'ready_to_commit'
                     has_blocking_ready = session.scalar(
                         select(func.count(Task.id))
                         .where(
-                            Task.workspace == candidate.workspace,
+                            workspace_group,
                             Task.id != candidate.id,
                             Task.status == "ready_to_commit",
                         )
@@ -438,7 +464,7 @@ class TaskRepository:
                     running_in_ws = session.scalars(
                         select(Task)
                         .where(
-                            Task.workspace == candidate.workspace,
+                            workspace_group,
                             Task.id != candidate.id,
                             Task.status == "in_progress",
                         )
@@ -452,15 +478,15 @@ class TaskRepository:
                     if is_ws_busy:
                         continue
 
-                meta["execution_status"] = "running"
-                meta["execution_worker_id"] = worker_id
-                meta["execution_claimed_at"] = utcnow().isoformat()
-                candidate.meta = meta
-                candidate.updated_at = utcnow()
-                session.flush()
-                session.refresh(candidate)
-                return candidate
-            return None
+                    meta["execution_status"] = "running"
+                    meta["execution_worker_id"] = worker_id
+                    meta["execution_claimed_at"] = utcnow().isoformat()
+                    candidate.meta = meta
+                    candidate.updated_at = utcnow()
+                    session.flush()
+                    session.refresh(candidate)
+                    return candidate
+                return None
 
     def complete_execution(
         self,

@@ -2,7 +2,7 @@
 
 Task-oriented agent orchestration system and engineering platform. This repository contains:
 - **Durable Storage**: File-backed SQLite with WAL mode, Alembic migrations, task repository, conversation/message storage, and immutable versioned agent-profile repository.
-- **Task Worker & Sandbox**: Background `TaskExecutionWorker` with strict workspace isolation running tasks inside Bubblewrap sandbox via `pi-runner`.
+- **Task Worker & Sandbox**: Background `TaskExecutionWorkerPool` with strict workspace isolation running tasks inside Bubblewrap sandbox via `pi-runner`.
 - **Automated Code Review**: Multi-round independent reviewer (`system-code-reviewer`) with hot-reloadable prompts and metrics persisted in task artifacts.
 - **Git Engine**: Atomic explicit file staging (no `git add .`), rollback capability, and commit & push with GitHub Actions CI monitoring (`gh run watch`). A repository without workflows is treated as successfully pushed; strict CI enforcement is opt-in via `require_ci`.
 - **Telegram Secretary & Controller**: Interactive Telegram bot (aiogram 3) supporting text, voice transcription (Deepgram ASR), and inline confirmation cards.
@@ -50,6 +50,38 @@ supported because separate connections would not share state.
 The API never creates or modifies schema. Start it only against a database
 that has already been migrated to head; otherwise startup fails with a clear
 error instead of silently creating or replacing tables.
+
+## Task execution concurrency
+
+`TaskExecutionWorkerPool` runs independent `TaskExecutionWorker` loops in one
+process. The pool size is configured by `RunnerConfig.task_concurrency` or the
+`AGENT_MANAGER_TASK_CONCURRENCY` environment variable and defaults to `3`; the
+value must be an integer from `1` to `32`. `int()` accepts surrounding
+whitespace, so `" 3 "` is valid.
+
+Each worker gets a unique id of the form `task-worker-<uuid>-<index>` and
+claims tasks through `TaskRepository.claim_in_progress()`. Claims run under a
+process-local lock and an immediate SQLite write transaction, so:
+
+- tasks in different explicit workspaces execute in parallel;
+- tasks in one explicit workspace execute strictly sequentially;
+- tasks without a workspace form one serialized group, because they resolve to
+  the same default or profile project directory;
+- concurrent workers cannot claim the same task or the same workspace group.
+
+Workspace names are the grouping key. Distinct names that a caller maps to the
+same filesystem directory are not automatically merged into one execution
+group.
+
+`TaskExecutionWorkerPool.stop(timeout=...)` requests shutdown for every worker
+and waits up to the shared timeout for active executions to finish. The service
+shutdown path grants five seconds per configured worker
+(`5 * task_concurrency`), so active parallel sessions are not squeezed into a
+single five-second window.
+
+```bash
+AGENT_MANAGER_TASK_CONCURRENCY=5 PYTHONPATH=src .venv/bin/python -m agent_manager.runner
+```
 
 ## HTTP API
 

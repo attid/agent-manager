@@ -25,11 +25,13 @@ def test_runner_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.delenv("AGENT_MANAGER_DB_URL", raising=False)
     monkeypatch.delenv("AGENT_MANAGER_HOST", raising=False)
     monkeypatch.delenv("AGENT_MANAGER_PORT", raising=False)
+    monkeypatch.delenv("AGENT_MANAGER_TASK_CONCURRENCY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
     cfg = RunnerConfig.from_env()
     assert cfg.host == "127.0.0.1"
     assert cfg.port == 18767
+    assert cfg.task_concurrency == 3
     assert cfg.auto_migrate is True
     assert cfg.telegram_config is None
 
@@ -82,12 +84,12 @@ def test_agent_manager_services_setup_and_lifecycle(
         services.start_background_threads()
         assert services.queue_dispatcher._control_thread is not None
         assert services.queue_dispatcher._control_thread.is_alive()
-        assert services.task_worker._thread is not None
-        assert services.task_worker._thread.is_alive()
+        assert len(services.task_worker.threads) == cfg.task_concurrency
+        assert all(thread.is_alive() for thread in services.task_worker.threads)
 
         services.stop_background_threads()
         assert not services.queue_dispatcher._control_thread.is_alive()
-        assert not services.task_worker._thread.is_alive()
+        assert not any(thread.is_alive() for thread in services.task_worker.threads)
     finally:
         loop.close()
 

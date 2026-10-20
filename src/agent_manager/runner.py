@@ -1,7 +1,7 @@
 """Unified runtime orchestrator for Agent Manager.
 
 Runs the FastAPI backend, background QueueDispatcher (secretary turns),
-TaskExecutionWorker (developer background tasks), and Telegram Secretary bot.
+TaskExecutionWorkerPool (developer background tasks), and Telegram Secretary bot.
 """
 
 from __future__ import annotations
@@ -37,7 +37,10 @@ from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.runtime_defaults import RuntimeDefaultsResolver
 from agent_manager.storage import Database
-from agent_manager.task_worker import TaskExecutionWorker
+from agent_manager.task_worker import (
+    MAX_TASK_CONCURRENCY,
+    TaskExecutionWorkerPool,
+)
 from agent_manager.task_subscriptions import TaskSubscriptions
 from agent_manager.telegram.bot import create_bot, setup_bot_commands
 from agent_manager.telegram.config import TelegramConfig
@@ -65,6 +68,7 @@ class RunnerConfig:
     runner_argv_prefix: tuple[str, ...] = (sys.executable, "-m", "pi_runner")
     secretary_agent_id: str = "system-secretary"
     developer_agent_id: str = "agent-manager-developer"
+    task_concurrency: int = 3
     auto_migrate: bool = True
     telegram_config: TelegramConfig | None = None
     api_tokens: tuple[str, ...] = ()
@@ -168,6 +172,21 @@ class RunnerConfig:
             "yes",
         )
 
+        try:
+            task_concurrency = int(
+                os.environ.get("AGENT_MANAGER_TASK_CONCURRENCY", "3")
+            )
+        except ValueError as error:
+            raise ValueError(
+                "AGENT_MANAGER_TASK_CONCURRENCY must be an integer between "
+                f"1 and {MAX_TASK_CONCURRENCY}"
+            ) from error
+        if task_concurrency < 1 or task_concurrency > MAX_TASK_CONCURRENCY:
+            raise ValueError(
+                "AGENT_MANAGER_TASK_CONCURRENCY must be an integer between "
+                f"1 and {MAX_TASK_CONCURRENCY}"
+            )
+
         api_tokens_raw = os.environ.get("AGENT_MANAGER_API_TOKENS")
         if not api_tokens_raw:
             api_tokens_raw = os.environ.get("AGENT_MANAGER_API_TOKEN", "")
@@ -205,6 +224,7 @@ class RunnerConfig:
             developer_agent_id=os.environ.get(
                 "AGENT_MANAGER_DEVELOPER_AGENT_ID", "agent-manager-developer"
             ),
+            task_concurrency=task_concurrency,
             auto_migrate=auto_migrate,
             telegram_config=telegram_cfg,
             api_tokens=api_tokens,
@@ -240,7 +260,7 @@ class AgentManagerServices:
         self.permissions = ExecutionPermissions()
         self.database: Database | None = None
         self.queue_dispatcher: QueueDispatcher | None = None
-        self.task_worker: TaskExecutionWorker | None = None
+        self.task_worker: TaskExecutionWorkerPool | None = None
         self.operation_worker: OperationWorker | None = None
         self.task_subscriptions: TaskSubscriptions | None = None
         self.bot = None
@@ -365,9 +385,10 @@ class AgentManagerServices:
                 if self.telegram_notifier is not None:
                     self.telegram_notifier.notify_sync(task, outcome)
 
-        self.task_worker = TaskExecutionWorker(
+        self.task_worker = TaskExecutionWorkerPool(
             database=self.database,
             artifact_root=task_artifacts,
+            concurrency=self.config.task_concurrency,
             agent_id=self.config.developer_agent_id,
             runner_argv_prefix=list(self.config.runner_argv_prefix),
             default_workspace=str(self.config.default_workspace),
@@ -418,13 +439,13 @@ class AgentManagerServices:
         self.uvicorn_server = uvicorn.Server(config=uvicorn_cfg)
 
     def start_background_threads(self) -> None:
-        """Start QueueDispatcher and TaskExecutionWorker threads."""
+        """Start QueueDispatcher and TaskExecutionWorkerPool threads."""
         if self.queue_dispatcher:
             logger.info("Starting QueueDispatcher background thread...")
             self.queue_dispatcher.start()
 
         if self.task_worker:
-            logger.info("Starting TaskExecutionWorker background thread...")
+            logger.info("Starting TaskExecutionWorkerPool background threads...")
             self.task_worker.start()
 
         if self.operation_worker:
@@ -432,7 +453,12 @@ class AgentManagerServices:
             self.operation_worker.start()
 
     def stop_background_threads(self) -> None:
-        """Stop background worker threads gracefully."""
+        """Stop background worker threads gracefully.
+
+        The task pool receives one five-second budget per configured worker so
+        that several active executions are not squeezed into a single
+        five-second shutdown window.
+        """
         if self.operation_worker:
             logger.info("Stopping OperationWorker...")
             try:
@@ -441,11 +467,13 @@ class AgentManagerServices:
                 logger.warning("Error stopping OperationWorker: %s", e)
 
         if self.task_worker:
-            logger.info("Stopping TaskExecutionWorker...")
+            logger.info("Stopping TaskExecutionWorkerPool...")
             try:
-                self.task_worker.stop(timeout=5.0)
+                self.task_worker.stop(
+                    timeout=5.0 * max(1, self.config.task_concurrency)
+                )
             except Exception as e:
-                logger.warning("Error stopping TaskExecutionWorker: %s", e)
+                logger.warning("Error stopping TaskExecutionWorkerPool: %s", e)
 
         if self.queue_dispatcher:
             logger.info("Stopping QueueDispatcher...")
