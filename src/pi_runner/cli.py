@@ -125,15 +125,21 @@ def resolve_inbox_args(config):
     return file_args, files_to_archive
 
 
-def inspect(directory):
+def inspect(directory, project_read_only=False):
     result = json.loads((directory / 'result.json').read_text())
     if result['status'] == 'running' and process_stamp(result['runner_pid']) != result['runner_stamp']:
         result['status'] = 'interrupted'
         result['exit_code'] = None
         result['error'] = 'Runner disappeared; session can be resumed'
-        before = directory / 'attempts' / str(result['attempt']) / 'before.json'
-        if before.exists():
-            result['changed_files'] = changed_files(json.loads(before.read_text()), snapshot(Path(result['project'])))
+        if project_read_only or result.get('project_read_only'):
+            result['changed_files'] = []
+        else:
+            before = directory / 'attempts' / str(result['attempt']) / 'before.json'
+            if before.exists():
+                previous = json.loads(before.read_text())
+                result['changed_files'] = changed_files(
+                    previous, snapshot(Path(result['project']), previous=previous)
+                )
     return result
 
 
@@ -208,7 +214,7 @@ def execute(config_path, task=None, resume=None, turn_id=None):
         acquire(stack, c.project, directory=True)
         if resume:
             directory = session_dir(c.state_dir, resume)
-            previous = inspect(directory)
+            previous = inspect(directory, project_read_only=c.project_read_only)
             if previous['agent_id'] != c.agent_id or previous['project'] != str(c.project):
                 raise RunnerError('Resume configuration must retain the same role and project')
             session_id = resume
@@ -253,11 +259,15 @@ def execute(config_path, task=None, resume=None, turn_id=None):
                       started_at=now(), ended_at=None, session_path=str(pi_dir / 'session.jsonl'),
                       summary_path=str(directory / 'summary.md'), exit_code=None, usage=None,
                       changed_files=[], model=c.model, provider=c.provider, project=str(c.project),
+                      project_read_only=c.project_read_only,
                       runner_pid=os.getpid(), runner_stamp=process_stamp(os.getpid()), attempt=attempt_number,
                       events_path=str(attempt / 'events.jsonl'), errors_path=str(attempt / 'stderr.log'))
         save(directory / 'result.json', result)
-        before = snapshot(c.project)
-        save(attempt / 'before.json', before)
+        if c.project_read_only:
+            before = {}
+        else:
+            before = snapshot(c.project)
+            save(attempt / 'before.json', before)
         proc = None
         stopped = False
         summary = ''
@@ -355,7 +365,10 @@ def execute(config_path, task=None, resume=None, turn_id=None):
             errors.append(str(exc))
         finally:
             result['ended_at'] = now()
-            result['changed_files'] = changed_files(before, snapshot(c.project))
+            result['changed_files'] = (
+                [] if c.project_read_only
+                else changed_files(before, snapshot(c.project, previous=before))
+            )
             result['usage'] = usage or None
             if errors:
                 result['error'] = '\n'.join(errors)

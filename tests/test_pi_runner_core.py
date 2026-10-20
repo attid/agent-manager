@@ -2,8 +2,16 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from pi_runner.core import Config, RunnerError, sandbox_command, snapshot, changed_files
+from pi_runner.core import (
+    Config,
+    IGNORED_DIRECTORIES,
+    RunnerError,
+    changed_files,
+    sandbox_command,
+    snapshot,
+)
 
 
 class RunnerTests(unittest.TestCase):
@@ -57,6 +65,226 @@ class RunnerTests(unittest.TestCase):
         (self.repo / 'edited').write_text('after')
         (self.repo / 'new').write_text('new')
         self.assertEqual(changed_files(before, snapshot(self.repo)), ['deleted', 'edited', 'new'])
+
+    def test_snapshot_ignores_heavy_and_service_directories(self):
+        for name in sorted(IGNORED_DIRECTORIES):
+            directory = self.repo / name
+            directory.mkdir(exist_ok=True)
+            (directory / 'artifact').write_text('ignored')
+        nested = self.repo / 'src' / 'node_modules' / 'package'
+        nested.mkdir(parents=True)
+        (nested / 'index.js').write_text('ignored')
+        kept = self.repo / 'kept.txt'
+        kept.write_text('tracked')
+        stat = kept.stat()
+
+        self.assertEqual(snapshot(self.repo), {
+            'kept.txt': {
+                'type': 'file',
+                'st_size': stat.st_size,
+                'st_mtime_ns': stat.st_mtime_ns,
+                'st_ctime_ns': stat.st_ctime_ns,
+                'st_mode': stat.st_mode & 0o777,
+            },
+        })
+
+    def test_current_snapshot_is_stat_only(self):
+        import pi_runner.core as core
+
+        tracked = self.repo / 'tracked.txt'
+        tracked.write_text('unchanged')
+        stable = self.repo / 'stable.txt'
+        stable.write_text('stable')
+
+        with patch('pi_runner.core._sha256', wraps=core._sha256) as digest:
+            before = snapshot(self.repo)
+            self.assertNotIn('sha256', before['tracked.txt'])
+            self.assertEqual(before['tracked.txt']['st_size'], len('unchanged'))
+            self.assertEqual(before['tracked.txt']['st_mtime_ns'], tracked.stat().st_mtime_ns)
+            self.assertEqual(before['tracked.txt']['st_ctime_ns'], tracked.stat().st_ctime_ns)
+            self.assertEqual(digest.call_count, 0)
+
+            # An unchanged follow-up snapshot performs no content reads either.
+            after_unchanged = snapshot(self.repo, previous=before)
+            self.assertEqual(digest.call_count, 0)
+            self.assertNotIn('sha256', after_unchanged['tracked.txt'])
+            self.assertNotIn('sha256', after_unchanged['stable.txt'])
+            self.assertEqual(changed_files(before, after_unchanged), [])
+
+    def test_ctime_detects_same_size_change_after_mtime_is_restored(self):
+        import os
+        import time
+
+        tracked = self.repo / 'tracked.txt'
+        tracked.write_bytes(b'original')
+        before = snapshot(self.repo)
+        previous = tracked.stat()
+        time.sleep(0.02)
+
+        with patch('pi_runner.core._sha256', side_effect=AssertionError('unexpected content read')):
+            tracked.write_bytes(b'modified')
+            os.utime(tracked, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            current = tracked.stat()
+            after = snapshot(self.repo, previous=before)
+
+        self.assertEqual(current.st_size, previous.st_size)
+        self.assertEqual(current.st_mtime_ns, previous.st_mtime_ns)
+        self.assertNotEqual(current.st_ctime_ns, previous.st_ctime_ns)
+        self.assertNotIn('sha256', after['tracked.txt'])
+        self.assertEqual(changed_files(before, after), ['tracked.txt'])
+
+    def test_legacy_string_snapshot_remains_compatible(self):
+        import hashlib
+        import os
+        import time
+
+        tracked = self.repo / 'tracked.txt'
+        tracked.write_bytes(b'original')
+        mode = tracked.stat().st_mode & 0o777
+        digest = hashlib.sha256(b'original').hexdigest()
+        legacy = {'tracked.txt': f'{digest}:{oct(mode)}'}
+
+        unchanged = snapshot(self.repo, previous=legacy)
+        self.assertEqual(changed_files(legacy, unchanged), [])
+
+        previous = tracked.stat()
+        time.sleep(0.02)
+        tracked.write_bytes(b'modified')
+        os.utime(tracked, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        updated = snapshot(self.repo, previous=legacy)
+
+        self.assertNotEqual(updated['tracked.txt']['sha256'], digest)
+        self.assertEqual(changed_files(legacy, updated), ['tracked.txt'])
+
+    def test_inspect_uses_legacy_before_snapshot(self):
+        import hashlib
+        import os
+        import time
+        from pi_runner.cli import inspect
+
+        tracked = self.repo / 'tracked.txt'
+        tracked.write_bytes(b'original')
+        mode = tracked.stat().st_mode & 0o777
+        legacy = {
+            'tracked.txt': f'{hashlib.sha256(b"original").hexdigest()}:{oct(mode)}',
+        }
+        session = self.state / 'sessions' / 'legacy'
+        attempt = session / 'attempts' / '1'
+        attempt.mkdir(parents=True)
+        (attempt / 'before.json').write_text(json.dumps(legacy))
+        (session / 'result.json').write_text(json.dumps({
+            'status': 'running',
+            'runner_pid': 999999,
+            'runner_stamp': 'gone',
+            'attempt': 1,
+            'project': str(self.repo),
+            'changed_files': [],
+        }))
+
+        previous = tracked.stat()
+        time.sleep(0.02)
+        tracked.write_bytes(b'modified')
+        os.utime(tracked, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        result = inspect(session)
+
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['changed_files'], ['tracked.txt'])
+
+    def test_execute_and_inspect_detect_change_with_preserved_mtime(self):
+        import os
+        import time
+        from pi_runner.cli import execute, inspect
+
+        tracked = self.repo / 'tracked.txt'
+        tracked.write_bytes(b'original')
+        original_mtime = tracked.stat().st_mtime_ns
+        fake_pi = self.root / 'fake_pi.py'
+        fake_pi.write_text(
+            'import json, os, time\n'
+            f'target = {str(tracked)!r}\n'
+            'time.sleep(0.02)\n'
+            "open(target, 'wb').write(b'modified')\n"
+            f'os.utime(target, ns=({original_mtime}, {original_mtime}))\n'
+            'print(json.dumps({"type":"message_end","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"Done"}],"stopReason":"stop"}}), flush=True)\n'
+        )
+        fake_sandbox = self.root / 'fake_sandbox.py'
+        fake_sandbox.write_text(
+            '#!/usr/bin/python3\n'
+            'import os, sys\n'
+            "command = sys.argv[sys.argv.index('--') + 1:]\n"
+            'os.execv(command[0], command)\n'
+        )
+        fake_sandbox.chmod(0o755)
+        self.config(
+            pi_command=['/usr/bin/python3', str(fake_pi)],
+            runtime_paths=[str(fake_pi)],
+        )
+        task = self.root / 'task.md'
+        task.write_text('change the tracked file')
+
+        with patch('pi_runner.cli.sandbox_command', return_value=[str(fake_sandbox)]):
+            result = execute(self.root / 'config.json', task)
+
+        self.assertEqual(result['status'], 'completed', result.get('error'))
+        self.assertEqual(result['changed_files'], ['tracked.txt'])
+        self.assertEqual(tracked.stat().st_mtime_ns, original_mtime)
+        session = self.state / 'sessions' / result['session_id']
+        self.assertEqual(inspect(session)['changed_files'], ['tracked.txt'])
+
+        # Simulate a runner that died after changing the file again.  inspect()
+        # must recompute against before.json, including the ctime fingerprint.
+        time.sleep(0.02)
+        tracked.write_bytes(b'tampered')
+        os.utime(tracked, ns=(original_mtime, original_mtime))
+        stored = json.loads((session / 'result.json').read_text())
+        stored.update(status='running', runner_pid=999999, runner_stamp='gone')
+        (session / 'result.json').write_text(json.dumps(stored))
+        interrupted = inspect(session)
+
+        self.assertEqual(interrupted['status'], 'interrupted')
+        self.assertEqual(interrupted['changed_files'], ['tracked.txt'])
+
+    def test_inspect_skips_snapshot_for_read_only_session(self):
+        from pi_runner.cli import inspect
+
+        session = self.state / 'sessions' / 'read-only'
+        attempt = session / 'attempts' / '1'
+        attempt.mkdir(parents=True)
+        (session / 'result.json').write_text(json.dumps({
+            'status': 'running',
+            'runner_pid': 999999,
+            'runner_stamp': 'gone',
+            'attempt': 1,
+            'project': str(self.repo),
+            'project_read_only': True,
+            'changed_files': ['stale'],
+        }))
+
+        with patch('pi_runner.cli.snapshot') as snap:
+            result = inspect(session)
+
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['changed_files'], [])
+        snap.assert_not_called()
+
+    def test_read_only_execute_skips_before_and_after_snapshots(self):
+        from pi_runner.cli import execute
+
+        self.config(project_read_only=True)
+        config_path = self.root / 'config.json'
+        task = self.root / 'task.md'
+        task.write_text('read-only task')
+
+        with patch('pi_runner.cli.sandbox_command', side_effect=RunnerError('not started')), \
+                patch('pi_runner.cli.snapshot') as snap:
+            result = execute(config_path, task)
+
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['changed_files'], [])
+        snap.assert_not_called()
+        session = self.state / 'sessions' / result['session_id']
+        self.assertFalse((session / 'attempts' / '1' / 'before.json').exists())
 
     def test_readonly_dependency_cannot_expose_home(self):
         with self.assertRaises(RunnerError):

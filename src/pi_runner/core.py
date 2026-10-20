@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 
 
 class RunnerError(Exception):
@@ -250,22 +251,132 @@ def sandbox_command(config, home, session):
     return argv
 
 
-def snapshot(project):
+IGNORED_DIRECTORIES = frozenset({
+    '.git',
+    'node_modules',
+    '.venv',
+    'venv',
+    '__pycache__',
+    '.pytest_cache',
+    '.ruff_cache',
+    '.mypy_cache',
+    'target',
+    'dist',
+    'build',
+    '.cache',
+})
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_file_metadata(entry, st):
+    return (
+        isinstance(entry, dict)
+        and entry.get('type') == 'file'
+        and entry.get('st_size') == st.st_size
+        and entry.get('st_mtime_ns') == st.st_mtime_ns
+        and entry.get('st_ctime_ns') == st.st_ctime_ns
+        and entry.get('st_mode') == st.st_mode & 0o777
+    )
+
+
+def _normalize_entry(entry):
+    """Return a dict entry, including compatibility with legacy snapshots.
+
+    Older ``before.json`` files stored files as ``"<sha256>:0o644"`` and
+    symlinks as ``"link:<target>"``.  Those entries have no size/mtime/ctime,
+    so a content hash is the only reliable way to compare them.  Treating
+    them as dicts keeps ``changed_files`` total for both snapshot formats.
+    """
+    if isinstance(entry, dict):
+        return entry
+    if isinstance(entry, str):
+        if entry.startswith('link:'):
+            return {'type': 'symlink', 'target': entry[len('link:'):], 'legacy': True}
+        digest, separator, mode = entry.rpartition(':')
+        if separator and digest:
+            try:
+                return {
+                    'type': 'file',
+                    'sha256': digest,
+                    'st_mode': int(mode, 8),
+                    'legacy': True,
+                }
+            except ValueError:
+                pass
+    return {'type': 'legacy', 'value': entry}
+
+
+def _same_entry(before, after):
+    """Compare snapshot entries, accepting both current and legacy formats."""
+    before = _normalize_entry(before)
+    after = _normalize_entry(after)
+    if before.get('type') != after.get('type'):
+        return False
+    if before.get('type') == 'symlink':
+        return before.get('target') == after.get('target')
+    if before.get('type') != 'file':
+        return before == after
+
+    # The current fingerprint includes ctime, which the kernel updates for
+    # every inode write and which cannot be restored through os.utime.  This
+    # catches same-size changes that preserve mtime (tar/rsync/copy tools).
+    for field in ('st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode'):
+        if field in before and field in after and before[field] != after[field]:
+            return False
+
+    before_hash = before.get('sha256')
+    after_hash = after.get('sha256')
+    if before_hash or after_hash:
+        # A legacy baseline has no metadata; unless both sides carry a hash,
+        # their content relationship is unknown and must be reported changed.
+        return bool(before_hash and after_hash and before_hash == after_hash)
+    return True
+
+
+def snapshot(project, previous=None):
+    """Return a metadata snapshot of ``project`` for change detection.
+
+    Dependency, virtual-environment and build directories are not traversed.
+    The baseline stores size, mtime, ctime and mode only, so a normal snapshot
+    is a stat walk.  Content hashes are read only for legacy ``previous``
+    entries (which lack ctime and may have only a hash), keeping old
+    ``before.json`` sessions comparable without slowing new sessions down.
+    """
     result = {}
     for root, dirs, files in os.walk(project, followlinks=False):
-        dirs[:] = [d for d in dirs if d != '.git']
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRECTORIES]
         for name in files + [d for d in dirs if (Path(root) / d).is_symlink()]:
             p = Path(root) / name
             relative = str(p.relative_to(project))
             try:
-                if p.is_symlink():
-                    value = 'link:' + os.readlink(p)
-                elif p.is_file():
-                    h = hashlib.sha256()
-                    with p.open('rb') as stream:
-                        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                            h.update(chunk)
-                    value = h.hexdigest() + ':' + oct(p.stat().st_mode & 0o777)
+                st = p.lstat()
+                if stat.S_ISLNK(st.st_mode):
+                    value = {'type': 'symlink', 'target': os.readlink(p)}
+                elif stat.S_ISREG(st.st_mode):
+                    value = {
+                        'type': 'file',
+                        'st_size': st.st_size,
+                        'st_mtime_ns': st.st_mtime_ns,
+                        'st_ctime_ns': st.st_ctime_ns,
+                        'st_mode': st.st_mode & 0o777,
+                    }
+                    old = _normalize_entry(previous.get(relative)) if previous is not None else None
+                    if old and old.get('type') == 'file' and old.get('sha256'):
+                        if 'st_ctime_ns' in old:
+                            if _same_file_metadata(old, st):
+                                value['sha256'] = old['sha256']
+                        else:
+                            # Legacy entries have no ctime, so content must be
+                            # read to distinguish a real change from a stat-only
+                            # difference.  New snapshots never take this path.
+                            value['sha256'] = _sha256(p)
                 else:
                     continue
                 result[relative] = value
@@ -275,4 +386,7 @@ def snapshot(project):
 
 
 def changed_files(before, after):
-    return sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+    return sorted(
+        p for p in before.keys() | after.keys()
+        if p not in before or p not in after or not _same_entry(before[p], after[p])
+    )
