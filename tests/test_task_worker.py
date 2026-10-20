@@ -841,3 +841,142 @@ def test_review_changes_requested_resumes_original_developer_session(
     assert "--session" in resume_argv
     assert resume_argv[resume_argv.index("--session") + 1] == session_id
     assert "--state-dir" in resume_argv
+
+
+def test_task_prompt_contains_description_additional_instructions_and_review_feedback(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """A resumed execution must receive the instructions that triggered it."""
+    test_db, agent_id = setup_developer_agent
+    task_repo = TaskRepository(test_db)
+    first_instruction = {
+        "text": "Add a regression test for the empty result.",
+        "timestamp": "2025-01-02T03:04:05Z",
+    }
+    second_instruction = {
+        "text": "Update the user-facing documentation.",
+        "timestamp": "2025-01-03T04:05:06Z",
+    }
+    task = task_repo.create(
+        title="Fix empty search results",
+        description="Original task description: handle empty search results.",
+        status="in_progress",
+        metadata={
+            "additional_instructions": [first_instruction, second_instruction],
+            "review_feedback": "P1: src/search.py:42 -- handle the empty list.",
+        },
+    )
+
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id=agent_id,
+        runner_argv_prefix=fake_runner_argv,
+        default_workspace=str(tmp_path),
+    )
+
+    outcome = worker.step()
+    assert outcome is not None
+    assert outcome.status == "completed"
+
+    exec_dirs = list((tmp_path / "artifacts").glob(f"task_{task.id}_*"))
+    assert len(exec_dirs) == 1
+    task_text = (exec_dirs[0] / "task.md").read_text(encoding="utf-8")
+
+    assert "Original task description: handle empty search results." in task_text
+    assert first_instruction["text"] in task_text
+    assert first_instruction["timestamp"] in task_text
+    assert second_instruction["text"] in task_text
+    assert second_instruction["timestamp"] in task_text
+    assert "P1: src/search.py:42 -- handle the empty list." in task_text
+    assert task_text.index(first_instruction["timestamp"]) < task_text.index(
+        second_instruction["timestamp"]
+    )
+
+
+def test_review_fix_round_unions_changed_files(
+    migrated_db: Path, tmp_path: Path
+) -> None:
+    """A fix round must not discard files changed by the first round."""
+    test_db = Database.from_path(migrated_db)
+    agent_repo = AgentProfileRepository(test_db)
+    agent_repo.create(
+        agent_id="system-code-reviewer",
+        name="System Reviewer",
+        role="reviewer",
+        system_prompt="Review prompt.",
+        runner_config={"tools": ["read"]},
+    )
+    task_repo = TaskRepository(test_db)
+    task = task_repo.create(
+        title="Review then fix",
+        status="in_progress",
+        metadata={"task_type": "coding", "requires_review": True},
+    )
+
+    worker = TaskExecutionWorker(
+        database=test_db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id="agent-manager-developer",
+        default_workspace=str(tmp_path),
+        runner_argv_prefix=["true"],
+    )
+
+    exec_dir = tmp_path / "exec"
+    exec_dir.mkdir(parents=True)
+    role_file = exec_dir / "role.json"
+    role_file.write_text("{}")
+    state_dir = exec_dir / "state"
+    state_dir.mkdir()
+
+    first_review = tmp_path / "review_round_1.md"
+    first_review.write_text(
+        "P1: src/old.py:1 -- missing test\nВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    developer_fix = tmp_path / "developer_fix.md"
+    developer_fix.write_text("Added the missing test.")
+    second_review = tmp_path / "review_round_2.md"
+    second_review.write_text("Замечаний нет.\nВЕРДИКТ: ОДОБРЕНО\n")
+
+    review_one = MagicMock(
+        returncode=0,
+        stdout=json.dumps(
+            {"status": "completed", "summary_path": str(first_review)}
+        ),
+        stderr="",
+    )
+    developer_proc = MagicMock(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "status": "completed",
+                "summary_path": str(developer_fix),
+                "changed_files": ["src/fix.py", "src/old.py"],
+            }
+        ),
+        stderr="",
+    )
+    review_two = MagicMock(
+        returncode=0,
+        stdout=json.dumps(
+            {"status": "completed", "summary_path": str(second_review)}
+        ),
+        stderr="",
+    )
+
+    with patch("subprocess.run", side_effect=[review_one, developer_proc, review_two]):
+        result = worker._run_review_cycle(
+            task=task,
+            project_dir=tmp_path,
+            changed_files=["src/old.py", "src/first.py"],
+            developer_summary="Initial implementation.",
+            exec_dir=exec_dir,
+            role_file=role_file,
+            state_dir=state_dir,
+            child_env={},
+        )
+
+    assert result["needs_user_input"] is False
+    assert result["changed_files"] == ["src/old.py", "src/first.py", "src/fix.py"]

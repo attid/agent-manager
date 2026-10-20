@@ -43,6 +43,97 @@ from .storage import (
 logger = logging.getLogger(__name__)
 
 
+def _metadata_text(value: Any) -> str:
+    """Render an arbitrary metadata value as readable task-prompt text."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        for key in (
+            "text",
+            "instruction",
+            "message",
+            "feedback",
+            "summary",
+            "comment",
+            "description",
+            "report",
+        ):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    return str(value).strip()
+
+
+def _timestamped_block(value: Any, *, heading: str) -> str:
+    """Render one instruction/feedback entry, preserving its timestamp."""
+    timestamp: Any = None
+    if isinstance(value, Mapping):
+        for key in ("timestamp", "created_at", "at", "date"):
+            candidate = value.get(key)
+            if candidate is not None and str(candidate).strip():
+                timestamp = candidate
+                break
+    text = _metadata_text(value)
+    if not text:
+        return ""
+    label = str(timestamp).strip() if timestamp is not None else ""
+    return f"### {heading}{f' — {label}' if label else ''}\n{text}"
+
+
+def _render_additional_instructions(value: Any) -> str:
+    """Render every ``metadata.additional_instructions`` entry in order."""
+    if value is None:
+        return ""
+    entries = value if isinstance(value, (list, tuple)) else [value]
+    blocks = [
+        block
+        for entry in entries
+        if (block := _timestamped_block(entry, heading="Дополнительное указание"))
+    ]
+    return "\n\n".join(blocks)
+
+
+def _render_review_feedback(value: Any) -> str:
+    """Render the current ``metadata.review_feedback`` value."""
+    if value is None:
+        return ""
+    entries = value if isinstance(value, (list, tuple)) else [value]
+    blocks = [
+        block
+        for entry in entries
+        if (block := _timestamped_block(entry, heading="Замечания ревьювера"))
+    ]
+    return "\n\n".join(blocks)
+
+
+def render_task_document(task: Task) -> str:
+    """Build the ``task.md`` prompt for one execution.
+
+    The original description is followed by every accumulated additional
+    instruction (with its timestamp) and the current review feedback, so a
+    resumed native session receives the context that prompted the resume.
+    """
+    sections = [f"# Task {task.id}: {task.title}"]
+    if task.description:
+        sections.append(task.description)
+    meta = dict(task.meta or {})
+    instructions = _render_additional_instructions(
+        meta.get("additional_instructions")
+    )
+    if instructions:
+        sections.append(
+            "## Дополнительные указания (additional_instructions)\n\n"
+            + instructions
+        )
+    feedback = _render_review_feedback(meta.get("review_feedback"))
+    if feedback:
+        sections.append(
+            "## Замечания ревьювера (review_feedback)\n\n" + feedback
+        )
+    return "\n\n".join(sections) + "\n"
+
+
 @dataclasses.dataclass(frozen=True)
 class TaskOutcome:
     """Outcome of one task execution."""
@@ -163,10 +254,7 @@ class TaskExecutionWorker:
                 )
                 exec_dir.mkdir(parents=True, exist_ok=True)
                 task_file = exec_dir / "task.md"
-                task_text = (
-                    f"# Task {task.id}: {task.title}\n\n"
-                    f"{task.description or ''}\n"
-                )
+                task_text = render_task_document(task)
                 task_file.write_text(task_text, encoding="utf-8")
 
                 # 3. Prepare the selected execution configuration.
@@ -831,7 +919,10 @@ class TaskExecutionWorker:
                     if s_path and Path(s_path).is_file():
                         current_summary = Path(s_path).read_text(encoding="utf-8")
                     if dev_res.get("changed_files"):
-                        current_changed = list(dev_res["changed_files"])
+                        new_changed = list(dev_res["changed_files"])
+                        current_changed = list(
+                            dict.fromkeys(current_changed + new_changed)
+                        )
             except Exception:
                 pass
 

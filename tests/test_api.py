@@ -189,13 +189,70 @@ def test_patch_task_updates_status_and_metadata(
         assert patch_res.status_code == 200
         patched = patch_res.json()
         assert patched["status"] == "in_progress"
-        assert patched["metadata"] == {"conversation_id": "conv-123"}
+        # Entering in_progress clears any stale execution marker explicitly.
+        assert patched["metadata"] == {
+            "conversation_id": "conv-123",
+            "execution_status": None,
+        }
         assert patched["title"] == "Draft task"
 
         # Verify persistence
         fetched = client.get(f"/tasks/{task_id}").json()
         assert fetched["status"] == "in_progress"
-        assert fetched["metadata"] == {"conversation_id": "conv-123"}
+        assert fetched["metadata"] == {
+            "conversation_id": "conv-123",
+            "execution_status": None,
+        }
+
+
+def test_patch_task_merges_metadata_and_clears_stale_execution_status(
+    migrated_db: pathlib.Path,
+) -> None:
+    with TestClient(_app(migrated_db)) as client:
+        created = client.post(
+            "/tasks",
+            json={
+                "title": "Resumed task",
+                "description": "Initial scope",
+                "metadata": {"origin": "telegram", "assigned_agent": "secretary"},
+            },
+        ).json()
+        task_id = created["id"]
+
+        completed = client.patch(
+            f"/tasks/{task_id}",
+            json={
+                "status": "done",
+                "metadata": {"execution_status": "completed", "summary": "first pass"},
+            },
+        )
+        assert completed.status_code == 200
+
+        resumed = client.patch(
+            f"/tasks/{task_id}",
+            json={
+                "status": "in_progress",
+                "metadata": {
+                    "execution_status": "completed",
+                    "additional_instructions": [
+                        {"text": "Cover the edge case.", "timestamp": "2025-01-02T03:04:05Z"}
+                    ],
+                },
+            },
+        )
+        assert resumed.status_code == 200
+        patched = resumed.json()
+        assert patched["status"] == "in_progress"
+        assert patched["metadata"]["execution_status"] is None
+        assert patched["metadata"]["origin"] == "telegram"
+        assert patched["metadata"]["assigned_agent"] == "secretary"
+        assert patched["metadata"]["summary"] == "first pass"
+        assert patched["metadata"]["additional_instructions"][0]["text"] == (
+            "Cover the edge case."
+        )
+
+        fetched = client.get(f"/tasks/{task_id}").json()
+        assert fetched["metadata"] == patched["metadata"]
 
 
 def test_patch_task_returns_404_for_unknown_task(

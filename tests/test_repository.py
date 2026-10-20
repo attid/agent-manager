@@ -192,7 +192,12 @@ def test_task_update_and_not_found(migrated_db: pathlib.Path) -> None:
         assert updated.title == "Original"
         assert updated.status == "in_progress"
         assert updated.description == "desc"
-        assert updated.meta == {"assigned_agent": "secretary"}
+        # Entering in_progress records the cleared execution marker explicitly;
+        # the stale terminal marker must not survive a resume/re-run.
+        assert updated.meta == {
+            "assigned_agent": "secretary",
+            "execution_status": None,
+        }
 
         # Clearing description with None
         updated2 = repository.update(created.id, description=None)
@@ -202,6 +207,79 @@ def test_task_update_and_not_found(migrated_db: pathlib.Path) -> None:
         with pytest.raises(TaskNotFoundError) as exc:
             repository.update("missing-id", status="done")
         assert exc.value.task_id == "missing-id"
+    finally:
+        database.dispose()
+
+
+def test_update_merges_metadata_and_resumes_completed_task(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        created = repository.create(
+            title="Resume me",
+            description="Original scope",
+            status="done",
+            metadata={
+                "origin": "telegram",
+                "execution_status": "completed",
+                "summary": "first pass",
+                "nested": {"round": 1},
+            },
+        )
+
+        merged = repository.update(
+            created.id,
+            metadata={"assigned_agent": "secretary", "nested": {"round": 2}},
+        )
+        # Shallow merge preserves unrelated keys and replaces a supplied key.
+        assert merged.meta["origin"] == "telegram"
+        assert merged.meta["summary"] == "first pass"
+        assert merged.meta["assigned_agent"] == "secretary"
+        assert merged.meta["nested"] == {"round": 2}
+        assert merged.meta["execution_status"] == "completed"
+
+        resumed = repository.update(
+            created.id,
+            status="in_progress",
+            metadata={
+                "execution_status": "completed",
+                "additional_instructions": [
+                    {"text": "Add a regression test.", "timestamp": "2025-01-02T03:04:05Z"}
+                ],
+            },
+        )
+        assert resumed.status == "in_progress"
+        assert resumed.meta["execution_status"] is None
+        assert resumed.meta["origin"] == "telegram"
+        assert resumed.meta["summary"] == "first pass"
+        assert resumed.meta["additional_instructions"][0]["text"] == (
+            "Add a regression test."
+        )
+
+        # The stale completed marker must no longer keep the task out of claims.
+        claimed = repository.claim_in_progress(worker_id="worker-resume")
+        assert claimed is not None
+        assert claimed.id == created.id
+        assert claimed.meta["execution_status"] == "running"
+    finally:
+        database.dispose()
+
+
+def test_create_in_progress_clears_terminal_execution_status(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        created = repository.create(
+            title="New execution",
+            status="in_progress",
+            metadata={"execution_status": "completed", "origin": "api"},
+        )
+        assert created.meta["execution_status"] is None
+        assert created.meta["origin"] == "api"
     finally:
         database.dispose()
 

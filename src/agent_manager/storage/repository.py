@@ -206,6 +206,10 @@ class TaskRepository:
             The detached :class:`Task` with server-populated timestamps.
         """
         meta = dict(metadata) if metadata is not None else {}
+        if str(status) == "in_progress":
+            # A task entering execution must not inherit a terminal status from
+            # an earlier run; otherwise claim_in_progress would skip it forever.
+            meta["execution_status"] = None
         if attachments is not None:
             meta["attachments"] = [
                 a.model_dump() if hasattr(a, "model_dump") else a
@@ -340,8 +344,13 @@ class TaskRepository:
             status: Replacement status if supplied.
             workspace: Replacement workspace if supplied (can be None).
             agent_id: Replacement executor; None restores the worker default.
-            metadata: Replacement metadata mapping if supplied.
+            metadata: Metadata fields merged into the stored mapping if
+                supplied. Existing keys not present here are preserved.
             attachments: Replacement attachments list if supplied.
+
+        Moving a task to ``in_progress`` clears any stored
+        ``execution_status`` (including a stale ``"completed"``) so the worker
+        can claim the task again after new instructions arrive.
 
         Raises:
             TaskNotFoundError: when the task does not exist.
@@ -361,7 +370,9 @@ class TaskRepository:
             if agent_id is not _UNSET:
                 task.agent_id = agent_id
             if metadata is not _UNSET:
-                task.meta = dict(metadata or {})
+                current_meta = dict(task.meta or {})
+                current_meta.update(dict(metadata or {}))
+                task.meta = current_meta
             if attachments is not _UNSET:
                 current_meta = dict(task.meta or {})
                 if attachments is None:
@@ -371,6 +382,12 @@ class TaskRepository:
                         a.model_dump() if hasattr(a, "model_dump") else a
                         for a in attachments
                     ]
+                task.meta = current_meta
+            if status is not _UNSET and str(status) == "in_progress":
+                # Applied after the merge so a caller cannot reintroduce a
+                # terminal execution_status together with the new status.
+                current_meta = dict(task.meta or {})
+                current_meta["execution_status"] = None
                 task.meta = current_meta
             task.updated_at = utcnow()
             session.flush()

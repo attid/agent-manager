@@ -182,8 +182,10 @@ class TaskPatch(BaseModel):
     """Payload accepted by ``PATCH /tasks/{task_id}``.
 
     All fields are optional. Omitted fields are left unchanged; supplied fields
-    replace the stored value. ``metadata`` replaces the entire stored metadata
-    mapping.
+    replace the stored value. ``metadata`` is shallow-merged into the stored
+    metadata mapping, so unrelated keys are preserved. Setting ``status`` to
+    ``in_progress`` clears any previous ``metadata.execution_status`` so a
+    resumed task is claimable by the worker again.
     """
 
     model_config = ConfigDict(extra="forbid")
