@@ -58,6 +58,10 @@ class Config:
     attachments_dir: Path | None = None
     outbox_dir: Path | None = None
     allowed_hosts: list[str] = field(default_factory=list)
+    # Runtime-only host path for the restricted-network egress proxy. It is
+    # deliberately not loaded from role configuration because it is allocated
+    # for one launch and removed when that launch ends.
+    egress_proxy_uds: Path | None = None
 
     @property
     def is_network_restricted(self) -> bool:
@@ -169,11 +173,15 @@ class Config:
                    allowed_hosts)
 
 
-def sandbox_command(config, home, session):
+def sandbox_command(config, home, session, egress_proxy_uds=None):
     bwrap = shutil.which('bwrap')
     if not bwrap:
         raise RunnerError('bubblewrap is required; refusing an unsandboxed launch')
     c = config
+    host_uds = egress_proxy_uds
+    if host_uds is None:
+        host_uds = getattr(c, 'egress_proxy_uds', None)
+    host_uds = Path(host_uds) if host_uds is not None else None
     argv = [bwrap, '--die-with-parent', '--new-session', '--unshare-pid',
             '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try', '--cap-drop', 'ALL',
             '--clearenv', '--ro-bind', '/usr', '/usr']
@@ -205,6 +213,15 @@ def sandbox_command(config, home, session):
         argv += ['--ro-bind', str(p), str(p)]
     argv += ['--ro-bind' if c.project_read_only else '--bind', str(c.project), '/workspace', '--bind', str(home), '/home/runner',
              '--bind', str(session), '/session']
+    if is_network_restricted(c.network) and host_uds is not None:
+        # AF_UNIX paths are limited to 108 bytes. The proxy socket therefore
+        # lives on a short host path, and this fixed in-sandbox path is only a
+        # bind-mount target. Bubblewrap needs the target to exist before a
+        # file bind can replace it.
+        mountpoint = Path(session) / 'egress_proxy.sock'
+        mountpoint.parent.mkdir(parents=True, exist_ok=True)
+        mountpoint.touch(exist_ok=True)
+        argv += ['--bind', str(host_uds), '/session/egress_proxy.sock']
     if c.models_file:
         argv += ['--ro-bind', str(c.models_file), '/home/runner/.pi/agent/models.json']
     argv += ['--ro-bind', str(Path(__file__).with_name('policy.mjs')), '/runner/policy.mjs']

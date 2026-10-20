@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 
 from .core import Config, RunnerError, sandbox_command, snapshot, changed_files, is_network_restricted
@@ -240,10 +241,17 @@ def execute(config_path, task=None, resume=None, turn_id=None):
         (pi_dir / 'task.txt').write_text(task_text, encoding='utf-8')
         if is_network_restricted(c.network):
             from .proxy import EgressProxy
-            uds_path = pi_dir / 'egress_proxy.sock'
+            # sockaddr_un.sun_path is limited to 108 bytes on Linux. Session
+            # paths can be much longer, so keep the real socket in a short
+            # temporary directory and expose only its fixed sandbox mountpoint.
+            egress_dir = Path(tempfile.mkdtemp(prefix='am_egress_', dir='/tmp'))
+            stack.callback(shutil.rmtree, egress_dir, ignore_errors=True)
+            uds_path = egress_dir / 'proxy.sock'
             proxy = EgressProxy(uds_path, allowed_hosts=c.allowed_hosts)
             proxy.start()
             stack.callback(proxy.stop)
+            c.egress_proxy_uds = uds_path
+            stack.callback((pi_dir / 'egress_proxy.sock').unlink, missing_ok=True)
             forwarder_src = Path(__file__).with_name('forwarder.py')
             if forwarder_src.is_file():
                 shutil.copy2(forwarder_src, pi_dir / 'forwarder.py')

@@ -668,6 +668,99 @@ class TestEndToEndSandboxEgress(unittest.TestCase):
         upstream.close()
         upstream_thread.join(timeout=1.0)
 
+    def test_long_session_path_keeps_egress_proxy_within_unix_socket_limit(self):
+        """A session path over 140 characters still launches a working EgressProxy.
+
+        The host UDS must live on a short path; only the fixed
+        /session/egress_proxy.sock mountpoint may be below the long session
+        directory. Before the short-path allocation this raised
+        ``AF_UNIX path too long`` from socket.bind().
+        """
+        import json
+        from pi_runner.cli import execute
+
+        # The session itself is intentionally much longer than the 108-byte
+        # sockaddr_un.sun_path limit; the proxy socket must not live there.
+        long_state = (
+            self.root
+            / ("long-state-" + "a" * 60)
+            / ("nested-" + "b" * 60)
+            / "state"
+        )
+        long_state.mkdir(parents=True)
+        self.assertGreater(len(str(long_state)), 140)
+
+        project = self.root / "long-path-project"
+        project.mkdir()
+
+        # Local upstream reached by the host-side proxy after the sandbox
+        # connects through the forwarder and the bind-mounted UDS.
+        upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        upstream.bind(("127.0.0.1", 0))
+        upstream.listen(5)
+        upstream_port = upstream.getsockname()[1]
+        expected_body = b"long-path-egress-ok"
+
+        def handle_upstream():
+            while True:
+                try:
+                    conn, _ = upstream.accept()
+                    _ = conn.recv(4096)
+                    conn.sendall(
+                        b"HTTP/1.1 200 OK\r\n"
+                        b"Content-Type: text/plain\r\n"
+                        + f"Content-Length: {len(expected_body)}\r\n".encode()
+                        + b"Connection: close\r\n\r\n"
+                        + expected_body
+                    )
+                    conn.close()
+                except Exception:
+                    break
+
+        upstream_thread = threading.Thread(target=handle_upstream, daemon=True)
+        upstream_thread.start()
+        self.addCleanup(upstream.close)
+
+        fake_pi = self.root / "long_path_fake_pi.py"
+        fake_pi.write_text(
+            "import json, os, pathlib, subprocess\n"
+            "sock = pathlib.Path('/session/egress_proxy.sock')\n"
+            "assert sock.is_socket(), f'egress UDS missing or not a socket: {sock}'\n"
+            f"res = subprocess.run(['curl', '-sS', '--noproxy', '', "
+            f"'--connect-timeout', '3', 'http://127.0.0.1:{upstream_port}/health'], "
+            "capture_output=True, text=True)\n"
+            f"assert res.stdout == {expected_body.decode()!r}, (res.stdout, res.stderr)\n"
+            "print(json.dumps({'type': 'session', 'id': 'long-path-session'}), flush=True)\n"
+            "print(json.dumps({'type': 'message_end', 'message': {\n"
+            "    'role': 'assistant', 'content': [{'type': 'text', 'text': 'verified'}],\n"
+            "    'stopReason': 'stop', 'usage': {'input': 1, 'output': 1}}}\n"
+            "), flush=True)\n",
+            encoding="utf-8",
+        )
+        task = self.root / "long_path_task.txt"
+        task.write_text("verify long-path egress", encoding="utf-8")
+        cfg_file = self.root / "long_path_config.json"
+        cfg_file.write_text(
+            json.dumps({
+                "agent_id": "long-path-agent",
+                "project": str(project),
+                "state_dir": str(long_state),
+                "pi_command": ["/usr/bin/python3", str(fake_pi)],
+                "runtime_paths": ["/usr/bin/python3", str(fake_pi)],
+                "network": "restricted",
+                "allowed_hosts": ["127.0.0.1"],
+            }),
+            encoding="utf-8",
+        )
+
+        result = execute(cfg_file, task)
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(result["exit_code"], 0)
+
+        pi_dir = long_state / "sessions" / result["session_id"] / "pi"
+        self.assertFalse((pi_dir / "egress_proxy.sock").exists())
+        upstream_thread.join(timeout=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
