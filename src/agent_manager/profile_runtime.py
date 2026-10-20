@@ -401,6 +401,14 @@ def _build_role_config(
     # stored value cannot override it.
     role_config["agent_id"] = agent_id
 
+    if "allowed_hosts" in role_config:
+        hosts = role_config["allowed_hosts"]
+        if not isinstance(hosts, (list, tuple)) or not all(isinstance(h, str) for h in hosts):
+            raise ProfileRuntimeConfigurationError(
+                "stored runner_config allowed_hosts must be a list of strings"
+            )
+        role_config["allowed_hosts"] = list(hosts)
+
     existing = role_config.get("instructions")
     if existing is None:
         instructions: list[Any] = []

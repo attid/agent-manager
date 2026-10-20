@@ -42,7 +42,9 @@
   receive unrestricted access and are never handed to a child execution.
 - Execution tokens issued by `ExecutionPermissions`
   (`src/agent_manager/permissions.py`) are accepted only for the granted
-  action and resource. `resolve_requirement` maps every declared route, so a
+  action and resource. Scoped tokens with `tasks.write` can upload attachments
+  only to their assigned task (`POST /tasks/{task_id}/attachments`), receiving
+  `403 Forbidden` on foreign tasks. `resolve_requirement` maps every declared route, so a
   shell inside a sandbox cannot bypass the tool-exposure policy with `curl`.
   Operations additionally check the submitted `kind` and `target_id`, and a
   scoped caller can read only its own operations.
@@ -63,8 +65,10 @@
   `.git`) and must exist;
 - tool installs are mounted read-only; only the target project is writable
   (and only when `project_read_only` is false);
-- `network=false` disables sandbox networking entirely, including direct model
-  API access.
+- `network=false` or `"restricted"` isolates network via `--unshare-net` and
+  bridges connections through the host-side UDS egress forward proxy.
+  Authorized LLM providers and declared `allowed_hosts` are tunneled;
+  unauthorized destinations are rejected with HTTP 403 Forbidden.
 
 The workflow guard in `policy.mjs` blocks `git commit` and `git push` from
 `bash` unless explicitly allowed (`/session/allow_git_commit` or

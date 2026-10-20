@@ -12,7 +12,7 @@ import subprocess
 import sys
 import uuid
 
-from .core import Config, RunnerError, sandbox_command, snapshot, changed_files
+from .core import Config, RunnerError, sandbox_command, snapshot, changed_files, is_network_restricted
 from .credentials import resolve_pi_credential
 
 
@@ -100,8 +100,28 @@ def inbox_file_args(directory):
         size = item.stat().st_size
         is_image = ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif')
         if (is_image and size <= 15_000_000) or (not is_image and size <= 500_000):
-            file_args.append(f'@/workspace/inbox/{item.name}')
+            file_args.append(f'@/inbox/{item.name}')
         files_to_archive.append(item)
+    return file_args, files_to_archive
+
+
+def resolve_inbox_args(config):
+    """Determine CLI file arguments and archive candidates for the given Runner Config.
+
+    When config.inbox_dir is None, no attachments are mounted into /inbox, so
+    file_args is strictly [] and files_to_archive is strictly []. Any internal
+    repository inbox directory (<project>/inbox) is treated purely as repository
+    source files and is never scanned, passed to pi, or archived.
+
+    When config.inbox_dir is provided, files are formatted as '@/inbox/<name>'
+    and files_to_archive is strictly [] (external attachments are never archived).
+    """
+    if config.inbox_dir is not None:
+        file_args, _ = inbox_file_args(config.inbox_dir)
+        files_to_archive = []
+    else:
+        file_args = []
+        files_to_archive = []
     return file_args, files_to_archive
 
 
@@ -193,24 +213,34 @@ def execute(config_path, task=None, resume=None, turn_id=None):
                 raise RunnerError('Resume configuration must retain the same role and project')
             session_id = resume
             (directory / 'pi' / 'clarification.json').unlink(missing_ok=True)
-            task_text = task.read_text() if task else 'Continue the saved task. Inspect current files before resuming interrupted work.'
+            task_text = task.read_text(encoding='utf-8') if task else 'Continue the saved task. Inspect current files before resuming interrupted work.'
             attempt_number = previous.get('attempt', 1) + 1
         else:
             session_id = str(uuid.uuid4())
             directory = c.state_dir / 'sessions' / session_id
             directory.mkdir(parents=True, mode=0o700)
-            task_text = task.read_text()
-            (directory / 'task.md').write_text(task_text)
+            task_text = task.read_text(encoding='utf-8')
+            (directory / 'task.md').write_text(task_text, encoding='utf-8')
             (directory / 'config-path.txt').write_text(str(config_path))
             attempt_number = 1
         attempt = directory / 'attempts' / str(attempt_number)
         attempt.mkdir(parents=True, mode=0o700)
-        (attempt / 'task.md').write_text(task_text)
+        (attempt / 'task.md').write_text(task_text, encoding='utf-8')
         home = c.state_dir / 'home'
         home.mkdir(mode=0o700, exist_ok=True)
         # Only transcript storage, not runner metadata, is writable inside Pi.
         pi_dir = directory / 'pi'
         pi_dir.mkdir(mode=0o700, exist_ok=True)
+        (pi_dir / 'task.txt').write_text(task_text, encoding='utf-8')
+        if is_network_restricted(c.network):
+            from .proxy import EgressProxy
+            uds_path = pi_dir / 'egress_proxy.sock'
+            proxy = EgressProxy(uds_path, allowed_hosts=c.allowed_hosts)
+            proxy.start()
+            stack.callback(proxy.stop)
+            forwarder_src = Path(__file__).with_name('forwarder.py')
+            if forwarder_src.is_file():
+                shutil.copy2(forwarder_src, pi_dir / 'forwarder.py')
         # The policy extension scopes deferred outgoing requests with this
         # identity. A resumed session must never inherit the previous turn's
         # identity, so an absent value removes the marker.
@@ -279,17 +309,19 @@ def execute(config_path, task=None, resume=None, turn_id=None):
             if c.backend:
                 (pi_dir / "backend_api.json").write_text(json.dumps(c.backend, indent=2))
             command = build_pi_command(c, instruction_text=instruction_text)
-            # An explicit inbox_dir is the conversation/turn-scoped view. It
-            # replaces the legacy shared ``<project>/inbox`` scan; a text-only
-            # turn therefore passes no stale files. The disposable view is
-            # never archived here.
-            explicit_inbox = c.inbox_dir is not None
-            inbox_dir = c.inbox_dir if explicit_inbox else c.project / 'inbox'
-            file_args, files_to_archive = inbox_file_args(inbox_dir)
-            if explicit_inbox:
+            # An explicit inbox_dir is the conversation/turn-scoped view mounted at
+            # /inbox. The project repository at /workspace remains clean and un-shadowed.
+            # When inbox_dir is None, no attachments are passed to pi and no files are archived.
+            if c.inbox_dir is not None:
+                file_args, _ = inbox_file_args(c.inbox_dir)
+                files_to_archive = []
+            else:
+                file_args = []
                 files_to_archive = []
 
-            command += ['--', *file_args, task_text]
+            command += ['--', *file_args, '@/session/task.txt']
+            if is_network_restricted(c.network):
+                command = ['/usr/bin/python3', '/runner/forwarder.py', *command]
             os.write(fd, b'\0'.join(s.encode() for s in arguments) + b'\0')
             os.lseek(fd, 0, os.SEEK_SET)
             with (attempt / 'stderr.log').open('wb') as stderr, (attempt / 'events.jsonl').open('wb') as events:

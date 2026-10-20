@@ -107,7 +107,11 @@ def format_agent_profile_markdown(profile: AgentProfile) -> str:
     if isinstance(profile.runner_config, dict):
         tools = list(profile.runner_config.get("tools") or [])
 
-    policy = {key: profile.runner_config[key] for key in ("project", "workdir", "project_read_only", "network") if key in (profile.runner_config or {})}
+    policy = {
+        key: profile.runner_config[key]
+        for key in ("project", "workdir", "project_read_only", "network", "allowed_hosts")
+        if key in (profile.runner_config or {})
+    }
     policy_json = json.dumps(policy, ensure_ascii=False)
     skills_json = json.dumps(profile.skills or [], ensure_ascii=False)
 
@@ -410,8 +414,8 @@ class KnowledgeBase:
             "- `resolve_workspace(workspace, agent_id)`: проверка каталога, исполнителя и режима доступа.\n"
             "- `list_tasks(status, workspace)`: просмотр списка задач с фильтрацией.\n"
             "- `get_task(task_id)`: просмотр карточки задачи.\n"
-            "- `create_task(title, description, workspace, agent_id, status, task_type)`: постановка новой задачи.\n"
-            "- `update_task(task_id, status, title, description, workspace, agent_id)`: редактирование ТЗ или смена статуса.\n"
+            "- `create_task(title, description, workspace, agent_id, status, task_type, attachments)`: постановка новой задачи. Поле attachments позволяет передать список входных файлов/артефактов для монтирования в /inbox.\n"
+            "- `update_task(task_id, status, title, description, workspace, agent_id, attachments)`: редактирование ТЗ, смена статуса или добавление вложений.\n"
             "- `get_task_logs(task_id)`: просмотр логов сессий и отчётов ревьюера.\n"
             "- `resume_task_session(task_id, message)`: отправить разработчику дополнительные указания и продолжить его сессию.\n"
             "2. **Агенты:**\n"

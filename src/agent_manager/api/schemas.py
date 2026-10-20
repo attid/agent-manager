@@ -25,6 +25,22 @@ from ..storage.models import (
 )
 
 
+class TaskAttachment(BaseModel):
+    """One attachment specification for a task.
+
+    Can reference an existing task artifact by `task_id` and `name`, an
+    explicit file path on the host, or an uploaded artifact file.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    path: str | None = None
+    task_id: str | None = None
+    size: int | None = None
+    content_type: str | None = None
+
+
 class TaskCreate(BaseModel):
     """Payload accepted by ``POST /tasks``."""
 
@@ -36,6 +52,7 @@ class TaskCreate(BaseModel):
     agent_id: str | None = None
     workspace: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    attachments: list[TaskAttachment] | None = None
     id: str | None = None
 
 
@@ -93,6 +110,7 @@ class TaskRead(BaseModel):
     created_at: dt.datetime
     updated_at: dt.datetime
     metadata: dict[str, Any]
+    attachments: list[TaskAttachment] = Field(default_factory=list)
 
 
 def import_item_to_record(item: TaskImportItem) -> dict[str, Any]:
@@ -104,6 +122,11 @@ def import_item_to_record(item: TaskImportItem) -> dict[str, Any]:
     metadata = dict(item.metadata)
     for key, value in (item.model_extra or {}).items():
         metadata.setdefault(key, value)
+    if item.attachments is not None:
+        metadata["attachments"] = [
+            a.model_dump() if hasattr(a, "model_dump") else a
+            for a in item.attachments
+        ]
     return {
         "id": item.id,
         "title": item.title,
@@ -121,6 +144,12 @@ def task_to_read(task: Task) -> TaskRead:
     The ORM attribute is ``meta`` because ``metadata`` is reserved by
     SQLAlchemy; the API surface exposes ``metadata``.
     """
+    meta = task.meta or {}
+    raw_attachments = meta.get("attachments") or []
+    attachments = [
+        TaskAttachment(**att) if isinstance(att, dict) else att
+        for att in raw_attachments
+    ]
     return TaskRead(
         id=task.id,
         number=task.number,
@@ -131,7 +160,8 @@ def task_to_read(task: Task) -> TaskRead:
         agent_id=task.agent_id,
         created_at=task.created_at,
         updated_at=task.updated_at,
-        metadata=task.meta,
+        metadata=meta,
+        attachments=attachments,
     )
 
 
@@ -144,6 +174,7 @@ _TASK_MUTABLE_FIELDS = (
     "workspace",
     "agent_id",
     "metadata",
+    "attachments",
 )
 
 
@@ -163,6 +194,7 @@ class TaskPatch(BaseModel):
     agent_id: str | None = None
     workspace: str | None = None
     metadata: dict[str, Any] | None = None
+    attachments: list[TaskAttachment] | None = None
 
     def replacements(self) -> dict[str, Any]:
         """Return only the supplied mutable fields for the repository call."""

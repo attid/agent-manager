@@ -17,7 +17,7 @@ name is sanitized for the manifest and the disposable inbox view only.
 
 The canonical turn directory is durable across retries.  The ``views``
 directory is disposable: every execution recreates the current turn's view so
-the child sees exactly that turn's attachments in ``/workspace/inbox``.  The
+the child sees exactly that turn's attachments in ``/inbox``.  The
 conversation store itself is mounted read-only at ``/attachments`` so earlier
 same-conversation assets remain available but are clearly not current.
 """
@@ -98,7 +98,7 @@ class TurnAttachments:
             )
             for item in self.current:
                 lines.append(
-                    f"- /workspace/inbox/{item.inbox_name} "
+                    f"- /inbox/{item.inbox_name} "
                     f"({item.media_type}, {item.size} bytes, "
                     f"sha256={item.sha256})"
                 )
@@ -150,7 +150,7 @@ class TurnAttachments:
         self, item: StagedAttachment, *, current: bool
     ) -> dict[str, Any]:
         if current:
-            sandbox_path = f"/workspace/inbox/{item.inbox_name}"
+            sandbox_path = f"/inbox/{item.inbox_name}"
         else:
             relative = item.stored_path.relative_to(self.store_root)
             sandbox_path = f"/attachments/{relative.as_posix()}"

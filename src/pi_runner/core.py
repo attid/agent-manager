@@ -19,6 +19,17 @@ def overlap(a, b):
     return within(a, b) or within(b, a)
 
 
+def is_network_restricted(val: object) -> bool:
+    """Return True if network mode indicates restricted sandbox network.
+
+    Accepts boolean False or string 'restricted' / 'false' (case-insensitive).
+    Returns False for boolean True, 'unrestricted', 'true', or unspecified (True by default).
+    """
+    if isinstance(val, str):
+        return val.strip().lower() in ('restricted', 'false')
+    return val is False
+
+
 @dataclass
 class Config:
     agent_id: str
@@ -29,7 +40,7 @@ class Config:
     readonly_paths: list[Path]
     instructions: list[Path]
     tools: list[str]
-    network: bool
+    network: bool | str
     model: str | None
     provider: str | None
     credential_env: list[str]
@@ -45,6 +56,12 @@ class Config:
     inbox_dir: Path | None = None
     attachments_dir: Path | None = None
     outbox_dir: Path | None = None
+    allowed_hosts: list[str] = field(default_factory=list)
+
+    @property
+    def is_network_restricted(self) -> bool:
+        """Convenience property checking if this configuration isolates networking."""
+        return is_network_restricted(self.network)
 
     @classmethod
     def load(cls, path):
@@ -123,13 +140,32 @@ class Config:
                 for key, value in backend.items()
             ):
                 raise RunnerError('backend must be an object of string values')
+        # Network mode validation
+        raw_network = data.get('network', True)
+        if not isinstance(raw_network, (bool, str)):
+            raise RunnerError('network must be a boolean or "restricted"')
+        if isinstance(raw_network, str):
+            clean_net = raw_network.strip().lower()
+            if clean_net not in ('restricted', 'false', 'true', 'unrestricted'):
+                raise RunnerError(f'Invalid network mode: {raw_network!r}. Expected boolean or "restricted"')
+            network: bool | str = raw_network
+        else:
+            network = bool(raw_network)
+
+        # Allowed hosts validation
+        raw_allowed_hosts = data.get('allowed_hosts', [])
+        if not isinstance(raw_allowed_hosts, list) or not all(isinstance(h, str) for h in raw_allowed_hosts):
+            raise RunnerError('allowed_hosts must be an array of strings')
+        allowed_hosts = [h.strip() for h in raw_allowed_hosts if h.strip()]
+
         return cls(data['agent_id'], project, state, command, runtime, readonly,
                    instructions, data.get('tools', ['read', 'bash', 'edit', 'write']),
-                   data.get('network', True), data.get('model'), data.get('provider'),
+                   network, data.get('model'), data.get('provider'),
                    data.get('credential_env', []), str(wd.relative_to(project)), models_file,
                    data.get('pi_auth_provider'), data.get('project_read_only', False),
                    data.get('skills', []), data.get('allow_git_commit', False),
-                   knowledge_dir, skills_dir, backend, inbox_dir, attachments_dir, outbox_dir)
+                   knowledge_dir, skills_dir, backend, inbox_dir, attachments_dir, outbox_dir,
+                   allowed_hosts)
 
 
 def sandbox_command(config, home, session):
@@ -140,8 +176,17 @@ def sandbox_command(config, home, session):
     argv = [bwrap, '--die-with-parent', '--new-session', '--unshare-pid',
             '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try', '--cap-drop', 'ALL',
             '--clearenv', '--ro-bind', '/usr', '/usr']
-    if not c.network:
+    if is_network_restricted(c.network):
         argv += ['--unshare-net']
+        proxy_url = 'http://127.0.0.1:18777'
+        argv += [
+            '--setenv', 'HTTP_PROXY', proxy_url,
+            '--setenv', 'HTTPS_PROXY', proxy_url,
+            '--setenv', 'http_proxy', proxy_url,
+            '--setenv', 'https_proxy', proxy_url,
+            '--setenv', 'ALL_PROXY', proxy_url,
+            '--setenv', 'NODE_OPTIONS', '--use-env-proxy',
+        ]
     for name in ('bin', 'sbin', 'lib', 'lib64'):
         p = Path('/') / name
         if p.is_symlink():
@@ -162,6 +207,9 @@ def sandbox_command(config, home, session):
     if c.models_file:
         argv += ['--ro-bind', str(c.models_file), '/home/runner/.pi/agent/models.json']
     argv += ['--ro-bind', str(Path(__file__).with_name('policy.mjs')), '/runner/policy.mjs']
+    forwarder_py = Path(__file__).with_name('forwarder.py')
+    if forwarder_py.is_file():
+        argv += ['--ro-bind', str(forwarder_py), '/runner/forwarder.py']
     # Knowledge and skills are explicit per-instance mounts. The Runner never
     # invents them from the host HOME directory.
     if c.knowledge_dir is not None:
@@ -172,11 +220,11 @@ def sandbox_command(config, home, session):
     # the sandbox. Earlier same-conversation assets stay read-only and are
     # never passed to the model as if they arrived with this turn.
     if c.inbox_dir is not None:
-        argv += ['--ro-bind', str(c.inbox_dir), '/workspace/inbox']
+        argv += ['--ro-bind', str(c.inbox_dir), '/inbox']
     if c.attachments_dir is not None:
         argv += ['--ro-bind', str(c.attachments_dir), '/attachments']
     if c.outbox_dir is not None:
-        argv += ['--bind', str(c.outbox_dir), '/workspace/outbox']
+        argv += ['--bind', str(c.outbox_dir), '/outbox']
     dotgit = c.project / '.git'
     if dotgit.is_dir():
         if dotgit.is_symlink():

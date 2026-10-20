@@ -268,6 +268,7 @@ _ROUTE_RULES: tuple[tuple[str, str, str, str | None], ...] = (
     ("GET", "/tasks", TASKS_READ, None),
     ("GET", "/tasks/{task_id}", TASKS_READ, "task"),
     ("PATCH", "/tasks/{task_id}", TASKS_WRITE, "task"),
+    ("POST", "/tasks/{task_id}/attachments", TASKS_WRITE, "task"),
     ("POST", "/conversations", CONVERSATIONS_WRITE, None),
     ("GET", "/conversations", CONVERSATIONS_READ, None),
     ("GET", "/conversations/{conversation_id}", CONVERSATIONS_READ, "conversation"),

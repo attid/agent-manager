@@ -645,6 +645,15 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
     ),
     _endpoint(
         "POST",
+        "/tasks/{task_id}/attachments",
+        action="tasks.write",
+        response_schema="TaskArtifactRead",
+        success_statuses=(201,),
+        doc="task-lifecycle.md",
+        summary="upload a task attachment file",
+    ),
+    _endpoint(
+        "POST",
         "/imports/tasks",
         action="tasks.write",
         request_schema="TaskImportRequest",

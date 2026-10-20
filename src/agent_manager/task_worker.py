@@ -225,16 +225,71 @@ class TaskExecutionWorker:
                     inbox_dir = exec_dir / "inbox"
                     inbox_dir.mkdir(parents=True, exist_ok=True)
                     for att in attachments:
-                        att_name = att.get("name") or att.get("artifact_name")
-                        source_task_id = att.get("task_id")
-                        source_path = att.get("path")
-                        if not source_path and source_task_id and att_name:
-                            candidate = self.artifact_root / str(source_task_id) / "artifacts" / att_name
-                            if candidate.is_file():
-                                source_path = str(candidate)
-                        if source_path and Path(source_path).is_file():
-                            target_name = att_name or Path(source_path).name
-                            shutil.copy2(source_path, inbox_dir / target_name)
+                        if isinstance(att, dict):
+                            att_name = att.get("name") or att.get("artifact_name")
+                            source_task_id = att.get("task_id")
+                            source_path = att.get("path")
+                        else:
+                            att_name = getattr(att, "name", None) or getattr(att, "artifact_name", None)
+                            source_task_id = getattr(att, "task_id", None)
+                            source_path = getattr(att, "path", None)
+
+                        resolved_path: Path | None = None
+                        if source_path:
+                            sp = Path(source_path)
+                            if sp.is_file():
+                                resolved_path = sp
+
+                        if resolved_path is None:
+                            effective_task_id = source_task_id or task.id
+                            name_for_candidate = att_name or (Path(source_path).name if source_path else None)
+                            if effective_task_id and name_for_candidate:
+                                candidate = (
+                                    self.artifact_root
+                                    / str(effective_task_id)
+                                    / "artifacts"
+                                    / name_for_candidate
+                                )
+                                if candidate.is_file():
+                                    resolved_path = candidate
+
+                        if resolved_path is not None:
+                            raw_target_name = att_name or resolved_path.name
+                            safe_name = Path(raw_target_name).name
+                            if not safe_name or safe_name in {".", ".."}:
+                                safe_name = resolved_path.name
+                            dest_file = inbox_dir / safe_name
+                            try:
+                                if dest_file.exists():
+                                    try:
+                                        dest_file.unlink()
+                                    except OSError:
+                                        dest_file.chmod(0o644)
+                                shutil.copy2(resolved_path, dest_file)
+                                dest_file.chmod(0o444)
+                                logger.info(
+                                    "Staged attachment %s to %s (chmod 0o444) for task %s",
+                                    resolved_path,
+                                    dest_file,
+                                    task.id,
+                                )
+                            except Exception as err:
+                                logger.warning(
+                                    "Failed to stage attachment %s to %s for task %s: %s",
+                                    resolved_path,
+                                    dest_file,
+                                    task.id,
+                                    err,
+                                )
+                        else:
+                            logger.warning(
+                                "Attachment source file not found for task %s: att=%s, path=%s, candidate_task_id=%s, candidate_name=%s",
+                                task.id,
+                                att,
+                                source_path,
+                                source_task_id or task.id,
+                                att_name,
+                            )
                     runner_config["inbox_dir"] = str(inbox_dir)
 
                 instructions = list(runner_config.get("instructions") or [])
@@ -264,15 +319,26 @@ class TaskExecutionWorker:
                 )
                 if discovery_path is not None:
                     instructions.append(str(discovery_path))
+                # Propagate allowed_hosts from runner_config and task metadata
+                allowed_hosts = list(runner_config.get("allowed_hosts") or [])
+                task_meta = task.meta or {}
+                if task_meta.get("allowed_hosts") and isinstance(task_meta.get("allowed_hosts"), list):
+                    for host in task_meta["allowed_hosts"]:
+                        if isinstance(host, str) and host not in allowed_hosts:
+                            allowed_hosts.append(host)
+                if allowed_hosts:
+                    runner_config["allowed_hosts"] = allowed_hosts
+
                 workspace_file = exec_dir / "workspace.md"
                 workspace_file.write_text(
                     f"# Execution workspace\nHost directory: {project_dir}\n"
                     f"Sandbox root: /workspace\n"
                     f"Working directory: /workspace/{runner_config.get('workdir', '.')}\n"
                     f"Project read-only: {bool(runner_config.get('project_read_only', False))}\n"
-                    f"Sandbox network: {bool(runner_config.get('network', True))}\n"
-                    "Outbox: /workspace/outbox (writable artifacts; write output files, logs or reports here)\n"
-                    "Inbox: /workspace/inbox (read-only input attachments)\n"
+                    f"Sandbox network: {runner_config.get('network', True)}\n"
+                    f"Allowed hosts: {runner_config.get('allowed_hosts', [])}\n"
+                    "Outbox: /outbox (writable artifacts; write output files, logs or reports here)\n"
+                    "Inbox: /inbox (read-only input attachments)\n"
                     "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.\n",
                     encoding="utf-8",
                 )
@@ -287,7 +353,8 @@ class TaskExecutionWorker:
                     "host_path": str(project_dir),
                     "sandbox_path": "/workspace",
                     "project_read_only": bool(runner_config.get("project_read_only", False)),
-                    "network": bool(runner_config.get("network", True)),
+                    "network": runner_config.get("network", True),
+                    "allowed_hosts": list(runner_config.get("allowed_hosts") or []),
                     "provider": runtime_selection.provider,
                     "model": runtime_selection.model,
                 }

@@ -431,16 +431,30 @@ export default function policy(pi) {
     parameters: Type.Object({
       title: Type.String(), description: Type.Optional(Type.String()),
       workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String()),
-      status: Type.Optional(Type.String()), task_type: Type.Optional(Type.String())
+      status: Type.Optional(Type.String()), task_type: Type.Optional(Type.String()),
+      attachments: Type.Optional(Type.Array(
+        Type.Object({
+          name: Type.Optional(Type.String({ description: "Target filename inside /inbox" })),
+          path: Type.Optional(Type.String({ description: "Host filesystem path or existing file" })),
+          task_id: Type.Optional(Type.String({ description: "Source task ID to copy artifact from" })),
+          size: Type.Optional(Type.Integer({ description: "File size in bytes" })),
+          content_type: Type.Optional(Type.String({ description: "MIME type" }))
+        }, { additionalProperties: true }),
+        { description: "Input files or artifacts to stage read-only into /inbox for the task" }
+      ))
     }),
     async execute(toolCallId, params) {
       const check = await executionPreflight(params);
       if (check.status === "failed") return toolResult(check);
-      const created = await backendRequest("POST", "/tasks", {
+      const taskBody = {
         title: params.title, description: params.description || "",
         workspace: check.data.host_path, agent_id: check.data.agent_id,
         status: params.status || "incoming", metadata: { task_type: params.task_type || "coding" }
-      });
+      };
+      if (params.attachments !== undefined) {
+        taskBody.attachments = params.attachments;
+      }
+      const created = await backendRequest("POST", "/tasks", taskBody);
       if (created.status !== "failed") created.execution = check.data;
       return toolResult(created);
     }
@@ -451,11 +465,21 @@ export default function policy(pi) {
     description: "Edit a task, its executor or workspace. Setting in_progress starts execution. Verify the effective workspace and agent before routing changes or launch.",
     parameters: Type.Object({
       task_id: Type.String(), status: Type.Optional(Type.String()), title: Type.Optional(Type.String()),
-      description: Type.Optional(Type.String()), workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String())
+      description: Type.Optional(Type.String()), workspace: Type.Optional(Type.String()), agent_id: Type.Optional(Type.String()),
+      attachments: Type.Optional(Type.Array(
+        Type.Object({
+          name: Type.Optional(Type.String({ description: "Target filename inside /inbox" })),
+          path: Type.Optional(Type.String({ description: "Host filesystem path or existing file" })),
+          task_id: Type.Optional(Type.String({ description: "Source task ID to copy artifact from" })),
+          size: Type.Optional(Type.Integer({ description: "File size in bytes" })),
+          content_type: Type.Optional(Type.String({ description: "MIME type" }))
+        }, { additionalProperties: true }),
+        { description: "Input files or artifacts to stage read-only into /inbox for the task" }
+      ))
     }),
     async execute(toolCallId, params) {
       const patch = {};
-      for (const key of ["status", "title", "description", "workspace", "agent_id"]) {
+      for (const key of ["status", "title", "description", "workspace", "agent_id", "attachments"]) {
         if (params[key] !== undefined) patch[key] = params[key];
       }
       let execution;

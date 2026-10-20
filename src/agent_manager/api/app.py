@@ -38,10 +38,12 @@ import sqlalchemy as sa
 from fastapi import (
     Depends,
     FastAPI,
+    File,
     HTTPException,
     Query,
     Request,
     Response,
+    UploadFile,
     status,
 )
 from fastapi.responses import JSONResponse
@@ -981,7 +983,8 @@ def create_app(
             "host_path": str(host), "sandbox_path": "/workspace", "agent_id": selected_agent,
             "profile_revision": profile.revision if profile else None,
             "project_read_only": bool(cfg.get("project_read_only", False)),
-            "network": bool(cfg.get("network", True)),
+            "network": cfg.get("network", True),
+            "allowed_hosts": list(cfg.get("allowed_hosts") or []),
         }
 
     @app.post(
@@ -1001,6 +1004,7 @@ def create_app(
                 workspace=payload.workspace,
                 agent_id=payload.agent_id,
                 metadata=payload.metadata,
+                attachments=payload.attachments,
                 id=payload.id,
             )
         except DuplicateTaskIdError as error:
@@ -1083,6 +1087,96 @@ def create_app(
                             path=str(item),
                         ))
         return TaskArtifactListResponse(task_id=task_id, artifacts=artifacts)
+
+    @app.post(
+        "/tasks/{task_id}/attachments",
+        response_model=TaskArtifactRead,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def upload_task_attachment(
+        task_id: str,
+        request: Request,
+        file: UploadFile = File(...),
+        repository: TaskRepository = Depends(get_repository),
+    ) -> TaskArtifactRead:
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="task not found",
+            )
+
+        raw_filename = file.filename or "attachment"
+        safe_name = Path(raw_filename).name
+        safe_name = "".join(
+            c for c in safe_name if c.isprintable() and c not in "/\\\x00"
+        ).strip()
+        if not safe_name or safe_name in {".", ".."}:
+            safe_name = "attachment"
+
+        artifact_root = (
+            getattr(request.app.state, "artifact_root", None)
+            if request else None
+        ) or Path("~/.local/share/agent-manager/artifacts").expanduser()
+        task_artifacts_dir = Path(artifact_root) / str(task.id) / "artifacts"
+        task_artifacts_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = task_artifacts_dir / safe_name
+
+        tmp_path = dest_path.with_name(f"{dest_path.name}.tmp.{uuid.uuid4().hex[:8]}")
+        total_size = 0
+        try:
+            with open(tmp_path, "wb") as buffer:
+                while True:
+                    chunk = await file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
+                    total_size += len(chunk)
+                buffer.flush()
+                os.fsync(buffer.fileno())
+            if dest_path.exists():
+                try:
+                    dest_path.chmod(0o644)
+                except OSError:
+                    pass
+            os.replace(tmp_path, dest_path)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+        content_type = file.content_type or "application/octet-stream"
+
+        meta = dict(task.meta or {})
+        existing_attachments = list(meta.get("attachments") or [])
+        attachment_record = {
+            "name": safe_name,
+            "path": str(dest_path),
+            "size": total_size,
+            "content_type": content_type,
+            "task_id": str(task.id),
+        }
+
+        updated = False
+        for idx, att in enumerate(existing_attachments):
+            att_name = att.get("name") if isinstance(att, dict) else getattr(att, "name", None)
+            if att_name == safe_name:
+                existing_attachments[idx] = attachment_record
+                updated = True
+                break
+        if not updated:
+            existing_attachments.append(attachment_record)
+
+        repository.update(task.id, attachments=existing_attachments)
+
+        return TaskArtifactRead(
+            name=safe_name,
+            size=total_size,
+            path=str(dest_path),
+            content_type=content_type,
+        )
 
     @app.get("/tasks/{task_id}/artifacts/{artifact_name:path}")
     def get_task_artifact(

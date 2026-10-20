@@ -17,6 +17,7 @@ Current surface (`src/agent_manager/api/app.py`):
 | `GET` | `/tasks` | `200` | Filters: `status`, `workspace`, `limit`, `offset`. |
 | `GET` | `/tasks/{task_id}` | `200`, `404` | Read one task. |
 | `PATCH` | `/tasks/{task_id}` | `200`, `404` | Partial update. |
+| `POST` | `/tasks/{task_id}/attachments` | `201`, `401`, `403`, `404`, `422` | Authenticated multipart/form-data upload route; records file in task artifacts and metadata. |
 | `POST` | `/imports/tasks` | `200` | Idempotent historical import. |
 | `POST` | `/conversations` | `201`, `409` | Create conversation. |
 | `GET` | `/conversations` | `200` | List. |
@@ -99,7 +100,7 @@ behaviour:
 
 `list_tasks`, `get_task`, `get_task_logs`, `resolve_workspace`, `create_task`,
 `update_task`, `resume_task_session`, `list_agents`, `get_agent`,
-`update_agent`, `create_agent`.
+`update_agent`, `create_agent`. Note: `create_task` and `update_task` accept an optional typed `attachments` array to stage input files into `/inbox`.
 
 **Durable operation submissions** (return the operation; inspect it to learn
 the outcome): `trigger_review`, `trigger_analysis`, `trigger_commit_push`,

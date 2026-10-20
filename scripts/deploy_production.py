@@ -179,7 +179,7 @@ def verify_prod_installation(prod_venv: Path, prod_app: Path) -> None:
     cmd = [
         str(python_bin),
         "-c",
-        "import agent_manager.runner, aiogram, fastapi, sqlalchemy, alembic, httpx; print('INTEGRITY_OK')",
+        "import agent_manager.runner, aiogram, fastapi, sqlalchemy, alembic, httpx, multipart; print('INTEGRITY_OK')",
     ]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(prod_app / "src")

@@ -368,6 +368,8 @@ def test_trace_observes_tool_calls_paths_errors_and_redacts_secrets(
             item["id"] == "trace:task" and item["kind"] == "trace"
             for item in evidence["items"]
         )
+        assert all(item.get("content") is None for item in evidence["items"])
+        assert all(set(item.keys()) == {"id", "kind"} for item in evidence["items"])
         assert calls  # local sanity: the observed calls are non-empty
     finally:
         database.dispose()

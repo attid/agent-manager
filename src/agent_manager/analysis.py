@@ -366,38 +366,13 @@ def build_evidence_package(
 
     items: list[dict[str, Any]] = []
 
-    def add(item_id: str, kind: str, content: Any) -> None:
-        items.append(
-            {"id": item_id, "kind": kind, "content": _jsonable(content)}
-        )
+    def add(item_id: str, kind: str) -> None:
+        items.append({"id": item_id, "kind": kind})
 
     meta = dict(task.meta or {})
-    add(
-        f"task:{task.id}",
-        "task",
-        {
-            "id": task.id,
-            "title": task.title,
-            "description": task.description,
-            "status": task.status,
-            "agent_id": task.agent_id,
-            "workspace": task.workspace,
-            "metadata": meta,
-        },
-    )
+    add(f"task:{task.id}", "task")
     if profile is not None:
-        add(
-            f"profile:{profile.agent_id}@{profile.revision}",
-            "profile",
-            {
-                "agent_id": profile.agent_id,
-                "revision": profile.revision,
-                "name": profile.name,
-                "role": profile.role,
-                "system_prompt": profile.system_prompt,
-                "runner_config": profile.runner_config,
-            },
-        )
+        add(f"profile:{profile.agent_id}@{profile.revision}", "profile")
 
     operation_items: list[dict[str, Any]] = []
     for operation in operations:
@@ -416,17 +391,17 @@ def build_evidence_package(
             "metadata": operation.meta or {},
         }
         operation_items.append(entry)
-        add(f"operation:{operation.id}", "operation", entry)
+        add(f"operation:{operation.id}", "operation")
 
     reviews = _collect_review_evidence(task, operations)
     for review in reviews:
-        add(review["id"], "review", review)
+        add(review["id"], "review")
 
     trace = build_task_trace(task, artifact_roots or ())
-    add("trace:task", "trace", trace)
+    add("trace:task", "trace")
 
     metrics = _collect_metrics(task, operations)
-    add("metrics:task", "metrics", metrics)
+    add("metrics:task", "metrics")
 
     return {
         "task_id": task.id,
@@ -445,6 +420,8 @@ def build_evidence_package(
                 "revision": profile.revision,
                 "name": profile.name,
                 "role": profile.role,
+                "system_prompt": profile.system_prompt,
+                "runner_config": profile.runner_config,
             }
             if profile is not None
             else None

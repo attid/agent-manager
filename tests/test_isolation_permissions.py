@@ -406,3 +406,92 @@ def test_worker_issues_scoped_backend_and_never_admin_token(
         assert "administrative-token" not in role_text
     finally:
         db.dispose()
+
+
+def test_scoped_task_write_token_can_upload_to_own_task_and_forbidden_on_foreign(
+    migrated_db: Path,
+) -> None:
+    """An execution token scoped to task A can upload attachments to task A,
+    but is strictly forbidden (HTTP 403) from uploading to task B.
+    """
+    permissions = ExecutionPermissions()
+    with _admin_client(migrated_db, permissions) as client:
+        admin = {"Authorization": "Bearer administrative-token"}
+        first = client.post(
+            "/tasks", json={"title": "own task", "workspace": "/tmp"}, headers=admin
+        ).json()["id"]
+        second = client.post(
+            "/tasks", json={"title": "foreign task", "workspace": "/tmp"}, headers=admin
+        ).json()["id"]
+
+    actions = actions_for_tools(["update_task"])
+    assert "tasks.write" in actions
+    grant = permissions.issue(
+        agent_id="developer",
+        actions=actions,
+        resources=resources_for_execution(actions, task_id=first, agent_id="developer"),
+        label=f"task:{first}",
+    )
+
+    with _admin_client(migrated_db, permissions) as client:
+        headers = _scoped_headers(grant.token)
+        files = {"file": ("screenshot.png", b"\x89PNG\r\n\x1a\ntest-data", "image/png")}
+
+        # 1. Upload to own task must succeed with 201 Created
+        res_own = client.post(
+            f"/tasks/{first}/attachments",
+            files=files,
+            headers=headers,
+        )
+        assert res_own.status_code == 201, res_own.text
+        data = res_own.json()
+        assert data["name"] == "screenshot.png"
+        assert data["size"] == len(b"\x89PNG\r\n\x1a\ntest-data")
+        assert data["content_type"] == "image/png"
+        assert "artifacts" in data["path"]
+
+        # 2. Upload to foreign task must be rejected with 403 Forbidden
+        files_foreign = {"file": ("exploit.png", b"data", "image/png")}
+        res_foreign = client.post(
+            f"/tasks/{second}/attachments",
+            files=files_foreign,
+            headers=headers,
+        )
+        assert res_foreign.status_code == 403, res_foreign.text
+
+        # 3. Collection route POST /tasks must also be rejected with 403
+        res_create = client.post(
+            "/tasks",
+            json={"title": "unauthorized creation"},
+            headers=headers,
+        )
+        assert res_create.status_code == 403
+
+
+def test_reviewer_token_cannot_upload_attachment(migrated_db: Path) -> None:
+    """A filesystem-only reviewer token lacks tasks.write and cannot upload attachments."""
+    permissions = ExecutionPermissions()
+    with _admin_client(migrated_db, permissions) as client:
+        admin = {"Authorization": "Bearer administrative-token"}
+        task = client.post(
+            "/tasks", json={"title": "review task", "workspace": "/tmp"}, headers=admin
+        ).json()["id"]
+
+    actions = actions_for_tools(["read", "bash"])
+    grant = permissions.issue(
+        agent_id="system-code-reviewer",
+        actions=actions,
+        resources=resources_for_execution(actions, task_id=task),
+        label="reviewer",
+    )
+
+    with _admin_client(migrated_db, permissions) as client:
+        headers = _scoped_headers(grant.token)
+        files = {"file": ("report.md", b"# Report", "text/markdown")}
+        res = client.post(
+            f"/tasks/{task}/attachments",
+            files=files,
+            headers=headers,
+        )
+        assert res.status_code == 403
+

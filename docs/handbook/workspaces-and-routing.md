@@ -55,7 +55,7 @@ An `AgentProfile.runner_config` carries the execution policy:
 | `tools` | Tool names exposed to the model for this profile. |
 | `skills` | Skill names bound to the profile. |
 | `state_dir` | Absolute Runner state directory; must be outside the project. |
-| `inbox_dir` | Generated per-execution inbox view. It replaces the shared `<project>/inbox` scan and is mounted read-only at `/workspace/inbox`. Persistent conversations set it to the current turn's attachment view. |
+| `inbox_dir` | Generated per-execution inbox view. It replaces the shared `<project>/inbox` scan and is mounted read-only at `/inbox`. Persistent conversations set it to the current turn's attachment view. |
 | `attachments_dir` | Generated read-only conversation store mounted at `/attachments`; contains earlier same-conversation assets but never current ones. |
 | `pi_command`, `runtime_paths` | Runner executable and dependency mounts. |
 | `provider`, `model`, `pi_auth_provider`, `models_file` | Late-bound runtime selection (see [Profiles, runtime and skills](profiles-runtime-skills.md)). |
@@ -67,9 +67,13 @@ directory other than `/`, the real HOME and its parents are rejected,
 system data, credential directories or the project itself.
 
 `project_read_only=true` is a real filesystem boundary. Exposing `bash` does
-not make a read-only project writable. `network=false` disables sandbox
-networking entirely, including direct model API access; there is no
-"model on, tools off" mode.
+not make a read-only project writable. When sandboxed agents run with restricted
+network (`network: false` or `"restricted"`), host network access is isolated
+via Bubblewrap network namespace (`--unshare-net`). A host-side forward proxy on a
+Unix domain socket (`/session/egress_proxy.sock`) enforces domain allowlisting:
+trusted LLM provider domains by default plus any explicit destinations declared in
+`runner_config.allowed_hosts` (e.g. `eurmtl.me`). Requests to unauthorized destinations
+receive HTTP 403 Forbidden.
 
 ## Execution context stored on tasks
 

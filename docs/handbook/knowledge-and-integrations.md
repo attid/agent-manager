@@ -111,7 +111,7 @@ Drain targets:
   keys are hashes of server-side ids; raw inbound basenames and paths are
   never used for storage.
 - The child Runner receives only the current turn's files as
-  `/workspace/inbox` (`runner_config.inbox_dir`). The profile's shared
+  `/inbox` (`runner_config.inbox_dir`). The profile's shared
   `project/inbox` is never scanned for a persistent conversation, so a new or
   reset conversation cannot inherit legacy files. Earlier attachments from
   the same conversation are mounted read-only at `/attachments`
@@ -121,6 +121,7 @@ Drain targets:
   attachment paths with hashes, and prior same-conversation assets. Prompt
   and metadata agree, and retry of the same turn reuses the canonical staged
   bytes even if the Telegram source file is gone.
+- Task attachments (declared on `TaskCreate` / `TaskPatch` or uploaded via `POST /tasks/{task_id}/attachments`) are stored in the task's artifact directory and staged read-only into `/inbox` (chmod `0o444`) for the executing task worker.
 
 ## Telegram
 

@@ -1946,7 +1946,7 @@ def test_current_attachment_reaches_child_and_stays_conversation_scoped(
         assert first_probe["inbox_files"][0]["bytes_hex"] == (
             b"first-current-bytes".hex()
         )
-        assert "/workspace/inbox/" in first_probe["task_text"]
+        assert "/inbox/" in first_probe["task_text"]
         assert "Current message attachments (read-only, passed with this turn):" in (
             first_probe["task_text"]
         )
@@ -2098,7 +2098,7 @@ def test_attachment_retry_after_prelaunch_failure_reuses_staged_bytes(
         assert probe["inbox_files"][0]["bytes_hex"] == (
             b"retry-stable-ogg".hex()
         )
-        assert "/workspace/inbox/" in probe["task_text"]
+        assert "/inbox/" in probe["task_text"]
     finally:
         database.dispose()
 

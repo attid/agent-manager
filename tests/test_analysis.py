@@ -24,6 +24,7 @@ from agent_manager.analysis import (
     AnalyzerRunResult,
     RecommendationConflictError,
     RecommendationService,
+    _render_instructions,
     build_evidence_package,
     content_hash,
     parse_analyzer_output,
@@ -228,6 +229,25 @@ def test_evidence_package_is_bounded_to_the_target_task(
         item_ids = {item["id"] for item in evidence["items"]}
         assert "profile:developer@1" in item_ids
         assert "profile:other-agent@1" not in item_ids
+
+        # Milestone 2 compaction invariants:
+        assert len(evidence["items"]) > 0
+        for item in evidence["items"]:
+            assert "id" in item
+            assert "kind" in item
+            assert item.get("content") is None
+            assert "content" not in item
+            assert set(item.keys()) == {"id", "kind"}
+
+        # Milestone 2 profile enrichment: top-level profile retains system_prompt and runner_config
+        assert evidence["profile"] is not None
+        assert evidence["profile"]["agent_id"] == "developer"
+        assert evidence["profile"]["revision"] == 1
+        assert evidence["profile"]["system_prompt"] == "Original prompt."
+        assert evidence["profile"]["runner_config"] == {
+            "project": "/tmp/project",
+            "project_read_only": True,
+        }
     finally:
         database.dispose()
 
@@ -1150,5 +1170,406 @@ def test_analysis_rejects_recommendation_target_outside_knowledge_base(
 
         assert not (tmp_path / "escape").exists()
         assert not pathlib.Path("/tmp/agent-manager-escape").exists()
+    finally:
+        database.dispose()
+
+
+# -- Milestone 2: evidence package compaction & Task #40 verification ---
+
+
+def test_evidence_package_compaction_and_profile_enrichment(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Milestone 2: build_evidence_package must compact items to lightweight references.
+
+    Items must contain only 'id' and 'kind' (no 'content'). Top-level 'profile'
+    must contain 'system_prompt' and 'runner_config'.
+    """
+    database = Database.from_path(migrated_db)
+    try:
+        tasks = TaskRepository(database)
+        target = tasks.create(
+            id="task-compaction",
+            title="Compaction verification task",
+            agent_id="developer",
+            description="Detailed task description",
+            metadata={"review": [{"note": "Review item 1", "score": 9}]},
+        )
+        _make_profile(
+            database,
+            "developer",
+            prompt="Specialized system prompt instructions.",
+        )
+        operations = OperationRepository(database)
+        operations.submit(
+            kind="review",
+            target_id="task-compaction",
+            input={"check": "lint", "status": "clean"},
+        )
+
+        evidence = build_evidence_package(database, target)
+
+        # 1. Verify top-level profile contains system_prompt and runner_config
+        profile_data = evidence["profile"]
+        assert profile_data is not None
+        assert profile_data["agent_id"] == "developer"
+        assert profile_data["revision"] == 1
+        assert profile_data["name"] == "Developer"
+        assert profile_data["role"] == "developer"
+        assert profile_data["system_prompt"] == "Specialized system prompt instructions."
+        assert profile_data["runner_config"] == {
+            "project": "/tmp/project",
+            "project_read_only": True,
+        }
+
+        # 2. Verify all item kinds are present in items catalog
+        assert len(evidence["items"]) >= 5
+        kinds = {item["kind"] for item in evidence["items"]}
+        assert {"task", "profile", "operation", "review", "trace", "metrics"}.issubset(kinds)
+
+        # 3. Invariant: every item in evidence["items"] has only id and kind, NO content
+        for item in evidence["items"]:
+            assert "id" in item and isinstance(item["id"], str) and item["id"]
+            assert "kind" in item and isinstance(item["kind"], str) and item["kind"]
+            assert item.get("content") is None
+            assert "content" not in item
+            assert set(item.keys()) == {"id", "kind"}
+
+        # 4. Invariant: canonical data lives in top-level keys
+        assert evidence["task"]["id"] == "task-compaction"
+        assert evidence["task"]["description"] == "Detailed task description"
+        assert len(evidence["operations"]) == 1
+        assert evidence["operations"][0]["kind"] == "review"
+        assert len(evidence["reviews"]) == 2  # 1 from metadata, 1 from operation
+        assert evidence["trace"]["status"] == "unavailable"  # no artifact roots provided
+        assert "operation_count" in evidence["metrics"]
+
+        # 5. Edge case: task without profile has profile=None and no profile item
+        unassigned_task = tasks.create(id="task-unassigned", title="No profile")
+        unassigned_evidence = build_evidence_package(database, unassigned_task)
+        assert unassigned_evidence["profile"] is None
+        assert not any(it["kind"] == "profile" for it in unassigned_evidence["items"])
+        for item in unassigned_evidence["items"]:
+            assert item.get("content") is None
+            assert set(item.keys()) == {"id", "kind"}
+    finally:
+        database.dispose()
+
+
+def test_evidence_package_payload_reduction_on_large_trace(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Milestone 2 / Task #40: verify significant payload size reduction on large trace."""
+    database = Database.from_path(migrated_db)
+    try:
+        tasks = TaskRepository(database)
+        profiles = AgentProfileRepository(database)
+        operations = OperationRepository(database)
+
+        # Substantial system prompt (mimicking production agent contract)
+        system_prompt = (
+            "You are an autonomous engineering agent operating within a sandbox.\n"
+            "Constraints:\n"
+            "- Always verify before proposing changes.\n"
+            "- Follow the five-component handoff report standard.\n"
+        ) * 100  # ~12 KB
+
+        profiles.create(
+            agent_id="complex-agent",
+            name="Complex Agent",
+            role="developer",
+            system_prompt=system_prompt,
+            runner_config={
+                "project": "/tmp/project",
+                "network": False,
+                "allowed_hosts": ["eurmtl.me", "api.z-ai.io"],
+            },
+        )
+
+        task = tasks.create(
+            id="task-large-trace",
+            title="Simulated Task #40 trace workload",
+            agent_id="complex-agent",
+            description="Large task description with detailed instructions.\n" * 50,
+            metadata={
+                "review": [
+                    {"note": f"Code review round {i}", "approved": True}
+                    for i in range(5)
+                ]
+            },
+        )
+
+        # Submit multiple operations
+        for i in range(15):
+            operations.submit(
+                kind="review",
+                target_id=task.id,
+                input={
+                    "step": i,
+                    "patch": f"diff --git a/file_{i}.py b/file_{i}.py\n+print('line {i}')\n" * 20,
+                },
+            )
+
+        # Set up realistic diagnostic trace artifacts
+        task_dir = tmp_path / "tasks" / f"task_{task.id}_hash"
+        session_file = task_dir / "state" / "sessions" / "session-1" / "pi" / "session.jsonl"
+        events_file = task_dir / "state" / "sessions" / "session-1" / "pi" / "events.jsonl"
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+
+        session_records = []
+        events_records = []
+        for i in range(40):
+            call_id = f"call_{i:03d}"
+            session_records.append({
+                "type": "message",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_call",
+                            "id": call_id,
+                            "name": "bash",
+                            "arguments": {
+                                "command": f"pytest tests/test_module_{i}.py -k 'test_step_{i}'",
+                                "cwd": "/workspace",
+                            },
+                        }
+                    ],
+                },
+            })
+            events_records.append({
+                "type": "tool_execution_start",
+                "toolCallId": call_id,
+                "toolName": "bash",
+                "args": {"command": f"pytest tests/test_module_{i}.py -k 'test_step_{i}'"},
+            })
+            events_records.append({
+                "type": "tool_execution_end",
+                "toolCallId": call_id,
+                "isError": False,
+                "durationMs": 150 + i,
+            })
+
+        session_file.write_text(
+            "\n".join(json.dumps(r) for r in session_records) + "\n",
+            encoding="utf-8",
+        )
+        events_file.write_text(
+            "\n".join(json.dumps(r) for r in events_records) + "\n",
+            encoding="utf-8",
+        )
+
+        # Build compacted evidence package
+        compacted_evidence = build_evidence_package(
+            database, task, artifact_roots=[tmp_path / "tasks"]
+        )
+
+        # 1. Structural assertions
+        assert compacted_evidence["profile"]["system_prompt"] == system_prompt
+        assert compacted_evidence["profile"]["runner_config"]["allowed_hosts"] == [
+            "eurmtl.me",
+            "api.z-ai.io",
+        ]
+        assert len(compacted_evidence["items"]) > 20
+        for item in compacted_evidence["items"]:
+            assert item.get("content") is None
+            assert set(item.keys()) == {"id", "kind"}
+
+        # 2. Simulate legacy duplicate structure for exact quantitative comparison
+        legacy_items = []
+        legacy_items.append({
+            "id": f"task:{task.id}",
+            "kind": "task",
+            "content": compacted_evidence["task"],
+        })
+        legacy_items.append({
+            "id": f"profile:complex-agent@1",
+            "kind": "profile",
+            "content": compacted_evidence["profile"],
+        })
+        for op in compacted_evidence["operations"]:
+            legacy_items.append({
+                "id": f"operation:{op['id']}",
+                "kind": "operation",
+                "content": op,
+            })
+        for rev in compacted_evidence["reviews"]:
+            legacy_items.append({
+                "id": rev["id"],
+                "kind": "review",
+                "content": rev,
+            })
+        legacy_items.append({
+            "id": "trace:task",
+            "kind": "trace",
+            "content": compacted_evidence["trace"],
+        })
+        legacy_items.append({
+            "id": "metrics:task",
+            "kind": "metrics",
+            "content": compacted_evidence["metrics"],
+        })
+
+        legacy_evidence = dict(compacted_evidence)
+        legacy_evidence["items"] = legacy_items
+
+        compacted_bytes = len(json.dumps(compacted_evidence, ensure_ascii=False))
+        legacy_bytes = len(json.dumps(legacy_evidence, ensure_ascii=False))
+
+        # 3. Assert substantial reduction: at least 35% smaller and >15KB savings
+        assert compacted_bytes < legacy_bytes * 0.65, (
+            f"Expected compacted bytes ({compacted_bytes}) to be < 65% of legacy ({legacy_bytes})"
+        )
+        assert (legacy_bytes - compacted_bytes) > 15_000, (
+            f"Expected savings > 15KB, got {legacy_bytes - compacted_bytes} bytes"
+        )
+    finally:
+        database.dispose()
+
+
+def test_task40_evidence_package_compaction_and_manifest(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Task #40 evidence package exhibits zero content duplication and proper manifest format."""
+    database = Database.from_path(migrated_db)
+    try:
+        tasks = TaskRepository(database)
+        profiles = AgentProfileRepository(database)
+        profiles.create(
+            agent_id="developer",
+            name="Developer Agent",
+            role="coder",
+            system_prompt="You are a senior systems engineer.\n" + ("Guidelines: Write robust code.\n" * 50),
+            runner_config={"model": "deepseek-coder", "provider": "deepseek", "temperature": 0.2},
+        )
+        task = tasks.create(
+            id="task-40",
+            title="Complex multi-stage refactoring and database migration",
+            agent_id="developer",
+            description="Perform large-scale codebase transformation with 100+ operations and tool invocations.",
+            metadata={"priority": "high", "attempt": 3, "tags": ["m2", "migration"]},
+        )
+
+        ops = OperationRepository(database)
+        for i in range(10):
+            ops.submit(
+                kind="task_execution" if i % 2 == 0 else "review",
+                target_id=task.id,
+                input={"step": i, "description": f"Executing sub-stage {i} with extensive parameters"},
+                metadata={"iteration": i, "runtime_ms": 1200 + i * 150},
+            )
+
+        evidence = build_evidence_package(database, task)
+
+        # Assertion 1: All items in evidence["items"] must NOT contain "content"
+        assert "items" in evidence
+        assert len(evidence["items"]) >= 12  # task + profile + 10 ops + reviews + trace + metrics
+        for item in evidence["items"]:
+            assert "id" in item, f"Missing 'id' in item: {item}"
+            assert "kind" in item, f"Missing 'kind' in item: {item}"
+            assert item.get("content") is None, (
+                f"Compaction violation: item {item['id']} ({item['kind']}) still contains 'content'!"
+            )
+            assert set(item.keys()) == {"id", "kind"}
+
+        # Assertion 2: Top-level profile must contain system_prompt and runner_config
+        assert evidence["profile"] is not None
+        assert evidence["profile"]["agent_id"] == "developer"
+        assert "system_prompt" in evidence["profile"]
+        assert "runner_config" in evidence["profile"]
+        assert "Guidelines: Write robust code." in evidence["profile"]["system_prompt"]
+        assert evidence["profile"]["runner_config"] == {
+            "model": "deepseek-coder",
+            "provider": "deepseek",
+            "temperature": 0.2,
+        }
+
+        # Assertion 3: Top-level canonical keys exist and contain full data
+        assert evidence["task"]["id"] == "task-40"
+        assert len(evidence["operations"]) == 10
+        assert "trace" in evidence
+        assert "metrics" in evidence
+    finally:
+        database.dispose()
+
+
+def test_task40_prompt_rendering_and_serialization(
+    migrated_db: pathlib.Path,
+) -> None:
+    """Task #40 instructions render without error and contain valid parseable JSON."""
+    database = Database.from_path(migrated_db)
+    try:
+        tasks = TaskRepository(database)
+        _make_profile(database, "developer")
+        task = tasks.create(id="task-40", title="Refactoring task", agent_id="developer")
+
+        evidence = build_evidence_package(database, task)
+        instructions = _render_instructions(task, evidence)
+
+        # 1. Check prompt structure
+        assert f"Task: {task.id} — {task.title}" in instructions
+        assert "Evidence package (JSON):" in instructions
+        assert "Return exactly one JSON object and no prose outside it." in instructions
+
+        # 2. Extract and parse the embedded JSON
+        start_marker = "Evidence package (JSON):\n"
+        end_marker = "\n\nReturn exactly one JSON object"
+        start_idx = instructions.find(start_marker) + len(start_marker)
+        end_idx = instructions.find(end_marker)
+        embedded_json = instructions[start_idx:end_idx].strip()
+
+        parsed_evidence = json.loads(embedded_json)
+        assert parsed_evidence["task_id"] == "task-40"
+        assert parsed_evidence["task"]["title"] == "Refactoring task"
+    finally:
+        database.dispose()
+
+
+def test_task40_large_prompt_execution_succeeds_without_errno7(
+    migrated_db: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """Analysis operation with prompt > 132 KiB executes successfully via fake_pi_runner."""
+    database = Database.from_path(migrated_db)
+    try:
+        tasks = TaskRepository(database)
+        task = tasks.create(id="task-40", title="Massive Trace Task")
+
+        # Register system-log-analyzer profile
+        profiles = AgentProfileRepository(database)
+        profiles.create(
+            agent_id=ANALYZER_AGENT_ID,
+            name="System Log Analyzer",
+            role="analyzer",
+            system_prompt="Analyze the session.",
+            runner_config={
+                "mode": "success",
+                "summary_text": _report_text([_profile_recommendation("developer")]),
+            },
+        )
+
+        # Configure large payload in Task metadata to ensure instructions > 135 KiB (> 128 KiB limit)
+        large_padding = "X" * 140_000
+        tasks.update(task.id, metadata={"stress_padding": large_padding})
+
+        instance = OperationInstanceContext(
+            database=database,
+            artifact_root=tmp_path / "operations",
+            runner_argv_prefix=(sys.executable, str(FAKE_RUNNER)),
+        )
+        worker = _worker(database, instance)
+        operation = _submit_analysis(database, "task-40")
+
+        # Step operation: must not raise OSError [Errno 7] Argument list too long
+        outcome = worker.step()
+        assert outcome is not None
+        assert outcome.status == "succeeded", (
+            f"Operation failed with error: {outcome.error}"
+        )
+
+        # Verify persisted report
+        reports = AnalysisRepository(database).list_reports(task_id="task-40")
+        assert len(reports) == 1
+        assert reports[0].agent_id == ANALYZER_AGENT_ID
+        assert reports[0].summary == "Observed session facts."
     finally:
         database.dispose()

@@ -54,16 +54,17 @@ secretary must use `status="in_progress"` (or `update_task(..., status=
 
 ## Creating and editing
 
-- `POST /tasks` with `id` optional; duplicate caller ids return `409`.
+- `POST /tasks` with `id` optional; duplicate caller ids return `409`. Accepts optional `attachments` list.
 - `PATCH /tasks/{task_id}` updates only supplied fields
-  (`title`, `description`, `status`, `workspace`, `agent_id`, `metadata`);
+  (`title`, `description`, `status`, `workspace`, `agent_id`, `metadata`, `attachments`);
   `metadata` replaces the whole stored object.
+- `POST /tasks/{task_id}/attachments` accepts multipart/form-data upload (`file: UploadFile`), writes the file to the task artifact store, registers it in `task.metadata["attachments"]`, and returns `TaskArtifactRead` with `201 Created`.
 - `POST /imports/tasks` imports historical tasks by stable id. Replaying the
   same ids never duplicates or overwrites, and validation rejects the whole
   batch before any write.
 - `create_task` / `update_task` preflight the workspace and executor first
   (see [Workspaces and routing](workspaces-and-routing.md)) and copy the
-  resolved `host_path` into `tasks.workspace`.
+  resolved `host_path` into `tasks.workspace`. Both accept optional `attachments`.
 
 ## Worker claim and workspace lock
 
@@ -84,6 +85,7 @@ workspace while allowing different workspaces to run in parallel.
 4. builds a role configuration from `runner_config`, pointing `project` at the
    resolved host directory, extracting `skills`, and enabling
    `allow_git_commit` for `devops` tasks or `metadata.allow_git_commit`;
+   stages declared task attachments from host paths or artifact references into `/inbox` with read-only permissions (`0o444`), mounted via `--ro-bind` at the root `/inbox`;
 5. reuses a prior native Runner session only when both the executor and the
    workspace are unchanged; otherwise it starts a new session and keeps older
    artifacts in their original directory;

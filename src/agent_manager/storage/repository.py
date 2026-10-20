@@ -186,6 +186,7 @@ class TaskRepository:
         workspace: str | None = None,
         agent_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        attachments: Any = None,
         id: str | None = None,
     ) -> Task:
         """Insert one task and return the persisted record.
@@ -197,12 +198,19 @@ class TaskRepository:
             workspace: Optional workspace/project identifier.
             agent_id: Explicit executor; None preserves the worker default.
             metadata: Arbitrary supplemental JSON data.
+            attachments: Optional list of task attachments.
             id: Optional client-supplied identifier. A random UUID hex string
                 is generated when omitted.
 
         Returns:
             The detached :class:`Task` with server-populated timestamps.
         """
+        meta = dict(metadata) if metadata is not None else {}
+        if attachments is not None:
+            meta["attachments"] = [
+                a.model_dump() if hasattr(a, "model_dump") else a
+                for a in attachments
+            ]
         task = Task(
             id=id if id is not None else uuid.uuid4().hex,
             title=title,
@@ -210,7 +218,7 @@ class TaskRepository:
             status=status,
             workspace=workspace,
             agent_id=agent_id,
-            meta=dict(metadata) if metadata is not None else {},
+            meta=meta,
         )
         with self._database.session() as session:
             session.add(task)
@@ -321,6 +329,7 @@ class TaskRepository:
         workspace: Any = _UNSET,
         agent_id: Any = _UNSET,
         metadata: Any = _UNSET,
+        attachments: Any = _UNSET,
     ) -> Task:
         """Update mutable fields of an existing task and return the record.
 
@@ -332,6 +341,7 @@ class TaskRepository:
             workspace: Replacement workspace if supplied (can be None).
             agent_id: Replacement executor; None restores the worker default.
             metadata: Replacement metadata mapping if supplied.
+            attachments: Replacement attachments list if supplied.
 
         Raises:
             TaskNotFoundError: when the task does not exist.
@@ -352,6 +362,16 @@ class TaskRepository:
                 task.agent_id = agent_id
             if metadata is not _UNSET:
                 task.meta = dict(metadata or {})
+            if attachments is not _UNSET:
+                current_meta = dict(task.meta or {})
+                if attachments is None:
+                    current_meta.pop("attachments", None)
+                else:
+                    current_meta["attachments"] = [
+                        a.model_dump() if hasattr(a, "model_dump") else a
+                        for a in attachments
+                    ]
+                task.meta = current_meta
             task.updated_at = utcnow()
             session.flush()
             session.refresh(task)
