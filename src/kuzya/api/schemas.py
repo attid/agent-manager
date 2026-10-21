@@ -122,8 +122,8 @@ class TaskRead(BaseModel):
     status: str
     agent_id: str | None
     workspace: str | None
-    created_at: dt.datetime
-    updated_at: dt.datetime
+    created_at: dt.datetime = Field(description="Naive UTC; convert to the user's local timezone when presenting.")
+    updated_at: dt.datetime = Field(description="Naive UTC; convert to the user's local timezone when presenting.")
     metadata: dict[str, Any]
     attachments: list[TaskAttachment] = Field(default_factory=list)
 

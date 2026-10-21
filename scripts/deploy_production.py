@@ -128,6 +128,9 @@ DEEPGRAM_API_KEY=
 # Logging
 LOG_LEVEL=INFO
 LOG_FORMAT=text
+
+# Agent wall-clock context (IANA zone; default: system timezone)
+# KUZYA_TIMEZONE=America/Sao_Paulo
 """
     env_file.write_text(env_content, encoding="utf-8")
     env_file.chmod(0o600)

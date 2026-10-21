@@ -147,6 +147,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .secretary import TurnInput
+from .time_context import time_context_line
 
 __all__ = [
     "PiReplyCommandError",
@@ -898,6 +899,7 @@ def _render_task_text(turn_input: TurnInput) -> str:
         f"input_message_id: {turn_input.input_message_id}\n"
         f"attempt_count: {turn_input.attempt_count}\n"
         f"role: {turn_input.role}\n"
+        f"wall_clock: {time_context_line()}\n"
     )
     context_blocks: list[str] = []
     task_context = _render_task_context(turn_input.metadata)
