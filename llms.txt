@@ -46,6 +46,8 @@ registered Pi JS tools.
   cycle, resume and recovery.
 - [Tools and API discovery](docs/handbook/tools-and-api.md): REST endpoints,
   JS tools, auth, idempotency and discovery commands.
+- [MCP endpoint and ChatGPT plugin](docs/mcp-chatgpt.md): `/mcp` Streamable
+  HTTP server, auto-generated tools, Bearer auth, long-operation guidance.
 - [Review](docs/handbook/review.md): independent review operation and its
   explicit verdict contract.
 - [Analysis and recommendations](docs/handbook/analysis-and-recommendations.md):

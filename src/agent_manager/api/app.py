@@ -30,7 +30,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote_to_bytes
@@ -141,6 +141,7 @@ from ..knowledge import (
     KnowledgeDocumentNotFoundError,
     KnowledgePathError,
 )
+from .mcp import attach_mcp_endpoint
 
 
 ENV_VAR = "AGENT_MANAGER_DB_URL"
@@ -699,34 +700,38 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.operation_repository = OperationRepository(database)
     app.state.analysis_repository = AnalysisRepository(database)
     app.state.turn_processor = TurnProcessor(database)
-    try:
-        # A killed or restarted process leaves turns ``running`` with no live
-        # owner. Fail them and release their reservations before serving
-        # traffic so no conversation stays permanently blocked.
-        result = app.state.turn_processor.reconcile_startup_orphans()
-        if result.turn_ids:
-            logger.warning(
-                "startup reconciliation failed %d orphaned turn(s)",
-                len(result.turn_ids),
-                extra={
-                    "event": "startup_reconciliation",
-                    "reconciled_turns": len(result.turn_ids),
-                    "reconciled_conversations": len(
-                        result.conversation_ids
-                    ),
-                },
-            )
-        else:
-            logger.info(
-                "startup reconciliation found no orphaned turns",
-                extra={
-                    "event": "startup_reconciliation",
-                    "reconciled_turns": 0,
-                },
-            )
-        yield
-    finally:
-        database.dispose()
+    mcp_endpoint = getattr(app.state, "mcp_endpoint", None)
+    async with AsyncExitStack() as stack:
+        if mcp_endpoint is not None:
+            await stack.enter_async_context(mcp_endpoint)
+        try:
+            # A killed or restarted process leaves turns ``running`` with no live
+            # owner. Fail them and release their reservations before serving
+            # traffic so no conversation stays permanently blocked.
+            result = app.state.turn_processor.reconcile_startup_orphans()
+            if result.turn_ids:
+                logger.warning(
+                    "startup reconciliation failed %d orphaned turn(s)",
+                    len(result.turn_ids),
+                    extra={
+                        "event": "startup_reconciliation",
+                        "reconciled_turns": len(result.turn_ids),
+                        "reconciled_conversations": len(
+                            result.conversation_ids
+                        ),
+                    },
+                )
+            else:
+                logger.info(
+                    "startup reconciliation found no orphaned turns",
+                    extra={
+                        "event": "startup_reconciliation",
+                        "reconciled_turns": 0,
+                    },
+                )
+            yield
+        finally:
+            database.dispose()
 
 
 def _resolve_api_tokens(
@@ -2025,6 +2030,10 @@ def create_app(
                 detail=str(error),
             ) from error
         return agent_to_read(profile)
+
+    # Mounted last, after every API route: the MCP tool registry is generated
+    # from the completed OpenAPI document and refreshed on the next start.
+    attach_mcp_endpoint(app)
 
     return app
 
