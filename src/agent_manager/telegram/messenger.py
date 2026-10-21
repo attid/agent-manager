@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from typing import Any, Callable, Sequence
 
 from aiogram import Bot
@@ -63,9 +64,28 @@ def conversation_hashtag(conversation_id: str) -> str:
     return f"#{conversation_id}"
 
 
+#: The footer hashtag as produced by :func:`with_conversation_footer`: a
+#: whole line consisting of ``#`` plus a 32-hex conversation id.
+_FOOTER_HASHTAG_RE = re.compile(r"(?m)^#([0-9a-f]{32})$")
+
+
 def with_conversation_footer(text: str, conversation_id: str) -> str:
     """Append the conversation hashtag footer to one message part."""
     return f"{text.rstrip()}\n\n{conversation_hashtag(conversation_id)}"
+
+
+def markdown_footer_safe(text: str) -> str:
+    """Keep the footer hashtag small when the text is parsed as Markdown.
+
+    A line that starts with ``#`` is a heading in Telegram's rich Markdown, so
+    the footer hashtag would render as a huge bold title. Wrapping exactly the
+    footer (``#`` + 32 hex, whole line) in an inline code span renders it
+    small and monospaced with the ``#`` visible — and one tap copies it for
+    diagnostics. Plain-text transports keep the bare hashtag: there it is
+    already small and natively clickable. Secretary-authored headings are not
+    touched: only the exact footer shape is rewritten.
+    """
+    return _FOOTER_HASHTAG_RE.sub(r"`#\1`", text)
 
 
 def format_verified_caller(caller: str | None) -> str | None:
@@ -163,11 +183,12 @@ async def send_markdown(
 ) -> int:
     """Send one text part: rich Markdown, then plain text, then a document.
 
-    ``conversation_id`` only affects the last-resort document fallback: its
-    caption carries the dialog UUID so even a failed-format delivery keeps
-    its visible context. Returns the sent Telegram message id; raises only
-    when every transport failed — the caller decides whether the outcome is
-    retryable.
+    The Markdown attempt wraps the footer hashtag in an inline code span so
+    Telegram does not render it as a heading; the plain-text fallback keeps
+    the bare hashtag (small and natively clickable there), and
+    ``conversation_id`` puts the UUID on the last-resort document caption.
+    Returns the sent Telegram message id; raises only when every transport
+    failed — the caller decides whether the outcome is retryable.
     """
     reply_parameters = (
         ReplyParameters(message_id=reply_to_message_id)
@@ -177,7 +198,7 @@ async def send_markdown(
     try:
         message = await bot.send_rich_message(
             chat_id=chat_id,
-            rich_message=InputRichMessage(markdown=text),
+            rich_message=InputRichMessage(markdown=markdown_footer_safe(text)),
             reply_parameters=reply_parameters,
             reply_markup=keyboard,
         )

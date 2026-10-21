@@ -193,9 +193,9 @@ def test_end_to_end_question_copy_before_reply_with_uuid_and_links(migrated_db):
         reply_markdown = sends[1].kwargs["rich_message"].markdown
         assert question_markdown.startswith("📨 Вопрос секретарю через API")
         assert "Что с релизом?" in question_markdown
-        assert question_markdown.endswith(f"#{conv['id']}")
+        assert question_markdown.endswith(f"`#{conv['id']}`")
         assert reply_markdown.startswith("💬 Ответ секретаря (вопрос был через API)")
-        assert reply_markdown.endswith(f"#{conv['id']}")
+        assert reply_markdown.endswith(f"`#{conv['id']}`")
 
         repo = TelegramDeliveryRepository(database)
         rows = repo.list_deliveries(conversation_id=conv["id"])

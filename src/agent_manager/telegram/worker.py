@@ -21,6 +21,7 @@ from .messenger import (
     TelegramDeliveryService,
     build_delivery_parts,
     compose_dialog_message,
+    markdown_footer_safe,
     render_foreign_context_plate,
     strip_file_directives,
     with_conversation_footer,
@@ -332,7 +333,9 @@ class QueueProcessor:
                                     chat_id=chat_id,
                                     message_id=status_msg_id,
                                     text=rendered_reply,
-                                    rich_message=InputRichMessage(markdown=rendered_reply),
+                                    rich_message=InputRichMessage(
+                                        markdown=markdown_footer_safe(rendered_reply)
+                                    ),
                                     reply_markup=switch_keyboard,
                                 )
                                 edit_success = True
@@ -370,7 +373,9 @@ class QueueProcessor:
                             try:
                                 sent = await self.bot.send_rich_message(
                                     chat_id=chat_id,
-                                    rich_message=InputRichMessage(markdown=rendered_reply),
+                                    rich_message=InputRichMessage(
+                                        markdown=markdown_footer_safe(rendered_reply)
+                                    ),
                                     reply_to_message_id=queued_msg.telegram_message_id,
                                     reply_markup=switch_keyboard,
                                 )

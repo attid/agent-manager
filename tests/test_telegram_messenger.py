@@ -25,6 +25,7 @@ from agent_manager.telegram.messenger import (
     compose_dialog_message,
     conversation_hashtag,
     format_verified_caller,
+    markdown_footer_safe,
     render_foreign_context_plate,
     send_markdown,
     split_for_telegram,
@@ -117,7 +118,7 @@ def test_deliver_api_question_copy_with_uuid_and_button(migrated_db) -> None:
         assert kwargs["chat_id"] == 77
         assert kwargs["rich_message"].markdown == (
             "📨 Вопрос секретарю через API (агент: agy)\n\n"
-            f"Что с релизом?\n\n#{conversation.id}"
+            f"Что с релизом?\n\n`#{conversation.id}`"
         )
         assert kwargs["reply_markup"] == dialog_switch_keyboard(
             conversation_id=conversation.id
@@ -200,10 +201,10 @@ def test_reply_row_header_for_api_input_and_plain_for_telegram(migrated_db) -> N
         # the telegram-originated reply stays a bare answer.
         assert any(t.startswith("📨 Вопрос секретарю через API") for t in texts)
         assert (
-            f"💬 Ответ секретаря (вопрос был через API)\n\nAPI ответ\n\n#{api_conv.id}"
+            f"💬 Ответ секретаря (вопрос был через API)\n\nAPI ответ\n\n`#{api_conv.id}`"
             in texts
         )
-        assert f"TG ответ\n\n#{tg_conv.id}" in texts
+        assert f"TG ответ\n\n`#{tg_conv.id}`" in texts
     finally:
         database.dispose()
 
@@ -303,7 +304,7 @@ def test_foreign_plate_rendered_when_active_context_differs(migrated_db) -> None
         assert asyncio.run(service.deliver_pending()) == 1
         markdown = bot.send_rich_message.await_args.kwargs["rich_message"].markdown
         assert "↩️ Другой диалог · сейчас активна задача №41" in markdown
-        assert markdown.endswith(f"#{conversation.id}")
+        assert markdown.endswith(f"`#{conversation.id}`")
     finally:
         database.dispose()
 
@@ -642,3 +643,14 @@ def test_retry_reuses_frozen_plan_when_context_plate_changes(
         assert row.status == DELIVERY_STATUS_SENT
     finally:
         database.dispose()
+
+
+def test_markdown_footer_safe_wraps_only_the_footer_hashtag() -> None:
+    hex32 = "a" * 32
+    text = f"# Ответ агента\n\nТекст с номером #41.\n\n#{hex32}"
+    safe = markdown_footer_safe(text)
+    # The footer hashtag becomes a small inline code span...
+    assert safe == f"# Ответ агента\n\nТекст с номером #41.\n\n`#{hex32}`"
+    # ...while secretary-authored headings and mid-line hashtags stay intact,
+    # and short (non-hex32) ids used in tests are not rewritten.
+    assert markdown_footer_safe("текст\n\n#conv-001") == "текст\n\n#conv-001"

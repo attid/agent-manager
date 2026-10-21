@@ -66,10 +66,12 @@ def test_completion_resumes_same_dialogue_once_and_delivers_after_restart(migrat
         bot.send_rich_message.assert_awaited_once()
         kwargs = bot.send_rich_message.await_args.kwargs
         assert kwargs["chat_id"] == 123
+        # The Markdown transport wraps the footer hashtag in an inline code
+        # span so Telegram renders it small instead of as a heading.
         assert kwargs["rich_message"].markdown == (
             f"📦 Результат задачи №{task.number} «Research»\n\n"
             "Research is ready: Found the result\n\n"
-            f"#{conv.id}"
+            f"`#{conv.id}`"
         )
         assert kwargs["reply_markup"] == dialog_switch_keyboard(
             conversation_id=conv.id
@@ -182,7 +184,7 @@ def test_subscription_button_switches_to_subscribed_conversation(migrated_db):
         assert kwargs["reply_markup"] == dialog_switch_keyboard(
             conversation_id=conv_a.id
         )
-        assert kwargs["rich_message"].markdown.endswith(f"#{conv_a.id}")
+        assert kwargs["rich_message"].markdown.endswith(f"`#{conv_a.id}`")
     finally:
         db.dispose()
 
