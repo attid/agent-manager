@@ -650,7 +650,9 @@ def test_agy_backend_uses_plan_mode_and_project_cwd_without_implicit_effort(
     assert "--model" not in cmd
     assert "# Code Review: Task #task-1" in cmd[5]
     assert captured["kwargs"]["cwd"] == str(tmp_path)
-    assert captured["kwargs"]["timeout"] == 180.0
+    # The default floor is ten minutes: real external reviews run longer
+    # than the old three-minute cap, which killed legitimate runs.
+    assert captured["kwargs"]["timeout"] == 600.0
     assert result.verdict == VERDICT_APPROVED
     assert result.runtime["engine"] == "agy"
     assert "effort" not in result.runtime
@@ -985,3 +987,18 @@ def test_execution_failure_is_not_retried_as_format_error(tmp_path):
         _executor(run).execute(_request(tmp_path))
     assert len(calls) == 1
     assert exc.value.diagnostics['reason'] == 'runner_nonzero_exit'
+
+
+def test_agy_backend_honours_profile_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """runner_config.timeout_seconds sizes the external reviewer subprocess."""
+    monkeypatch.setattr(
+        "kuzya.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
+    request = _engine_request(tmp_path, "agy")
+    request.reviewer_runner_config["timeout_seconds"] = 900
+    _executor(runner).execute(request)
+    assert captured["kwargs"]["timeout"] == 900.0

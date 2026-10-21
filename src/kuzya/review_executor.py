@@ -75,7 +75,9 @@ __all__ = [
 ]
 
 #: Default timeout for external reviewer engines that have no Runner contract.
-DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS = 180.0
+#: A real review round explores the repository and reasons over the diff;
+#: three minutes killed legitimate runs, so the floor is ten minutes.
+DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS = 600.0
 
 #: Supported values of ``runner_config.engine``.
 REVIEW_ENGINES = frozenset({"pi", "agy", "codex"})
@@ -1237,11 +1239,16 @@ class _ExternalReviewerBackend(_ReviewerBackend):
         cmd = self._build_command(
             binary, self._prompt_with_system_instructions(context), context
         )
-        timeout = (
-            request.timeout_seconds
-            if request.timeout_seconds is not None
-            else DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS
-        )
+        # Request-level wins; then the reviewer profile's runner_config
+        # ``timeout_seconds``; the default must fit a real review, which
+        # easily runs several minutes on an external engine.
+        configured = (request.reviewer_runner_config or {}).get("timeout_seconds")
+        if request.timeout_seconds is not None:
+            timeout = request.timeout_seconds
+        elif isinstance(configured, (int, float)) and configured > 0:
+            timeout = float(configured)
+        else:
+            timeout = DEFAULT_EXTERNAL_REVIEW_TIMEOUT_SECONDS
         try:
             proc = self._executor._invoke(
                 cmd,
