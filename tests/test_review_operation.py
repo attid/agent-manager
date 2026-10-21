@@ -127,7 +127,7 @@ def test_completed_task_review_is_approved_without_rerunning_developer(
             runner_config={"argv_log": str(developer_log)},
         )
         task_id = _seed_completed_task(database, workspace)
-        _seed_reviewer(database, summary_text="Проверено.\nВЕРДИКТ: ОДОБРЕНО\n")
+        _seed_reviewer(database, summary_text='{"verdict": "approved", "findings": []}')
 
         operations = OperationRepository(database)
         submitted = operations.submit(
@@ -177,8 +177,7 @@ def test_changes_requested_review_links_findings(
         _seed_reviewer(
             database,
             summary_text=(
-                "P1: src/app.py:9 — missing null check\n"
-                "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+                '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
             ),
         )
 
@@ -216,7 +215,7 @@ def test_review_role_is_read_only_and_models_propagate(
         probe = tmp_path / "selection.json"
         _seed_reviewer(
             database,
-            summary_text="ВЕРДИКТ: ОДОБРЕНО\n",
+            summary_text='{"verdict": "approved", "findings": []}',
             extra={
                 "selection_probe": str(probe),
                 "tools": ["read", "write", "bash"],
@@ -262,8 +261,8 @@ def test_review_role_is_read_only_and_models_propagate(
 @pytest.mark.parametrize(
     ("mode", "summary_text", "reason"),
     [
-        ("nonzero", "ВЕРДИКТ: ОДОБРЕНО\n", "runner_nonzero_exit"),
-        ("failed_status", "ВЕРДИКТ: ОДОБРЕНО\n", "runner_status_not_completed"),
+        ("nonzero", '{"verdict": "approved", "findings": []}', "runner_nonzero_exit"),
+        ("failed_status", '{"verdict": "approved", "findings": []}', "runner_status_not_completed"),
         ("malformed", "", "malformed_runner_output"),
         ("empty_summary", "", "empty_report"),
     ],

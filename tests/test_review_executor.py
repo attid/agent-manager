@@ -268,6 +268,49 @@ def test_parse_ambiguous_verdict_markers_fail() -> None:
         parse_review_report(report)
 
 
+def test_parse_self_quoted_verdict_markers_uses_final_line() -> None:
+    """A model may quote the prompt, but its last verdict line is decisive."""
+    report = (
+        "## Инструкция из промпта\n"
+        "- `ВЕРДИКТ: ОДОБРЕНО`, если критических замечаний нет;\n"
+        "- `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ` при наличии P1.\n"
+        "\n## Замечания\n"
+        "P1: src/app.py:9 — missing null check\n"
+        "\nВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+
+    verdict, findings = parse_review_report(report)
+
+    assert verdict == VERDICT_CHANGES_REQUESTED
+    assert len(findings) == 1
+    assert findings[0].file == "src/app.py"
+    assert findings[0].line == 9
+
+
+def test_parse_self_quoted_markers_accepts_final_approved_line() -> None:
+    report = (
+        "Шаблон отчёта содержит оба варианта:\n"
+        "ВЕРДИКТ: ОДОБРЕНО\n"
+        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        "\nКритических замечаний нет.\n"
+        "ВЕРДИКТ: ОДОБРЕНО\n"
+    )
+
+    verdict, findings = parse_review_report(report)
+
+    assert verdict == VERDICT_APPROVED
+    assert findings == ()
+
+
+def test_parse_ambiguous_final_verdict_line_still_fails() -> None:
+    report = (
+        "Критических замечаний нет.\n"
+        "ВЕРДИКТ: ОДОБРЕНО / ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+    )
+    with pytest.raises(ReviewFormatError):
+        parse_review_report(report)
+
+
 def test_parse_malformed_json_block_fails() -> None:
     report = "```review\n{not valid json}\n```\n"
     with pytest.raises(ReviewFormatError):
@@ -302,7 +345,7 @@ def test_execute_valid_approved_round_persists_report_and_metrics(
     summary = tmp_path / "out" / "summary.md"
     request = _request(tmp_path)
     executor = _executor(
-        _fake_runner(summary, "Проверено.\nВЕРДИКТ: ОДОБРЕНО\n")
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}')
     )
 
     result = executor.execute(request)
@@ -347,8 +390,7 @@ def test_execute_valid_approved_round_persists_report_and_metrics(
 def test_execute_changes_requested_round_keeps_findings(tmp_path: Path) -> None:
     summary = tmp_path / "summary.md"
     report = (
-        "P1: src/app.py:9 — missing null check\n"
-        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
     )
     executor = _executor(_fake_runner(summary, report))
 
@@ -361,14 +403,12 @@ def test_execute_changes_requested_round_keeps_findings(tmp_path: Path) -> None:
     assert result.to_dict()["verdict"] == "changes_requested"
 
 
-def test_execute_changes_requested_accepts_markdown_bold_finding(
+def test_execute_changes_requested_preserves_finding_message(
     tmp_path: Path,
 ) -> None:
     summary = tmp_path / "summary.md"
     report = (
-        "### Замечания\n\n"
-        "**P1: index.html:2 — кнопка фактически не становится зелёной.**\n"
-        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "index.html", "line": 2, "message": "index.html:2 — кнопка фактически не становится зелёной."}]}'
     )
     executor = _executor(_fake_runner(summary, report))
 
@@ -391,7 +431,7 @@ def test_execute_parses_pretty_printed_runner_result(tmp_path: Path) -> None:
         {"status": "completed", "summary_path": str(summary)}, indent=2
     )
     executor = _executor(
-        _fake_runner(summary, "ВЕРДИКТ: ОДОБРЕНО\n", stdout=stdout)
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}', stdout=stdout)
     )
 
     result = executor.execute(_request(tmp_path))
@@ -400,10 +440,28 @@ def test_execute_parses_pretty_printed_runner_result(tmp_path: Path) -> None:
     assert result.approved is True
 
 
+def test_review_prompt_requires_json_result(
+    tmp_path: Path,
+) -> None:
+    summary = tmp_path / "summary.md"
+    executor = _executor(
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}')
+    )
+
+    executor.execute(_request(tmp_path))
+
+    prompt = (
+        tmp_path / "review" / "review_prompt_r1.md"
+    ).read_text(encoding="utf-8")
+    assert "Required JSON result" in prompt
+    assert '"findings"' in prompt
+    assert "without Markdown fences" in prompt
+
+
 def test_execute_uses_default_prompt_when_profile_missing(tmp_path: Path) -> None:
     summary = tmp_path / "summary.md"
     executor = _executor(
-        _fake_runner(summary, "ВЕРДИКТ: ОДОБРЕНО\n")
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}')
     )
     request = _request(
         tmp_path, reviewer_system_prompt="", reviewer_runner_config={}
@@ -422,7 +480,7 @@ def test_execute_adds_knowledge_base_to_readonly_paths(tmp_path: Path) -> None:
     _Knowledge.root_dir.mkdir()
     summary = tmp_path / "summary.md"
     executor = _executor(
-        _fake_runner(summary, "ВЕРДИКТ: ОДОБРЕНО\n"), knowledge_base=_Knowledge()
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}'), knowledge_base=_Knowledge()
     )
     executor.execute(_request(tmp_path))
     role = json.loads((tmp_path / "review" / "role_r1.json").read_text(encoding="utf-8"))
@@ -437,7 +495,7 @@ def test_execute_nonzero_exit_fails_with_diagnostics(tmp_path: Path) -> None:
     executor = _executor(
         _fake_runner(
             summary,
-            "ВЕРДИКТ: ОДОБРЕНО\n",
+            '{"verdict": "approved", "findings": []}',
             returncode=3,
             stderr="reviewer crashed",
         )
@@ -458,7 +516,7 @@ def test_execute_nonzero_exit_fails_with_diagnostics(tmp_path: Path) -> None:
 def test_execute_failed_runner_status_fails(tmp_path: Path) -> None:
     summary = tmp_path / "summary.md"
     executor = _executor(
-        _fake_runner(summary, "ВЕРДИКТ: ОДОБРЕНО\n", status="failed")
+        _fake_runner(summary, '{"verdict": "approved", "findings": []}', status="failed")
     )
     with pytest.raises(ReviewExecutionError) as excinfo:
         executor.execute(_request(tmp_path))
@@ -500,7 +558,7 @@ def test_execute_missing_report_file_fails(tmp_path: Path) -> None:
     executor = _executor(
         _fake_runner(
             tmp_path / "summary.md",
-            "ВЕРДИКТ: ОДОБРЕНО\n",
+            '{"verdict": "approved", "findings": []}',
             stdout=json.dumps(
                 {"status": "completed", "summary_path": str(tmp_path / "absent.md")}
             ),
@@ -527,16 +585,21 @@ def _engine_request(
     *,
     effort: str | None = None,
     timeout_seconds: float | None = None,
+    reviewer_system_prompt: str | None = None,
 ):
     config: dict[str, object] = {}
     if engine is not None:
         config["engine"] = engine
     if effort is not None:
         config["effort"] = effort
+    overrides: dict[str, object] = {}
+    if reviewer_system_prompt is not None:
+        overrides["reviewer_system_prompt"] = reviewer_system_prompt
     return _request(
         tmp_path,
         reviewer_runner_config=config,
         timeout_seconds=timeout_seconds,
+        **overrides,
     )
 
 
@@ -564,7 +627,7 @@ def test_agy_backend_uses_plan_mode_high_effort_and_project_cwd(
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner(
-        "Проверено, критичных замечаний нет.\nВЕРДИКТ: ОДОБРЕНО\n"
+        '{"verdict": "approved", "findings": []}'
     )
     request = _engine_request(tmp_path, "agy")
     result = _executor(runner).execute(request)
@@ -597,7 +660,7 @@ def test_agy_backend_uses_configured_effort_and_timeout(
         "agent_manager.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
-    runner, captured = _capturing_runner("ВЕРДИКТ: ОДОБРЕНО\n")
+    runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
     request = _engine_request(
         tmp_path, "agy", effort="medium", timeout_seconds=42
     )
@@ -608,6 +671,47 @@ def test_agy_backend_uses_configured_effort_and_timeout(
     assert captured["kwargs"]["timeout"] == 42
 
 
+@pytest.mark.parametrize("engine", ["agy", "codex"])
+def test_native_engines_prepend_reviewer_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
+    system_prompt = "Review security regressions first."
+    request = _engine_request(
+        tmp_path, engine, reviewer_system_prompt=system_prompt
+    )
+    _executor(runner).execute(request)
+
+    prompt = captured["cmd"][-1]
+    assert prompt.startswith(
+        "<SYSTEM INSTRUCTIONS>\n"
+        f"{system_prompt}\n"
+        "</SYSTEM INSTRUCTIONS>\n\n"
+    )
+    assert "# Code Review: Task #task-1" in prompt
+
+
+@pytest.mark.parametrize("engine", ["agy", "codex"])
+def test_native_engines_omit_empty_reviewer_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
+    request = _engine_request(tmp_path, engine, reviewer_system_prompt="")
+    _executor(runner).execute(request)
+
+    prompt = captured["cmd"][-1]
+    assert prompt.startswith("# Code Review: Task #task-1")
+    assert "<SYSTEM INSTRUCTIONS>" not in prompt
+
+
 def test_codex_backend_uses_review_uncommitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -616,8 +720,7 @@ def test_codex_backend_uses_review_uncommitted(
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner(
-        "P1: src/app.py:9 — missing null check\n"
-        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
     )
     request = _engine_request(tmp_path, "codex")
     result = _executor(runner).execute(request)
@@ -634,8 +737,27 @@ def test_codex_backend_uses_review_uncommitted(
     assert result.runtime["engine"] == "codex"
 
 
+def test_pi_backend_rejects_prose_with_ambiguous_markers(
+    tmp_path: Path,
+) -> None:
+    """Prose is invalid even when it contains a seemingly final approval."""
+    summary = tmp_path / "summary.md"
+    report = (
+        "Пример формата:\n"
+        "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        "\nКритических замечаний нет.\n"
+        "ВЕРДИКТ: ОДОБРЕНО\n"
+    )
+    executor = _executor(_fake_runner(summary, report))
+
+    with pytest.raises(ReviewExecutionError) as excinfo:
+        executor.execute(_request(tmp_path))
+
+    assert excinfo.value.diagnostics["reason"] == "invalid_report"
+
+
 def test_unknown_engine_fails_with_persisted_diagnostics(tmp_path: Path) -> None:
-    runner, _captured = _capturing_runner("ВЕРДИКТ: ОДОБРЕНО\n")
+    runner, _captured = _capturing_runner('{"verdict": "approved", "findings": []}')
     with pytest.raises(ReviewExecutionError) as excinfo:
         _executor(runner).execute(_engine_request(tmp_path, "unknown"))
     assert excinfo.value.diagnostics["reason"] == "unknown_reviewer_engine"
@@ -659,11 +781,30 @@ def test_missing_external_engine_binary_fails_clearly(
     assert "cmd" not in captured
 
 
+def test_external_engine_json_retains_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "agent_manager.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    stdout = (
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
+    )
+    runner, _captured = _capturing_runner(stdout)
+
+    result = _executor(runner).execute(_engine_request(tmp_path, "agy"))
+
+    assert result.verdict == VERDICT_CHANGES_REQUESTED
+    assert result.findings[0].file == "src/app.py"
+    assert result.findings[0].line == 9
+
+
 def test_default_engine_uses_pi_runner_backend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     summary = tmp_path / "summary.md"
-    summary.write_text("ВЕРДИКТ: ОДОБРЕНО\n", encoding="utf-8")
+    summary.write_text('{"verdict": "approved", "findings": []}', encoding="utf-8")
     captured: dict[str, object] = {}
 
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
@@ -709,3 +850,129 @@ def test_external_nonzero_exit_persists_stdout_and_failure(
     review_dir = tmp_path / "artifacts" / "task-1" / "review"
     assert (review_dir / "stdout.txt").read_text(encoding="utf-8") == "partial output"
     assert (review_dir / "stderr.txt").read_text(encoding="utf-8") == "engine crashed"
+
+
+@pytest.mark.parametrize('engine', ['pi', 'agy', 'codex'])
+def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, monkeypatch, engine):
+    monkeypatch.setattr('agent_manager.review_executor.shutil.which', lambda name: f'/fake/bin/{name}')
+    prompts = []
+    replies = iter(['ВЕРДИКТ: ОДОБРЕНО', '{"verdict":"approved"}', '{"verdict":"approved","findings":[]}'])
+    def run(cmd, **kwargs):
+        prompt = Path(cmd[cmd.index('--task') + 1]).read_text() if engine == 'pi' else cmd[-1]
+        prompts.append(prompt)
+        reply = next(replies)
+        if engine == 'pi':
+            summary = tmp_path / f'summary-{len(prompts)}.json'
+            summary.write_text(reply)
+            reply = json.dumps({'status': 'completed', 'summary_path': str(summary)})
+        return subprocess.CompletedProcess(cmd, 0, reply, '')
+    result = _executor(run).execute(_engine_request(tmp_path, engine))
+    assert result.approved
+    assert len(prompts) == 3
+    assert 'JSON' in prompts[1]
+    assert 'findings' in prompts[2]
+    metrics = json.loads(Path(result.metrics_path).read_text())
+    assert metrics['format_attempts'] == 3
+    result_path = Path(metrics['result_file'])
+    assert json.loads(result_path.read_text()) == {'verdict': 'approved', 'findings': []}
+    assert len(list(result_path.parent.glob('attempt_*/review_result.json'))) == 3
+
+
+@pytest.mark.parametrize('reply', [
+    'ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\nВЕРДИКТ: ОДОБРЕНО\nРевью не завершено.',
+    '{"verdict":"approved","findings":[{"severity":"P1","file":"app.py","line":1,"message":"bug"}]}',
+    '{"verdict":"approved","findings":null}',
+    '{"verdict":"changes_requested","findings":[]}',
+    '{"verdict":"approved","findings":[{"severity":"P2","file":"app.py","line":true,"message":"bug"}]}',
+])
+def test_json_contract_stops_after_three_invalid_results(tmp_path, reply):
+    calls = []
+    runner = _fake_runner(tmp_path / 'summary.json', reply)
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return runner(cmd, **kwargs)
+    with pytest.raises(ReviewExecutionError) as exc:
+        _executor(run).execute(_request(tmp_path))
+    assert len(calls) == 3
+    assert exc.value.diagnostics['format_attempts'] == 3
+    assert not (tmp_path / 'artifacts/task-1/review/round_1.json').exists()
+
+
+@pytest.mark.parametrize('text', [
+    '{}', '[]', 'null',
+    '{"verdict":"APPROVED","findings":[]}',
+    '{"verdict":"approved","verdict":"changes_requested","findings":[]}',
+    '{"verdict":"approved","findings":[],"extra":NaN}',
+    '```json\n{"verdict":"approved","findings":[]}\n```',
+    '{"verdict":"approved","findings":[]} trailing text',
+    '{"verdict":"approved","findings":[],"report":null}',
+    '{"verdict":"approved","findings":[{}]}',
+])
+def test_review_json_rejects_incomplete_or_ambiguous_data(text):
+    from agent_manager.review_executor import parse_review_json
+    with pytest.raises(ReviewFormatError):
+        parse_review_json(text)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('severity', 'P0'), ('severity', 1), ('file', ''), ('message', ' '),
+    ('line', 0), ('line', 1.5), ('line', '2'), ('evidence', []),
+])
+def test_review_json_validates_finding_fields(field, value):
+    from agent_manager.review_executor import parse_review_json
+    finding = {'severity': 'P2', 'file': 'app.py', 'line': 1, 'message': 'Fix null check'}
+    finding[field] = value
+    with pytest.raises(ReviewFormatError, match=field):
+        parse_review_json(json.dumps({'verdict': 'approved', 'findings': [finding]}))
+
+
+def test_review_json_renders_findings_without_trusting_report_markers():
+    from agent_manager.review_executor import parse_review_json
+    verdict, findings, report = parse_review_json(json.dumps({
+        'verdict': 'changes_requested',
+        'findings': [{'severity': 'P1', 'file': 'app.py', 'line': 2, 'message': 'Fix race', 'evidence': 'shared write'}],
+        'report': 'A quoted example says ВЕРДИКТ: ОДОБРЕНО.',
+        'additional_metadata': {'allowed': True},
+    }))
+    assert verdict == VERDICT_CHANGES_REQUESTED
+    assert findings[0].evidence == 'shared write'
+    assert 'P1: app.py:2 — Fix race' in report
+
+
+@pytest.mark.parametrize('first', ['missing', 'empty'])
+def test_missing_or_empty_pi_result_retries_without_consuming_review_round(tmp_path, first):
+    calls = []
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        summary = tmp_path / f'summary-{len(calls)}.json'
+        if len(calls) > 1:
+            summary.write_text('{"verdict":"approved","findings":[]}')
+        elif first == 'empty':
+            summary.write_text('')
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({'status': 'completed', 'summary_path': str(summary)}), '')
+    result = _executor(run).execute(_request(tmp_path, round_number=3))
+    assert len(calls) == 2
+    assert result.round_number == 3
+    assert result.approved
+
+
+def test_previous_success_cannot_supply_result_for_new_invocation(tmp_path):
+    request = _request(tmp_path)
+    result = _executor(_fake_runner(tmp_path / 'first.json', '{"verdict":"approved","findings":[]}')).execute(request)
+    result_path = Path(result.result_path)
+    with pytest.raises(ReviewExecutionError) as exc:
+        _executor(_fake_runner(tmp_path / 'second.json', 'not JSON')).execute(request)
+    assert exc.value.diagnostics['format_attempts'] == 3
+    assert json.loads(result_path.read_text())['verdict'] == 'approved'
+
+
+def test_execution_failure_is_not_retried_as_format_error(tmp_path):
+    calls = []
+    runner = _fake_runner(tmp_path / 'summary.json', '{"verdict":"approved","findings":[]}', returncode=7)
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return runner(cmd, **kwargs)
+    with pytest.raises(ReviewExecutionError) as exc:
+        _executor(run).execute(_request(tmp_path))
+    assert len(calls) == 1
+    assert exc.value.diagnostics['reason'] == 'runner_nonzero_exit'

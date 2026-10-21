@@ -641,7 +641,10 @@ def test_format_task_outcome_message_ready_to_commit(migrated_db: Path) -> None:
     assert kb.inline_keyboard[1][1].callback_data == f"select_task:{task.id}"
 
 
-def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_task_worker_run_review_cycle_metrics_and_reload(
+    migrated_db: Path, tmp_path: Path, invalid_first: bool
+) -> None:
     test_db = Database.from_path(migrated_db)
     agent_repo = AgentProfileRepository(test_db)
     agent_repo.create(
@@ -668,7 +671,7 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
     )
 
     review_out_file = tmp_path / "review_out.md"
-    review_out_file.write_text("Код проверен.\nВЕРДИКТ: ОДОБРЕНО\n")
+    review_out_file.write_text('{"verdict": "approved", "findings": []}')
 
     exec_dir = tmp_path / "exec"
     exec_dir.mkdir(parents=True)
@@ -683,7 +686,15 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
         stderr="",
     )
 
-    with patch("subprocess.run", return_value=mock_proc):
+    invalid_file = tmp_path / "invalid_review.md"
+    invalid_file.write_text("ВЕРДИКТ: ОДОБРЕНО")
+    invalid_proc = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"status": "completed", "summary_path": str(invalid_file)}),
+        stderr="",
+    )
+    responses = [invalid_proc, mock_proc] if invalid_first else [mock_proc]
+    with patch("subprocess.run", side_effect=responses) as run_mock:
         res = worker._run_review_cycle(
             task=task,
             project_dir=tmp_path,
@@ -695,6 +706,7 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
             child_env={},
         )
 
+    assert run_mock.call_count == len(responses)
     assert res["needs_user_input"] is False
     assert "ОДОБРЕНО" in res["summary"]
 
@@ -703,6 +715,7 @@ def test_task_worker_run_review_cycle_metrics_and_reload(migrated_db: Path, tmp_
     assert round_json.is_file()
     data = json.loads(round_json.read_text())
     assert data["round"] == 1
+    assert data["format_attempts"] == len(responses)
     assert data["verdict"] == "APPROVED"
     assert data["approved"] is True
     assert "duration_ms" in data
@@ -802,8 +815,7 @@ def test_review_changes_requested_resumes_original_developer_session(
         runner_config={
             "mode": "success",
             "summary_text": (
-                "P1: src/x.py:1 -- null dereference\n"
-                "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ"
+                '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/x.py", "line": 1, "message": "src/x.py:1 -- null dereference"}]}'
             ),
         },
     )
@@ -933,12 +945,12 @@ def test_review_fix_round_unions_changed_files(
 
     first_review = tmp_path / "review_round_1.md"
     first_review.write_text(
-        "P1: src/old.py:1 -- missing test\nВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ\n"
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/old.py", "line": 1, "message": "src/old.py:1 -- missing test"}]}'
     )
     developer_fix = tmp_path / "developer_fix.md"
     developer_fix.write_text("Added the missing test.")
     second_review = tmp_path / "review_round_2.md"
-    second_review.write_text("Замечаний нет.\nВЕРДИКТ: ОДОБРЕНО\n")
+    second_review.write_text('{"verdict": "approved", "findings": []}')
 
     review_one = MagicMock(
         returncode=0,
@@ -1024,7 +1036,7 @@ def test_review_cycle_uses_reviewer_profile_engine(
 
     review_proc = MagicMock(
         returncode=0,
-        stdout="Проверено.\nВЕРДИКТ: ОДОБРЕНО\n",
+        stdout='{"verdict": "approved", "findings": []}',
         stderr="",
     )
 

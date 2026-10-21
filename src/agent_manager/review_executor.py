@@ -10,19 +10,14 @@ verdict.
 Truthfulness contract
 ---------------------
 
-A review round is only *valid* when every one of these holds:
+A review round requires a successful process and a complete validated JSON
+result. Pi additionally requires completed Runner status and a readable summary
+file containing that JSON. Native engines return the JSON on stdout. Text
+markers and fenced blocks are never consulted by the executor.
 
-* the child process exited ``0``;
-* its last JSON object reports ``status == "completed"``;
-* the referenced summary file exists and is non-empty;
-* the report carries exactly one explicit verdict
-  (``approved`` or ``changes_requested``), either in the canonical text marker
-  or in a fenced ``review``/``json`` block.
-
-A nonzero exit, a failed/absent Runner status, empty or malformed output and an
-absent or ambiguous verdict are all *failures* and raise
-:class:`ReviewExecutionError`. The executor never derives approval from the
-absence of P1 findings.
+Missing, empty or invalid results allow at most three format attempts per
+review round. Process, launch and Runner status failures stop immediately.
+An exhausted round raises :class:`ReviewExecutionError`, never approval.
 
 Evidence and artifacts
 ----------------------
@@ -42,6 +37,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -62,6 +58,8 @@ __all__ = [
     "REVIEW_VERDICTS",
     "VERDICT_APPROVED",
     "VERDICT_CHANGES_REQUESTED",
+    "VERDICT_SOURCE_ANYWHERE",
+    "VERDICT_SOURCE_FINAL_LINE",
     "AgyReviewerBackend",
     "CodexReviewerBackend",
     "PiReviewerBackend",
@@ -73,6 +71,7 @@ __all__ = [
     "ReviewResult",
     "find_reviewer_binary",
     "parse_review_report",
+    "parse_review_json",
 ]
 
 #: Default timeout for external reviewer engines that have no Runner contract.
@@ -98,20 +97,34 @@ _ADMIN_KEYS = ("allow_git_commit", "allow_remote_write", "allow_admin")
 #: Severities that make an ``approved`` verdict self-contradictory.
 _CRITICAL_SEVERITIES = frozenset({"P1"})
 
+MAX_FORMAT_ATTEMPTS = 3
+REVIEW_JSON_INSTRUCTIONS = """
+## Required JSON result
+Return exactly one JSON object without Markdown fences or surrounding text.
+For Pi, put this JSON in the summary file; native engines return it on stdout.
+Required fields: verdict ("approved" or "changes_requested"), findings (array).
+Each finding requires severity (P1/P2/P3), file (non-empty path), line (positive
+integer), message (non-empty explanation and correction). Optional evidence is
+a string; optional report is a human-readable string.
+Use changes_requested when a P1 exists; approved cannot contain P1.
+changes_requested requires at least one finding. Do not modify project files.
+Example: {"verdict":"approved","findings":[],"report":"No blocking defects found."}
+This JSON contract overrides earlier instructions about text verdict markers.
+"""
+
 DEFAULT_REVIEWER_PROMPT = (
-    "You are an independent, strictly read-only code reviewer. Inspect the "
-    "uncommitted changes with `git diff` and `git status`, verify the task "
-    "requirements, look for bugs, edge cases, regressions and missing tests. "
-    "You must not modify the repository and must not perform any "
-    "administrative action.\n\n"
-    "Report each problem as an evidence-linked finding on its own line:\n"
-    "`P1: <file>:<line> -- what is wrong and how to fix it` (P1 = critical, "
-    "P2/P3 = non-blocking).\n\n"
-    "End the report with exactly one explicit verdict line:\n"
-    "- `VERDICT: APPROVED` / `ВЕРДИКТ: ОДОБРЕНО` when there are no critical "
-    "problems;\n"
-    "- `VERDICT: CHANGES_REQUESTED` / `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ` when at "
-    "least one P1 finding exists.\n"
+    "You are an independent, strictly read-only code reviewer. Inspect "
+    "uncommitted changes, requirements, bugs, regressions and missing tests. "
+    "Do not modify the repository or perform administrative actions. "
+    "Return the JSON result defined by the task contract."
+) + REVIEW_JSON_INSTRUCTIONS
+
+#: Legacy text-parser options, retained for callers of parse_review_report.
+#: ReviewExecutor uses only parse_review_json and never these markers.
+VERDICT_SOURCE_FINAL_LINE = "final_line"
+VERDICT_SOURCE_ANYWHERE = "anywhere"
+_VERDICT_SOURCES = frozenset(
+    {VERDICT_SOURCE_FINAL_LINE, VERDICT_SOURCE_ANYWHERE}
 )
 
 _APPROVED_MARKERS = ("ВЕРДИКТ: ОДОБРЕНО", "VERDICT: APPROVED")
@@ -200,6 +213,7 @@ class ReviewResult:
     duration_ms: float
     returncode: int
     runtime: Mapping[str, Any]
+    result_path: str
 
     @property
     def approved(self) -> bool:
@@ -221,6 +235,7 @@ class ReviewResult:
             "duration_ms": self.duration_ms,
             "returncode": self.returncode,
             "runtime": dict(self.runtime),
+            "result_path": self.result_path,
         }
 
 
@@ -442,16 +457,70 @@ def _findings_from_text(report_text: str) -> list[ReviewFinding]:
     return findings
 
 
-def parse_review_report(report_text: str) -> tuple[str, tuple[ReviewFinding, ...]]:
+def _verdict_from_markers(text: str) -> str:
+    """Return the verdict from any explicit marker in the whole report."""
+    upper = text.upper()
+    approved = any(marker in upper for marker in _APPROVED_MARKERS)
+    changes = any(marker in upper for marker in _CHANGES_MARKERS)
+    if approved and changes:
+        raise ReviewFormatError(
+            "review report carries both approved and changes_requested "
+            "verdict markers"
+        )
+    if not approved and not changes:
+        raise ReviewFormatError(
+            "review report has no explicit verdict marker"
+        )
+    return VERDICT_APPROVED if approved else VERDICT_CHANGES_REQUESTED
+
+
+def _verdict_from_final_line(text: str) -> str:
+    """Return the verdict from the last explicit verdict line in the report.
+
+    External reviewer engines receive a prompt that names both verdicts as
+    schema examples, and a model may quote that prompt or a reviewed file
+    containing the markers. Scanning backwards for the final verdict line makes
+    the report suffix authoritative while still rejecting a genuinely
+    ambiguous final line that carries both verdicts.
+    """
+    for raw_line in reversed(text.splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        upper = line.upper()
+        approved = any(marker in upper for marker in _APPROVED_MARKERS)
+        changes = any(marker in upper for marker in _CHANGES_MARKERS)
+        if not approved and not changes:
+            continue
+        if approved and changes:
+            raise ReviewFormatError(
+                "last review verdict line carries both approved and "
+                "changes_requested verdict markers"
+            )
+        return VERDICT_APPROVED if approved else VERDICT_CHANGES_REQUESTED
+    raise ReviewFormatError("review report has no explicit verdict marker")
+
+
+def parse_review_report(
+    report_text: str,
+    *,
+    verdict_source: str = VERDICT_SOURCE_FINAL_LINE,
+) -> tuple[str, tuple[ReviewFinding, ...]]:
     """Validate one reviewer report and return ``(verdict, findings)``.
 
     A fenced ``review``/``json`` block is authoritative when present; a
     malformed block fails instead of silently falling back. Otherwise the
-    canonical explicit verdict markers are required. An absent or ambiguous
-    verdict, an ``approved`` verdict with critical findings, and a
-    ``changes_requested`` verdict without any evidence-linked finding are all
-    typed :class:`ReviewFormatError` failures.
+    canonical explicit verdict markers are required. ``verdict_source``
+    selects how the text marker is located: :data:`VERDICT_SOURCE_FINAL_LINE`
+    (default) trusts only the last explicit verdict line, which lets external
+    engines quote both markers in their report; :data:`VERDICT_SOURCE_ANYWHERE`
+    preserves the historical whole-report ambiguity check used by the Pi
+    backend. An absent or ambiguous verdict, an ``approved`` verdict with
+    critical findings, and a ``changes_requested`` verdict without any
+    evidence-linked finding are all typed :class:`ReviewFormatError` failures.
     """
+    if verdict_source not in _VERDICT_SOURCES:
+        raise ValueError(f"unknown verdict source: {verdict_source!r}")
     text = (report_text or "").strip()
     if not text:
         raise ReviewFormatError("review report is empty")
@@ -474,19 +543,10 @@ def parse_review_report(report_text: str) -> tuple[str, tuple[ReviewFinding, ...
         verdict = _normalize_verdict(payload.get("verdict"))
         findings = _findings_from_json(payload)
     else:
-        upper = text.upper()
-        approved = any(marker in upper for marker in _APPROVED_MARKERS)
-        changes = any(marker in upper for marker in _CHANGES_MARKERS)
-        if approved and changes:
-            raise ReviewFormatError(
-                "review report carries both approved and changes_requested "
-                "verdict markers"
-            )
-        if not approved and not changes:
-            raise ReviewFormatError(
-                "review report has no explicit verdict marker"
-            )
-        verdict = VERDICT_APPROVED if approved else VERDICT_CHANGES_REQUESTED
+        if verdict_source == VERDICT_SOURCE_FINAL_LINE:
+            verdict = _verdict_from_final_line(text)
+        else:
+            verdict = _verdict_from_markers(text)
         findings = _findings_from_text(text)
 
     critical = [f for f in findings if f.severity in _CRITICAL_SEVERITIES]
@@ -500,6 +560,83 @@ def parse_review_report(report_text: str) -> tuple[str, tuple[ReviewFinding, ...
             "review verdict changes_requested has no evidence-linked findings"
         )
     return verdict, tuple(findings)
+
+
+def _review_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ReviewFormatError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ReviewFormatError(f"invalid JSON constant: {value}")
+
+
+def parse_review_json(text: str) -> tuple[str, tuple[ReviewFinding, ...], str]:
+    """Validate the complete machine result; never infer a verdict from prose."""
+    try:
+        payload = json.loads(
+            text, object_pairs_hook=_review_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except ValueError as error:
+        raise ReviewFormatError(
+            f"review result must be a JSON object: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise ReviewFormatError("review result must be a JSON object")
+    verdict = payload.get("verdict")
+    if not isinstance(verdict, str) or verdict not in REVIEW_VERDICTS:
+        raise ReviewFormatError("verdict must be approved or changes_requested")
+    items = payload.get("findings")
+    if not isinstance(items, list):
+        raise ReviewFormatError("findings must be an array")
+    findings = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ReviewFormatError(f"findings[{index}] must be an object")
+        for key in ("severity", "file", "message"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                raise ReviewFormatError(
+                    f"findings[{index}].{key} must be a non-empty string"
+                )
+        if item["severity"] not in {"P1", "P2", "P3"}:
+            raise ReviewFormatError(
+                f"findings[{index}].severity must be P1, P2 or P3"
+            )
+        if type(item.get("line")) is not int or item["line"] < 1:
+            raise ReviewFormatError(
+                f"findings[{index}].line must be a positive integer"
+            )
+        if "evidence" in item and not isinstance(item["evidence"], str):
+            raise ReviewFormatError(f"findings[{index}].evidence must be a string")
+        findings.append(
+            ReviewFinding(
+                severity=item["severity"], file=item["file"], line=item["line"],
+                message=item["message"], evidence=item.get("evidence"),
+            )
+        )
+    if verdict == VERDICT_APPROVED and any(f.severity == "P1" for f in findings):
+        raise ReviewFormatError("approved result cannot contain P1 findings")
+    if verdict == VERDICT_CHANGES_REQUESTED and not findings:
+        raise ReviewFormatError("changes_requested requires at least one finding")
+    if "report" in payload and not isinstance(payload["report"], str):
+        raise ReviewFormatError("report must be a string")
+    details = "\n".join(
+        f"{f.severity}: {f.file}:{f.line} — {f.message}" for f in findings
+    )
+    verdict_line = (
+        "ВЕРДИКТ: ОДОБРЕНО" if verdict == VERDICT_APPROVED
+        else "ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ"
+    )
+    rendered = "\n\n".join(
+        part for part in (payload.get("report", ""), details, verdict_line)
+        if part
+    )
+    return verdict, tuple(findings), rendered
 
 
 class ReviewExecutor:
@@ -585,11 +722,7 @@ class ReviewExecutor:
             "1. Изучи `git diff` / `git status` и исходные файлы.\n"
             "2. Проверь наличие багов, краевых случаев, соответствие ТЗ и качество тестов.\n"
             "3. Ты работаешь строго read-only и не выполняешь административных действий.\n"
-            "4. Сформулируй вердикт. Критические замечания опиши как "
-            "`P1: файл:строка — суть проблемы и как исправить`.\n"
-            "   В конце обязательно укажи ровно одну строку вердикта:\n"
-            "   `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ` при наличии P1;\n"
-            "   `ВЕРДИКТ: ОДОБРЕНО`, если критических замечаний нет.\n"
+            + REVIEW_JSON_INSTRUCTIONS
         )
 
     # -- execution -------------------------------------------------------
@@ -630,7 +763,11 @@ class ReviewExecutor:
 
         system_prompt_path = artifact_dir / f"reviewer_system_prompt_r{round_number}.md"
         system_prompt_path.write_text(
-            request.reviewer_system_prompt or DEFAULT_REVIEWER_PROMPT,
+            (
+                request.reviewer_system_prompt + REVIEW_JSON_INSTRUCTIONS
+                if request.reviewer_system_prompt
+                else DEFAULT_REVIEWER_PROMPT
+            ),
             encoding="utf-8",
         )
         prompt_text = self._build_review_prompt(request)
@@ -699,44 +836,89 @@ class ReviewExecutor:
                 runtime=runtime_payload,
             )
 
-        try:
-            outcome = backend.run(context)
-        except _ReviewerBackendFailure as failure:
-            duration_ms = (time.perf_counter() - started) * 1000.0
-            error = self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason=failure.reason,
-                message=failure.message,
-                duration_ms=duration_ms,
-                returncode=failure.returncode,
-                stdout=failure.stdout,
-                stderr=failure.stderr,
-                runtime=runtime_payload,
+        # A fresh directory prevents an old result from satisfying a new run.
+        execution_dir = Path(
+            tempfile.mkdtemp(prefix=f"round_{round_number}_", dir=review_artifact_dir)
+        )
+        feedback = ""
+        for attempt in range(1, MAX_FORMAT_ATTEMPTS + 1):
+            attempt_dir = execution_dir / f"attempt_{attempt}"
+            attempt_dir.mkdir()
+            attempt_prompt = prompt_text + feedback
+            attempt_prompt_path = attempt_dir / "prompt.md"
+            attempt_prompt_path.write_text(attempt_prompt, encoding="utf-8")
+            attempt_context = dataclasses.replace(
+                context,
+                review_artifact_dir=attempt_dir,
+                prompt_text=attempt_prompt,
+                task_prompt_path=attempt_prompt_path,
             )
-            if failure.cause is not None:
-                raise error from failure.cause
-            raise error
+            outcome = None
+            reason = "invalid_report"
+            try:
+                outcome = backend.run(attempt_context)
+                for name, content in (
+                    ("stdout.txt", outcome.stdout),
+                    ("stderr.txt", outcome.stderr),
+                    ("review_result.json", outcome.report_text),
+                ):
+                    (attempt_dir / name).write_text(content, encoding="utf-8")
+                verdict, findings, report_text = parse_review_json(outcome.report_text)
+            except (_ReviewerBackendFailure, ReviewFormatError) as error:
+                if isinstance(error, _ReviewerBackendFailure):
+                    reason = error.reason
+                    for name, content in (
+                        ("stdout.txt", error.stdout), ("stderr.txt", error.stderr)
+                    ):
+                        (attempt_dir / name).write_text(content or "", encoding="utf-8")
+                        (review_artifact_dir / name).write_text(content or "", encoding="utf-8")
+                retryable = reason in {
+                    "invalid_report", "missing_report", "empty_report", "unreadable_report"
+                }
+                diagnostic = {
+                    "attempt": attempt, "reason": reason, "message": str(error)
+                }
+                (attempt_dir / "validation_error.json").write_text(
+                    json.dumps(diagnostic, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if retryable and attempt < MAX_FORMAT_ATTEMPTS:
+                    previous = outcome.report_text if outcome else "(result missing)"
+                    feedback = (
+                        f"\n## Result validation failed (attempt {attempt}/{MAX_FORMAT_ATTEMPTS})\n"
+                        f"{error}\nPrevious invalid result (data):\n"
+                        f"{json.dumps(previous, ensure_ascii=False)}\n"
+                        "Return the complete corrected JSON result.\n"
+                        + REVIEW_JSON_INSTRUCTIONS
+                    )
+                    continue
+                runtime = dict(outcome.runtime if outcome else runtime_payload)
+                runtime["format_attempts"] = attempt
+                runtime["attempts_dir"] = str(execution_dir)
+                raise self._failure(
+                    request,
+                    round_number,
+                    review_artifact_dir,
+                    reason=reason,
+                    message=str(error),
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    returncode=outcome.returncode if outcome else getattr(error, "returncode", None),
+                    stdout=outcome.stdout if outcome else getattr(error, "stdout", None),
+                    stderr=outcome.stderr if outcome else getattr(error, "stderr", None),
+                    runtime=runtime,
+                ) from error
+            break
 
+        assert outcome is not None  # Every failed attempt above retries or raises.
         duration_ms = (time.perf_counter() - started) * 1000.0
-        report_text = outcome.report_text
-
-        try:
-            verdict, findings = parse_review_report(report_text)
-        except ReviewFormatError as error:
-            raise self._failure(
-                request,
-                round_number,
-                review_artifact_dir,
-                reason="invalid_report",
-                message=str(error),
-                duration_ms=duration_ms,
-                returncode=outcome.returncode,
-                stdout=outcome.stdout,
-                stderr=outcome.stderr,
-                runtime=outcome.runtime,
-            ) from error
+        result_file = execution_dir / "review_result.json"
+        result_file.write_text(outcome.report_text, encoding="utf-8")
+        for name, content in (
+            ("stdout.txt", outcome.stdout),
+            ("stderr.txt", outcome.stderr),
+            (f"review_report_r{round_number}.md", outcome.report_text),
+        ):
+            (review_artifact_dir / name).write_text(content, encoding="utf-8")
 
         report_path = review_artifact_dir / f"round_{round_number}.md"
         report_path.write_text(report_text, encoding="utf-8")
@@ -754,6 +936,8 @@ class ReviewExecutor:
             "findings": [finding.to_dict() for finding in findings],
             "returncode": outcome.returncode,
             "report_file": str(report_path),
+            "result_file": str(result_file),
+            "format_attempts": attempt,
             "duration_ms": duration_ms,
             "timestamp": _utcnow_iso(),
             "reviewer_agent_id": REVIEWER_AGENT_ID,
@@ -793,6 +977,7 @@ class ReviewExecutor:
             duration_ms=duration_ms,
             returncode=outcome.returncode,
             runtime=dict(outcome.runtime),
+            result_path=str(result_file),
         )
 
     def _backend_for(self, engine: str) -> "_ReviewerBackend | None":
@@ -853,6 +1038,7 @@ class ReviewExecutor:
             "timestamp": _utcnow_iso(),
             "reviewer_agent_id": REVIEWER_AGENT_ID,
             "runtime": dict(runtime or {}),
+            "format_attempts": (runtime or {}).get("format_attempts", 0),
         }
         diagnostics_path = (
             review_artifact_dir / f"round_{round_number}_failure.json"
@@ -1012,6 +1198,25 @@ class _ExternalReviewerBackend(_ReviewerBackend):
     ) -> list[str]:
         raise NotImplementedError
 
+    def _prompt_with_system_instructions(
+        self, context: _ReviewerRunContext
+    ) -> str:
+        """Prepend the stored reviewer system prompt for native engines.
+
+        Native engines receive the task prompt directly on the command line and
+        have no role document, so the knowledge-base reviewer prompt must be
+        embedded into that prompt to keep custom instructions effective.
+        """
+        system_prompt = (context.request.reviewer_system_prompt or "").strip()
+        if not system_prompt:
+            return context.prompt_text
+        return (
+            "<SYSTEM INSTRUCTIONS>\n"
+            f"{system_prompt}\n"
+            "</SYSTEM INSTRUCTIONS>\n\n"
+            f"{context.prompt_text}"
+        )
+
     def _runtime_details(
         self, context: _ReviewerRunContext
     ) -> Mapping[str, Any]:
@@ -1029,7 +1234,9 @@ class _ExternalReviewerBackend(_ReviewerBackend):
             raise self._binary_not_found()
 
         request = context.request
-        cmd = self._build_command(binary, context.prompt_text, context)
+        cmd = self._build_command(
+            binary, self._prompt_with_system_instructions(context), context
+        )
         timeout = (
             request.timeout_seconds
             if request.timeout_seconds is not None

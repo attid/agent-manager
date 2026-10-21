@@ -18,23 +18,76 @@ The execution engine comes from the reviewer profile's
   -p <prompt>` with a 180-second default timeout;
 - `codex` runs `codex review --uncommitted <prompt>`.
 
-Native engines are looked up on `PATH` and then in `~/.local/bin`. Their raw
-stdout/stderr are stored as `stdout.txt`/`stderr.txt` and
-`review_report_r<round>.md`, and the same `parse_review_report` validator
-parses the verdict. A missing binary is a clear `ReviewExecutionError`.
+The reviewer profile's `system_prompt` from the knowledge base is embedded in
+the prompt for both native engines. When it is non-empty, the executor
+prepends it to the task prompt it passes on the command line:
 
-A review approves only when the reviewer produced an explicit, well-formed
-verdict:
+```
+<SYSTEM INSTRUCTIONS>
+{reviewer_system_prompt}
+</SYSTEM INSTRUCTIONS>
 
-- a nonzero exit, a failed Runner status, an empty/malformed report, or an
-  absent/ambiguous verdict raises `ReviewExecutionError` and records the
-  failure; it never approves by absence of findings;
-- the domain verdict (`approved` / `changes_requested`) lives in the
-  operation `result` (or the round metrics), never in the operation `status`;
-- findings are evidence-linked with file/line and rationale;
-- the reviewer role is strictly read-only (`read` + `bash`,
-  `project_read_only=true`, `read_only=true`), strips administrative keys and
-  receives no administrative operation.
+{task_prompt}
+```
+
+The Pi backend appends the JSON contract to the stored reviewer instructions
+(or uses the built-in default) in the reviewer role prompt file. To change reviewer instructions,
+edit `agents/system-code-reviewer.md` in the knowledge base: the task worker
+hot-reloads that profile before each automatic review cycle, and the next
+`agy` or `codex` round receives the updated text in its prompt. An empty
+`system_prompt` adds no system block to a native prompt.
+
+## JSON result contract
+
+All three engines must return a complete JSON object. Pi writes the JSON into
+its normal summary file; native engines emit it on stdout. The executor saves
+that raw result as `review_result.json`; it never scans prose, quotes or code
+blocks for approval markers. Reviewers keep their existing read-only access.
+
+```json
+{
+  "verdict": "changes_requested",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/app.py",
+      "line": 42,
+      "message": "Describe the defect and its correction"
+    }
+  ],
+  "report": "Optional explanation for the reader"
+}
+```
+
+`verdict` and `findings` are required. The verdict is `approved` or
+`changes_requested`; findings must be an array, including `[]` for no findings.
+Every finding requires severity (`P1`, `P2`, `P3`), a non-empty file and message,
+and a positive integer line. Optional `evidence` and `report` are strings.
+An approved result cannot contain P1; changes_requested requires a finding.
+Additional fields are accepted. Counts are calculated from findings.
+
+The JSON must occupy the entire response, without Markdown fences or prose.
+The task's JSON contract supersedes older text-verdict profile instructions.
+An absent, unreadable, empty or invalid result triggers a new format attempt
+with the validation error. There are at most **three attempts total per round**.
+After the third invalid result the review fails with persisted diagnostics;
+there is no automatic approval and the developer is not resumed to fix a
+format error. Nonzero process exits, launch failures, incomplete Runner status
+and malformed Runner envelopes fail immediately rather than being retried.
+
+Every invocation gets a new `round_<n>_<unique>/` artifact directory. Its
+`attempt_<n>/` directories preserve prompts, raw results, stdout/stderr and
+validation errors. A successful invocation saves `review_result.json` alongside
+them and renders a human-readable `round_<n>.md`. Round metrics record
+`result_file` and `format_attempts`; the operation result exposes `result_path`.
+No previous invocation's result can satisfy a new request. The historical flat
+stdout/stderr and report paths remain available for artifact readers.
+
+Native engines are looked up on `PATH` and then in `~/.local/bin`. A missing
+binary raises `ReviewExecutionError`. The domain verdict remains in the
+operation result, never the operation status. The reviewer role strips
+administrative keys and uses `read`/`bash` with `project_read_only=true` and
+`read_only=true`.
 
 ## Automatic review inside task execution
 
@@ -43,7 +96,8 @@ runs for coding tasks with `changed_files` that did not disable review. It:
 
 - loads the current `system-code-reviewer` profile (hot-reloading its file if
   changed);
-- runs up to three rounds through `ReviewExecutor`;
+- runs up to three review/fix rounds through `ReviewExecutor`, independently
+  of the three format attempts allowed within each review round;
 - persists round reports and metrics (`round_<n>.json`, including the verdict);
 - re-runs the developer and re-reviews when changes are requested, and can end
   in `waiting_user_input` when the developer asks for clarification;

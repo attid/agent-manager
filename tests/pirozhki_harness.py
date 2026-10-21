@@ -268,8 +268,7 @@ def _seed_deterministic_runner_configs(
             "mode": "success",
             "session_id_value": "pirozhki-reviewer-session",
             "summary_text": (
-                "Проверил изменение кнопки.\n"
-                "ВЕРДИКТ: ОДОБРЕНО\n"
+                '{"verdict": "approved", "findings": []}'
             ),
         },
         "system-log-analyzer": {
