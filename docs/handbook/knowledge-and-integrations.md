@@ -167,6 +167,46 @@ Drain targets:
   `<knowledge_root>/handbook` (content-idempotent) so the read-only platform
   handbook is mounted at `/knowledge/handbook` for agent discovery.
 
+## Dialog context, UUID and Telegram delivery
+
+Every secretary-related message that reaches the owner's Telegram chat is
+rendered by the unified messenger (`src/agent_manager/telegram/messenger.py`)
+and ends with the full conversation UUID hashtag (for example
+`#34acbd180d064f6d8588a039c0f1b6bc`) on every part and attachment caption.
+The hashtag is for reading, copying and diagnostics only; routing never parses
+it back out of the visible text.
+
+- **API mirroring.** A user question appended through the API (`/ask`,
+  `/conversations/ask` or `POST .../messages` with the default source) is
+  mirrored into the owner's chat as «📨 Вопрос секретарю через API» with the
+  server-verified caller (free-form request metadata is never trusted as an
+  identity), followed by the secretary reply — question strictly before
+  answer. A failed turn is mirrored as «⚠️ Ошибка исполнения». Telegram-origin
+  questions are already in the chat and are never copied.
+- **Durable outbox.** Delivery rows (`telegram_deliveries`, migration `0012`)
+  are written transactionally with the messages they mirror and processed by
+  an at-least-once sender: an atomic `pending → sending` claim, per-part
+  progress (`parts_sent`), startup requeue of stale `sending` rows. A network
+  failure with an unknown outcome is logged as such and retried; a definite
+  Telegram API rejection marks the row `failed`. Exactly-once delivery is not
+  promised: a part accepted by Telegram just before a crash may arrive twice.
+- **Reply routing.** `telegram_message_links` binds each Telegram chat/message
+  pair to its conversation (and task, when bound); user input registers links
+  transactionally with the message insert, bot output registers them right
+  after each sent part. An incoming Reply resolves its target through
+  `GET /telegram/links/{chat_id}/{telegram_message_id}` **before** any
+  active-mode or task-clarification logic, so a reply into dialog A can never
+  resume an unrelated waiting task B and never switches the active context.
+  A reply to a bot message whose link is lost (dialog deleted or sent before
+  this table existed) gets an explanation instead of silent rerouting; a reply
+  to an unlinked human message is ordinary input.
+- **Context switching.** Every dialog message carries a button: «▶️ Продолжить
+  задачу №N» for task-bound dialogs (`switch_task:`) or «💬 Продолжить этот
+  диалог» (`switch_conversation:`). The press verifies the target exists,
+  switches the active context and confirms it with the full UUID; a repeated
+  press is safe. Messages about another dialog show a snapshot plate
+  («↩️ Другой диалог · сейчас активна задача №41») taken at send time.
+
 ## Infrastructure topology
 
 Kustomize, Helm and Terraform files are not read by the running platform in

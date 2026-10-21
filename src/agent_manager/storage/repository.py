@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .database import Database
 from .models import Conversation, Message, Task, utcnow
+from .telegram_delivery import note_appended_message
 
 #: Sentinel distinguishing "field omitted" from "field supplied as None".
 _UNSET: Any = object()
@@ -670,6 +671,7 @@ class ConversationRepository:
         source: str = "api",
         external_id: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        verified_caller: str | None = None,
     ) -> MessageAppendResult:
         """Append one message to a conversation, idempotently.
 
@@ -679,6 +681,11 @@ class ConversationRepository:
         ``replayed=True``; a different payload raises
         :class:`MessageConflictError` and leaves the original untouched. When
         ``external_id`` is ``None`` every call inserts a new message.
+
+        ``verified_caller`` is the server-authenticated principal label. It is
+        never stored on the message; it only rides along into the durable
+        Telegram delivery row of an API question copy, so free-form client
+        metadata can never impersonate a caller.
 
         The insert uses an atomic ``INSERT ... ON CONFLICT DO NOTHING`` so
         concurrent delivery of the same key serializes at SQLite and never
@@ -722,6 +729,9 @@ class ConversationRepository:
                     update(Conversation)
                     .where(Conversation.id == conversation_id)
                     .values(updated_at=utcnow())
+                )
+                note_appended_message(
+                    session, message=inserted, verified_caller=verified_caller
                 )
                 return MessageAppendResult(message=inserted, replayed=False)
 

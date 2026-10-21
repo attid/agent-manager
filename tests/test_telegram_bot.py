@@ -85,6 +85,9 @@ def _make_message(
     msg.photo = photo
     msg.caption = caption
     msg.document = document
+    # aiogram Message is a pydantic model, so spec'd mocks cannot see field
+    # names; optional fields the handlers rely on are set explicitly.
+    msg.reply_to_message = None
     msg.answer = AsyncMock()
     msg.edit_text = AsyncMock()
     msg.edit_reply_markup = AsyncMock()

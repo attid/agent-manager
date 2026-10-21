@@ -36,7 +36,7 @@ from agent_manager.operation_worker import (
 from agent_manager.permissions import ExecutionPermissions
 from agent_manager.persistent_conversation import PersistentConversationHandler
 from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import Database
+from agent_manager.storage import Database, TaskRepository
 from agent_manager.task_worker import (
     MAX_TASK_CONCURRENCY,
     TaskExecutionWorkerPool,
@@ -44,6 +44,7 @@ from agent_manager.task_worker import (
 from agent_manager.task_subscriptions import TaskSubscriptions
 from agent_manager.telegram.bot import create_bot, setup_bot_commands
 from agent_manager.telegram.config import TelegramConfig
+from agent_manager.telegram.messenger import TelegramDeliveryService
 from agent_manager.telegram.notifier import TelegramNotifier
 
 logger = logging.getLogger("agent_manager.runner")
@@ -267,6 +268,7 @@ class AgentManagerServices:
         self.dp = None
         self.queue_processor = None
         self.telegram_notifier: TelegramNotifier | None = None
+        self.telegram_delivery: TelegramDeliveryService | None = None
         self.uvicorn_server: uvicorn.Server | None = None
         # Ephemeral in-memory administrative principal for the host Telegram
         # client. Never written to a file, child configuration or log.
@@ -344,6 +346,37 @@ class AgentManagerServices:
                     loop=loop,
                     default_chat_id=telegram_config.allowed_user_id,
                 )
+                # Unified Telegram dialog delivery: the durable outbox for
+                # API-question copies, replies and errors, shared with the
+                # synchronous queue worker to guarantee exactly one sender
+                # per delivery row.
+                state_storage = queue_processor.storage
+                probe_user_id = telegram_config.allowed_user_id
+                probe_tasks = TaskRepository(self.database)
+
+                def active_context_probe():
+                    try:
+                        state = state_storage.get_user_state(probe_user_id)
+                    except Exception:
+                        return None
+                    active = {
+                        "mode": state.mode,
+                        "conversation_id": state.active_conversation_id,
+                    }
+                    if state.mode == "task" and state.active_task_id:
+                        task = probe_tasks.get(state.active_task_id)
+                        if task is not None:
+                            active["task_number"] = task.number
+                    return active
+
+                self.telegram_delivery = TelegramDeliveryService(
+                    bot=self.bot,
+                    database=self.database,
+                    default_chat_id=telegram_config.allowed_user_id,
+                    knowledge_base=self.knowledge_base,
+                    active_context_probe=active_context_probe,
+                )
+                queue_processor.delivery_service = self.telegram_delivery
                 logger.info(
                     "Telegram Bot initialized for user %s",
                     telegram_config.allowed_user_id,
@@ -488,12 +521,34 @@ class AgentManagerServices:
             except Exception:
                 pass
 
+    async def _run_telegram_delivery(self) -> None:
+        """Deliver durable Telegram outbox rows until cancelled.
+
+        Startup recovery requeues rows a previous process left in ``sending``;
+        the loop then keeps draining pending rows. Delivery is at-least-once:
+        a network failure with an unknown outcome releases the row for retry.
+        """
+        assert self.telegram_delivery is not None
+        await asyncio.to_thread(self.telegram_delivery.startup_recovery)
+        while True:
+            try:
+                delivered = await self.telegram_delivery.deliver_pending()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Telegram delivery loop failed; will retry")
+                delivered = 0
+            await asyncio.sleep(0.2 if delivered else 1.0)
+
     async def run(self) -> None:
         """Run async loops: uvicorn server and Telegram bot polling."""
         tasks: list[asyncio.Task[Any]] = []
 
         if self.task_subscriptions is not None:
             tasks.append(asyncio.create_task(self.task_subscriptions.run(self.bot), name="task-subscriptions"))
+
+        if self.telegram_delivery is not None:
+            tasks.append(asyncio.create_task(self._run_telegram_delivery(), name="telegram-delivery"))
 
         if self.uvicorn_server:
             tasks.append(asyncio.create_task(self.uvicorn_server.serve(), name="uvicorn"))

@@ -12,6 +12,7 @@ from agent_manager.permissions import ExecutionPermissions
 from agent_manager.secretary import TurnProcessor
 from agent_manager.storage import ConversationRepository, Database, TaskRepository
 from agent_manager.task_subscriptions import TaskSubscriptions
+from agent_manager.telegram.keyboards import dialog_switch_keyboard
 
 
 def setup_subscription(db):
@@ -52,11 +53,25 @@ def test_completion_resumes_same_dialogue_once_and_delivers_after_restart(migrat
         assert dispatcher.step() is None
         restarted = TaskSubscriptions(db)
         bot = AsyncMock()
+        bot.send_rich_message.return_value.message_id = 501
         assert asyncio.run(restarted.deliver_replies(bot)) == 1
         assert asyncio.run(restarted.deliver_replies(bot)) == 0
         assert restarted.enqueue_ready() == 0
-        bot.send_message.assert_awaited_once_with(
-            chat_id=123, text="Research is ready: Found the result", parse_mode=None,
+        # Subscription replies now flow through the unified messenger: a task
+        # result header, the full conversation UUID footer and the explicit
+        # context-switch button, instead of a bare parse_mode=None text. The
+        # delivery guarantee under test is unchanged: one send, no secretary
+        # re-run after restart.
+        bot.send_rich_message.assert_awaited_once()
+        kwargs = bot.send_rich_message.await_args.kwargs
+        assert kwargs["chat_id"] == 123
+        assert kwargs["rich_message"].markdown == (
+            f"📦 Результат задачи №{task.number} «Research»\n\n"
+            "Research is ready: Found the result\n\n"
+            f"#{conv.id}"
+        )
+        assert kwargs["reply_markup"] == dialog_switch_keyboard(
+            conversation_id=conv.id, task_id=task.id, task_number=task.number
         )
         assert len(seen) == 2
     finally:
@@ -95,9 +110,17 @@ def test_delivery_failure_retries_reply_without_rerunning_secretary(migrated_db)
         dispatcher = QueueDispatcher(db, handler=handler)
         assert dispatcher.step().status == "completed"
         bot = AsyncMock()
-        bot.send_message.side_effect = [RuntimeError("transport unavailable"), None]
+        # The unified sender falls back rich → plain → document, so a full
+        # transport outage must fail every transport before the retry can
+        # prove that delivery resumes without re-running the secretary.
+        transports = (bot.send_rich_message, bot.send_message, bot.send_document)
+        for method in transports:
+            method.side_effect = RuntimeError("transport unavailable")
         with pytest.raises(RuntimeError):
             asyncio.run(service.deliver_replies(bot))
+        for method in transports:
+            method.side_effect = None
+        bot.send_rich_message.return_value.message_id = 601
         assert asyncio.run(TaskSubscriptions(db).deliver_replies(bot)) == 1
         assert dispatcher.step() is None
         assert service.enqueue_ready() == 0

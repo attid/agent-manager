@@ -142,11 +142,12 @@ def test_repeated_upgrade_is_safe(db_path: pathlib.Path) -> None:
     # The single head moved from 0003 to 0004 when the agent_profiles table
     # was added, to 0005 when conversation_runtimes was added, to 0006 when the
     # task assignment column was added, to 0007 when the durable operations
-    # table was added, to 0008 when the operation owner column was added, and
-    # to 0009 when the analysis reports and recommendations tables were added;
-    # the assertion that exactly one version row is stored, and that it is the
-    # current head, is unchanged.
-    assert rows == [("0011_task_subscriptions",)]
+    # table was added, to 0008 when the operation owner column was added, to
+    # 0009 when the analysis reports and recommendations tables were added, to
+    # 0011 when task subscriptions were added, and to 0012 when the Telegram
+    # message links and delivery outbox were added; the assertion that exactly
+    # one version row is stored, and that it is the current head, is unchanged.
+    assert rows == [("0012_telegram_delivery",)]
 
 
 def test_wal_journal_mode_is_enabled(migrated_db: pathlib.Path) -> None:

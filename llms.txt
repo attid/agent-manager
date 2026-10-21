@@ -21,7 +21,9 @@ registered Pi JS tools.
 
 - Default API address: `http://127.0.0.1:18767` (loopback only).
 - Storage: one file-backed SQLite database in WAL mode, versioned by Alembic
-  migrations `0001`–`0009` (`0008_operation_owner`, `0009_analysis`).
+  migrations `0001`–`0012` (`0011_task_subscriptions`,
+  `0012_telegram_delivery`: durable Telegram message links and the delivery
+  outbox).
 - Execution: `pi_runner` sandboxes each agent run; agent identity and runtime
   policy come from immutable `AgentProfile` revisions, and each child receives
   an execution-scoped backend credential rather than an administrative token.

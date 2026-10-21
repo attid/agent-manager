@@ -291,6 +291,12 @@ _ROUTE_RULES: tuple[tuple[str, str, str, str | None], ...] = (
         TURNS_WRITE,
         "conversation",
     ),
+    (
+        "GET",
+        "/telegram/links/{chat_id}/{telegram_message_id}",
+        CONVERSATIONS_READ,
+        None,
+    ),
     ("GET", "/turns/{turn_id}", TURNS_READ, "turn"),
     ("GET", "/tasks/{task_id}/analysis", ANALYSIS_READ, "task"),
     ("GET", "/analysis/{report_id}", ANALYSIS_READ, None),

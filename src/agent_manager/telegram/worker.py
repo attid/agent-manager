@@ -12,7 +12,17 @@ from aiogram.types import BufferedInputFile, FSInputFile, InputRichMessage
 
 from agent_manager.knowledge import KnowledgeBase, SEND_FILE_PATTERN
 from .client import BackendClient
-from .keyboards import cancel_queue_keyboard, talk_keyboard
+from .keyboards import (
+    cancel_queue_keyboard,
+    dialog_switch_keyboard,
+    talk_keyboard,
+)
+from .messenger import (
+    TelegramDeliveryService,
+    compose_dialog_message,
+    render_foreign_context_plate,
+    with_conversation_footer,
+)
 from .state import QueuedMessage, UserStateStorage
 from .transcription import DeepgramTranscriber
 
@@ -50,6 +60,7 @@ class QueueProcessor:
         knowledge_base: KnowledgeBase | None = None,
         poll_interval_seconds: float = 0.5,
         turn_timeout_seconds: float = 120.0,
+        delivery_service: TelegramDeliveryService | None = None,
     ) -> None:
         self.bot = bot
         self.client = backend_client
@@ -58,6 +69,7 @@ class QueueProcessor:
         self.knowledge_base = knowledge_base
         self.poll_interval_seconds = poll_interval_seconds
         self.turn_timeout_seconds = turn_timeout_seconds
+        self.delivery_service = delivery_service
 
     async def submit_message(
         self,
@@ -185,8 +197,11 @@ class QueueProcessor:
             # 3. Append user message to backend. Inbound media stays in the
             # explicit Telegram media directory; the persistent conversation
             # handler is the single owner that stages it into the
-            # conversation/turn-scoped attachment store.
+            # conversation/turn-scoped attachment store. chat_id +
+            # telegram_message_id let the backend register the durable Reply
+            # link transactionally with the message insert.
             metadata = {
+                "chat_id": queued_msg.chat_id,
                 "telegram_message_id": queued_msg.telegram_message_id,
                 "media_type": queued_msg.media_type,
                 "media_path": queued_msg.media_path,
@@ -235,6 +250,18 @@ class QueueProcessor:
             if reply_text is not None:
                 self.storage.set_message_status(queued_msg.id, "completed")
 
+                # Claim the durable reply row before sending: whoever holds
+                # the claim sends; the other side must not send a copy.
+                claimed = None
+                outbox_owned = False
+                if self.delivery_service is not None:
+                    claimed = self.delivery_service.claim_reply_delivery(turn_id)
+                    if claimed is None:
+                        outbox_owned = (
+                            self.delivery_service.get_reply_delivery(turn_id)
+                            is not None
+                        )
+
                 # Extract and dispatch file attachments (e.g. [SEND_FILE: path])
                 file_targets = list(SEND_FILE_PATTERN.findall(reply_text))
                 clean_reply_text = SEND_FILE_PATTERN.sub("", reply_text).strip()
@@ -243,103 +270,173 @@ class QueueProcessor:
                 elif not clean_reply_text:
                     clean_reply_text = "Ответ получен."
 
-                if status_msg_id:
-                    edit_success = False
-                    if len(clean_reply_text) <= 16384:
+                switch_keyboard = dialog_switch_keyboard(
+                    conversation_id=conv_id,
+                    task_id=task_metadata.get("task_id"),
+                    task_number=task_metadata.get("task_number"),
+                )
+
+                if outbox_owned:
+                    # The durable outbox already delivered (or is delivering)
+                    # this reply with full formatting; point the user at it.
+                    pointer = with_conversation_footer(
+                        "↗️ Ответ доставлен отдельным сообщением выше.", conv_id
+                    )
+                    if status_msg_id:
+                        await self._safe_edit_text(
+                            chat_id, status_msg_id, pointer,
+                            reply_markup=switch_keyboard,
+                        )
+                    else:
                         try:
-                            await self.bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=status_msg_id,
-                                text=clean_reply_text,
-                                rich_message=InputRichMessage(markdown=clean_reply_text),
+                            await self.bot.send_message(
+                                chat_id=chat_id, text=pointer,
+                                reply_markup=switch_keyboard,
                             )
-                            edit_success = True
-                        except Exception as edit_err:
-                            logger.debug("edit_message_text with rich_message failed: %s", edit_err)
+                        except Exception as pointer_err:
+                            logger.warning("Failed to send reply pointer: %s", pointer_err)
+                else:
+                    plate = await self._foreign_plate(queued_msg, conv_id)
+                    rendered_reply = with_conversation_footer(
+                        compose_dialog_message(
+                            header=None,
+                            body=clean_reply_text,
+                            plate=plate,
+                        ),
+                        conv_id,
+                    )
+                    sent_message_ids: list[int] = []
+
+                    if status_msg_id:
+                        edit_success = False
+                        if len(rendered_reply) <= 16384:
                             try:
                                 await self.bot.edit_message_text(
                                     chat_id=chat_id,
                                     message_id=status_msg_id,
-                                    text=clean_reply_text,
+                                    text=rendered_reply,
+                                    rich_message=InputRichMessage(markdown=rendered_reply),
+                                    reply_markup=switch_keyboard,
                                 )
                                 edit_success = True
-                            except Exception:
-                                pass
+                            except Exception as edit_err:
+                                logger.debug("edit_message_text with rich_message failed: %s", edit_err)
+                                try:
+                                    await self.bot.edit_message_text(
+                                        chat_id=chat_id,
+                                        message_id=status_msg_id,
+                                        text=rendered_reply,
+                                        reply_markup=switch_keyboard,
+                                    )
+                                    edit_success = True
+                                except Exception:
+                                    pass
 
-                    if not edit_success:
-                        doc_file = BufferedInputFile(
-                            clean_reply_text.encode("utf-8"), filename="ответ_секретаря.md"
-                        )
-                        await self.bot.send_document(
-                            chat_id=chat_id,
-                            document=doc_file,
-                            caption="📄 Текст ответа прикреплён файлом:",
-                            reply_to_message_id=queued_msg.telegram_message_id,
-                        )
-                else:
-                    if len(clean_reply_text) <= 16384:
-                        try:
-                            await self.bot.send_rich_message(
-                                chat_id=chat_id,
-                                rich_message=InputRichMessage(markdown=clean_reply_text),
-                                reply_to_message_id=queued_msg.telegram_message_id,
-                            )
-                        except Exception as send_err:
-                            logger.warning("send_rich_message failed, fallback to doc: %s", send_err)
+                        if edit_success:
+                            sent_message_ids.append(status_msg_id)
+                        else:
                             doc_file = BufferedInputFile(
-                                clean_reply_text.encode("utf-8"), filename="ответ_секретаря.md"
+                                rendered_reply.encode("utf-8"), filename="ответ_секретаря.md"
                             )
-                            await self.bot.send_document(
+                            doc = await self.bot.send_document(
                                 chat_id=chat_id,
                                 document=doc_file,
-                                caption="📄 Текст ответа прикреплён файлом:",
+                                caption=with_conversation_footer(
+                                    "📄 Текст ответа прикреплён файлом:", conv_id
+                                ),
                                 reply_to_message_id=queued_msg.telegram_message_id,
+                                reply_markup=switch_keyboard,
                             )
+                            sent_message_ids.append(doc.message_id)
                     else:
-                        doc_file = BufferedInputFile(
-                            clean_reply_text.encode("utf-8"), filename="ответ_секретаря.md"
-                        )
-                        await self.bot.send_document(
-                            chat_id=chat_id,
-                            document=doc_file,
-                            caption="📄 Ответ секретаря превышает 16k символов. Текст прикреплён файлом:",
-                            reply_to_message_id=queued_msg.telegram_message_id,
-                        )
-
-                # Send attached documents if found
-                for file_query in file_targets:
-                    resolved_file = (
-                        self.knowledge_base.resolve_file(file_query)
-                        if self.knowledge_base is not None
-                        else None
-                    )
-                    if resolved_file and resolved_file.is_file():
-                        try:
-                            await self.bot.send_document(
+                        if len(rendered_reply) <= 16384:
+                            try:
+                                sent = await self.bot.send_rich_message(
+                                    chat_id=chat_id,
+                                    rich_message=InputRichMessage(markdown=rendered_reply),
+                                    reply_to_message_id=queued_msg.telegram_message_id,
+                                    reply_markup=switch_keyboard,
+                                )
+                                sent_message_ids.append(sent.message_id)
+                            except Exception as send_err:
+                                logger.warning("send_rich_message failed, fallback to doc: %s", send_err)
+                                doc_file = BufferedInputFile(
+                                    rendered_reply.encode("utf-8"), filename="ответ_секретаря.md"
+                                )
+                                doc = await self.bot.send_document(
+                                    chat_id=chat_id,
+                                    document=doc_file,
+                                    caption=with_conversation_footer(
+                                        "📄 Текст ответа прикреплён файлом:", conv_id
+                                    ),
+                                    reply_to_message_id=queued_msg.telegram_message_id,
+                                    reply_markup=switch_keyboard,
+                                )
+                                sent_message_ids.append(doc.message_id)
+                        else:
+                            doc_file = BufferedInputFile(
+                                rendered_reply.encode("utf-8"), filename="ответ_секретаря.md"
+                            )
+                            doc = await self.bot.send_document(
                                 chat_id=chat_id,
-                                document=FSInputFile(resolved_file),
-                                caption=f"📄 {resolved_file.name}",
+                                document=doc_file,
+                                caption=with_conversation_footer(
+                                    "📄 Ответ секретаря превышает 16k символов. "
+                                    "Текст прикреплён файлом:", conv_id
+                                ),
+                                reply_to_message_id=queued_msg.telegram_message_id,
+                                reply_markup=switch_keyboard,
                             )
-                            logger.info(
-                                "Sent document %s to chat_id=%s",
-                                resolved_file,
-                                chat_id,
-                            )
-                        except Exception as doc_err:
-                            logger.error(
-                                "Failed to send document %s: %s",
-                                resolved_file,
-                                doc_err,
-                                exc_info=doc_err,
-                            )
-                    else:
-                        logger.warning(
-                            "Requested document could not be resolved: %s", file_query
+                            sent_message_ids.append(doc.message_id)
+
+                    # Send attached documents if found
+                    for file_query in file_targets:
+                        resolved_file = (
+                            self.knowledge_base.resolve_file(file_query)
+                            if self.knowledge_base is not None
+                            else None
                         )
-                        await self.bot.send_message(
+                        if resolved_file and resolved_file.is_file():
+                            try:
+                                doc = await self.bot.send_document(
+                                    chat_id=chat_id,
+                                    document=FSInputFile(resolved_file),
+                                    caption=with_conversation_footer(
+                                        f"📄 {resolved_file.name}", conv_id
+                                    ),
+                                )
+                                sent_message_ids.append(doc.message_id)
+                                logger.info(
+                                    "Sent document %s to chat_id=%s",
+                                    resolved_file,
+                                    chat_id,
+                                )
+                            except Exception as doc_err:
+                                logger.error(
+                                    "Failed to send document %s: %s",
+                                    resolved_file,
+                                    doc_err,
+                                    exc_info=doc_err,
+                                )
+                        else:
+                            logger.warning(
+                                "Requested document could not be resolved: %s", file_query
+                            )
+                            warn = await self.bot.send_message(
+                                chat_id=chat_id,
+                                text=with_conversation_footer(
+                                    f"⚠️ Документ не найден: <code>{file_query}</code>",
+                                    conv_id,
+                                ),
+                                parse_mode="HTML",
+                            )
+                            sent_message_ids.append(warn.message_id)
+
+                    if claimed is not None and self.delivery_service is not None:
+                        self.delivery_service.record_delivery_sent(
+                            claimed,
                             chat_id=chat_id,
-                            text=f"⚠️ Документ не найден: <code>{file_query}</code>",
-                            parse_mode="HTML",
+                            telegram_message_ids=sent_message_ids,
                         )
             elif turn_error is not None:
                 self.storage.set_message_status(queued_msg.id, "failed")
@@ -353,13 +450,23 @@ class QueueProcessor:
                     if state.active_conversation_id == queued_msg.context_conversation_id:
                         self.storage.set_user_mode(queued_msg.user_id, "talk", conversation_id=None)
                 summary = secretary_error_summary(turn_error)
-                err_msg = (
-                    f"❌ <b>Ошибка секретаря:</b>\n{summary}\n\n"
-                    "<i>Контекст диалога сброшен. Следующее сообщение начнёт новый разговор.</i>"
-                    if is_talk
-                    else f"❌ Ошибка секретаря:\n{summary}"
+                err_msg = with_conversation_footer(
+                    (
+                        f"❌ <b>Ошибка секретаря:</b>\n{summary}\n\n"
+                        "<i>Контекст диалога сброшен. Следующее сообщение начнёт новый разговор.</i>"
+                        if is_talk
+                        else f"❌ Ошибка секретаря:\n{summary}"
+                    ),
+                    conv_id,
                 )
-                markup = talk_keyboard() if is_talk else None
+                markup = talk_keyboard() if is_talk else dialog_switch_keyboard(
+                    conversation_id=conv_id,
+                    task_id=(
+                        queued_msg.context_task_id
+                        if queued_msg.context_mode == "task"
+                        else None
+                    ),
+                )
                 if status_msg_id:
                     await self._safe_edit_text(chat_id, status_msg_id, err_msg, reply_markup=markup)
                 else:
@@ -378,13 +485,23 @@ class QueueProcessor:
                     state = self.storage.get_user_state(queued_msg.user_id)
                     if state.active_conversation_id == queued_msg.context_conversation_id:
                         self.storage.set_user_mode(queued_msg.user_id, "talk", conversation_id=None)
-                timeout_msg = (
-                    "⏱ <b>Время ожидания ответа секретаря истекло.</b>\n\n"
-                    "<i>Контекст диалога сброшен. Следующее сообщение начнёт новый разговор.</i>"
-                    if is_talk
-                    else "⏱ Время ожидания ответа секретаря истекло."
+                timeout_msg = with_conversation_footer(
+                    (
+                        "⏱ <b>Время ожидания ответа секретаря истекло.</b>\n\n"
+                        "<i>Контекст диалога сброшен. Следующее сообщение начнёт новый разговор.</i>"
+                        if is_talk
+                        else "⏱ Время ожидания ответа секретаря истекло."
+                    ),
+                    conv_id,
                 )
-                markup = talk_keyboard() if is_talk else None
+                markup = talk_keyboard() if is_talk else dialog_switch_keyboard(
+                    conversation_id=conv_id,
+                    task_id=(
+                        queued_msg.context_task_id
+                        if queued_msg.context_mode == "task"
+                        else None
+                    ),
+                )
                 if status_msg_id:
                     await self._safe_edit_text(
                         chat_id, status_msg_id, timeout_msg, reply_markup=markup
@@ -468,6 +585,35 @@ class QueueProcessor:
             "task_number": task_number,
             "task_title": task_title,
         }
+
+    async def _foreign_plate(
+        self, queued_msg: QueuedMessage, conversation_id: str
+    ) -> str | None:
+        """Snapshot plate when this reply targets a non-active dialog.
+
+        Shown when the user's explicitly selected context differs from the
+        conversation this reply belongs to (e.g. a Reply routed into another
+        dialog). Reflects state at send time only.
+        """
+        try:
+            state = self.storage.get_user_state(queued_msg.user_id)
+        except Exception:
+            return None
+        if state.active_conversation_id == conversation_id:
+            return None
+        if state.mode == "task" and state.active_task_id:
+            try:
+                active_task = await self.client.get_task(state.active_task_id)
+                plate = render_foreign_context_plate(
+                    active_task_number=active_task.get("number")
+                )
+                if plate is not None:
+                    return plate
+            except Exception:
+                pass
+        return render_foreign_context_plate(
+            active_conversation_id=state.active_conversation_id
+        )
 
     async def _safe_edit_text(
         self,

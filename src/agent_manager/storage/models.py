@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -592,3 +593,110 @@ class Recommendation(Base):
         onupdate=utcnow,
         server_default=func.now(),
     )
+
+
+class TelegramMessageLink(Base):
+    """A durable Telegram chat-message → conversation link for Reply routing.
+
+    The composite primary key ``(chat_id, telegram_message_id)`` identifies one
+    Telegram message. Links are written transactionally with the backend
+    message they refer to (user input) or right after the corresponding part is
+    sent (bot output), and survive restarts. Deleting a conversation removes its
+    links, so a Reply to an orphaned bot message is detectable as "link lost".
+    """
+
+    __tablename__ = "telegram_message_links"
+    __table_args__ = (
+        Index(
+            "ix_telegram_message_links_conversation", "conversation_id"
+        ),
+    )
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    origin: Mapped[str] = mapped_column(
+        String, nullable=False, default="user", server_default="user"
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
+    )
+
+
+class TelegramDelivery(Base):
+    """One durable Telegram outbox row for a dialog message.
+
+    Rows are enqueued transactionally with the backend message they mirror
+    (API question copy, secretary reply, execution error) and processed by the
+    unified sender: first an atomic ``pending → sending`` claim, then per-part
+    progress (``parts_sent`` / ``telegram_message_ids``), then ``sent``.
+    Delivery is at-least-once: a crash after Telegram accepted a part but
+    before its acknowledgement is stored can resend that part once recovered.
+    """
+
+    __tablename__ = "telegram_deliveries"
+    __table_args__ = (
+        UniqueConstraint("id", name="uq_telegram_deliveries_id"),
+        UniqueConstraint(
+            "idempotency_key", name="uq_telegram_deliveries_idempotency_key"
+        ),
+        Index("ix_telegram_deliveries_status", "status"),
+        Index("ix_telegram_deliveries_conversation", "conversation_id"),
+    )
+
+    sequence: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    message_id: Mapped[str | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    turn_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending", server_default="pending"
+    )
+    parts_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parts_sent: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    telegram_message_ids: Mapped[list[Any]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSON, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=utcnow,
+        onupdate=utcnow,
+        server_default=func.now(),
+    )
+    claimed_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=True)

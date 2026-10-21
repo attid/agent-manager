@@ -56,6 +56,33 @@ def cancel_queue_keyboard(queue_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def dialog_switch_keyboard(
+    *,
+    conversation_id: str,
+    task_id: str | None = None,
+    task_number: Any = None,
+) -> InlineKeyboardMarkup:
+    """The explicit 'continue this dialog' button on dialog messages.
+
+    Task-bound dialogs offer to resume the task (the handler reuses the task
+    card flow); free dialogs offer the conversation itself. Callback data
+    stays within Telegram's 64-byte budget: ``switch_task:<32 hex>`` and
+    ``switch_conversation:<32 hex>``.
+    """
+    if task_id is not None:
+        number = f" №{task_number}" if task_number is not None else ""
+        button = InlineKeyboardButton(
+            text=f"▶️ Продолжить задачу{number}",
+            callback_data=f"switch_task:{task_id}",
+        )
+    else:
+        button = InlineKeyboardButton(
+            text="💬 Продолжить этот диалог",
+            callback_data=f"switch_conversation:{conversation_id}",
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+
+
 def task_card_keyboard(task_id: str, status: str) -> InlineKeyboardMarkup:
     """Actions available for a selected task card."""
     buttons: list[list[InlineKeyboardButton]] = []

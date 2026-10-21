@@ -91,6 +91,7 @@ from .storage import (
 )
 from .storage.models import utcnow
 from .storage.repository import ConversationRepository
+from .storage.telegram_delivery import note_completed_turn, note_failed_turn
 
 logger = logging.getLogger(__name__)
 
@@ -472,6 +473,7 @@ class TurnProcessor:
                 .values(updated_at=utcnow())
                 .execution_options(synchronize_session=False)
             )
+            note_completed_turn(session, turn=turn, reply=reply)
             return reply
 
     def fail(self, turn_id: str, claim_token: str, error: str) -> Turn:
@@ -503,9 +505,11 @@ class TurnProcessor:
                 if still_exists is None:
                     raise TurnNotFoundError(turn_id)
                 raise StaleClaimError(turn_id)
-            return session.scalars(
+            failed_turn = session.scalars(
                 select(Turn).where(Turn.id == turn_id)
             ).one()
+            note_failed_turn(session, turn=failed_turn, error=error)
+            return failed_turn
 
     # -- explicit retry / recovery --------------------------------------
 

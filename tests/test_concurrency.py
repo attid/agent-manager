@@ -88,9 +88,12 @@ def test_base_metadata_matches_migrated_schema(
     message tables added by revision 0002, the ``turns`` table added by
     revision 0003, the ``agent_profiles`` table added by revision 0004, the
     ``conversation_runtimes`` table added by revision 0005, the durable
-    ``operations`` table added by revision 0007 and the ``analysis_reports``
-    and ``recommendations`` tables added by revision 0009; the migration chain
-    is still the single source of the physical schema.
+    ``operations`` table added by revision 0007, the ``analysis_reports``
+    and ``recommendations`` tables added by revision 0009, the
+    ``task_subscriptions`` table added by revision 0011 and the Telegram
+    ``telegram_message_links`` / ``telegram_deliveries`` tables added by
+    revision 0012; the migration chain is still the single source of the
+    physical schema.
     """
     from sqlalchemy import inspect
 
@@ -107,6 +110,8 @@ def test_base_metadata_matches_migrated_schema(
             "analysis_reports",
             "recommendations",
             "task_subscriptions",
+            "telegram_message_links",
+            "telegram_deliveries",
         }
         assert Base.metadata.tables.keys() == expected
         migrated = set(inspect(database.engine).get_table_names())

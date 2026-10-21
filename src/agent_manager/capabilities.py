@@ -753,6 +753,14 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
     ),
     _endpoint(
         "GET",
+        "/telegram/links/{chat_id}/{telegram_message_id}",
+        action="conversations.read",
+        response_schema="TelegramMessageLinkRead",
+        doc="knowledge-and-integrations.md",
+        summary="resolve a Telegram message to its conversation link",
+    ),
+    _endpoint(
+        "GET",
         "/turns/{turn_id}",
         action="turns.read",
         response_schema="TurnRead",

@@ -390,6 +390,48 @@ async def on_select_task(
     task_id = callback.data.split(":")[1]
     task = await client.get_task(task_id)
 
+    await _bind_task_conversation(task, callback, storage, client)
+    meta = dict(task.get("metadata") or {})
+
+    clar_info = ""
+    clar = meta.get("clarification") or dict(meta.get("provenance") or {}).get("clarification") or {}
+    if task.get("status") == "waiting_for_input" and clar:
+        clar_info = (
+            f"\n\n⚠️ <b>Вопрос от агента:</b>\n"
+            f"<b>{html.escape(clar.get('title') or '')}</b>\n"
+            f"{html.escape(clar.get('description') or '')}\n\n"
+            f"❓ <b>Вопрос:</b> {html.escape(clar.get('question') or '')}\n"
+        )
+
+    card_text = (
+        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
+        f"Название: <b>{html.escape(task['title'])}</b>\n"
+        f"Статус: <code>{html.escape(task['status'])}</code>\n"
+        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
+        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}"
+        f"{clar_info}\n\n"
+        "<i>Контекст задачи выбран. Сообщения направляются по этой задаче.</i>"
+    )
+    await callback.message.edit_text(
+        card_text,
+        parse_mode="HTML",
+        reply_markup=task_card_keyboard(task["id"], task["status"]),
+    )
+    await callback.answer("Контекст задачи выбран")
+
+
+async def _bind_task_conversation(
+    task: Dict[str, Any],
+    callback: CallbackQuery,
+    storage: UserStateStorage,
+    client: BackendClient,
+) -> str:
+    """Ensure the task has a bound conversation and make it the active context.
+
+    Returns the conversation id. Used by both the task card selection and the
+    dialog switch button, so either path lands in the same task context.
+    """
+    task_id = task["id"]
     conv_id = task.get("metadata", {}).get("conversation_id")
     meta = dict(task.get("metadata") or {})
     needs_patch = False
@@ -414,28 +456,88 @@ async def on_select_task(
     storage.set_user_mode(
         callback.from_user.id, "task", task_id=task_id, conversation_id=conv_id
     )
+    return conv_id
 
-    clar_info = ""
-    clar = meta.get("clarification") or dict(meta.get("provenance") or {}).get("clarification") or {}
-    if task.get("status") == "waiting_for_input" and clar:
-        clar_info = (
-            f"\n\n⚠️ <b>Вопрос от агента:</b>\n"
-            f"<b>{html.escape(clar.get('title') or '')}</b>\n"
-            f"{html.escape(clar.get('description') or '')}\n\n"
-            f"❓ <b>Вопрос:</b> {html.escape(clar.get('question') or '')}\n"
+
+@router.callback_query(F.data.startswith("switch_conversation:"))
+async def on_switch_conversation(
+    callback: CallbackQuery,
+    storage: UserStateStorage,
+    client: BackendClient,
+) -> None:
+    """Explicit switch of the active context to a conversation by its UUID."""
+    conversation_id = callback.data.split(":", 1)[1]
+    try:
+        conversation = await client.get_conversation(conversation_id)
+    except Exception as error:
+        logger.warning("switch conversation lookup failed: %s", error)
+        conversation = None
+    if conversation is None:
+        await callback.answer("Диалог недоступен", show_alert=True)
+        await callback.message.answer(
+            "⚠️ Диалог больше не доступен. Активный контекст не изменён."
         )
+        return
 
-    card_text = (
-        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
-        f"Название: <b>{html.escape(task['title'])}</b>\n"
-        f"Статус: <code>{html.escape(task['status'])}</code>\n"
-        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
-        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}"
-        f"{clar_info}\n\n"
-        "<i>Контекст задачи выбран. Сообщения направляются по этой задаче.</i>"
+    user_id = callback.from_user.id
+    previous = storage.get_user_state(user_id).active_conversation_id
+    storage.set_talk_conversation(user_id, conversation_id)
+    storage.set_user_mode(user_id, "talk", conversation_id=conversation_id)
+    logger.info(
+        "telegram context switched to conversation",
+        extra={
+            "event": "telegram_context_switch",
+            "basis": "switch_conversation",
+            "previous_conversation_id": previous,
+            "conversation_id": conversation_id,
+        },
     )
-    await callback.message.edit_text(
-        card_text,
+    await callback.message.answer(
+        f"✅ <b>Активный диалог:</b>\n<code>#{html.escape(conversation_id)}</code>\n\n"
+        "Обычные сообщения теперь уходят в этот диалог.",
+        parse_mode="HTML",
+        reply_markup=talk_keyboard(),
+    )
+    await callback.answer("Диалог выбран")
+
+
+@router.callback_query(F.data.startswith("switch_task:"))
+async def on_switch_task(
+    callback: CallbackQuery,
+    storage: UserStateStorage,
+    client: BackendClient,
+) -> None:
+    """Explicit switch of the active context to a task's dialog."""
+    task_id = callback.data.split(":", 1)[1]
+    try:
+        task = await client.get_task(task_id)
+    except Exception as error:
+        logger.warning("switch task lookup failed: %s", error)
+        task = None
+    if task is None:
+        await callback.answer("Задача недоступна", show_alert=True)
+        await callback.message.answer(
+            "⚠️ Задача больше не доступна. Активный контекст не изменён."
+        )
+        return
+
+    user_id = callback.from_user.id
+    previous = storage.get_user_state(user_id).active_conversation_id
+    conv_id = await _bind_task_conversation(task, callback, storage, client)
+    logger.info(
+        "telegram context switched to task",
+        extra={
+            "event": "telegram_context_switch",
+            "basis": "switch_task",
+            "previous_conversation_id": previous,
+            "conversation_id": conv_id,
+            "task_id": task["id"],
+        },
+    )
+    await callback.message.answer(
+        f"✅ <b>Активный контекст — задача #{task_display_number(task)}:</b>\n"
+        f"Диалог: <code>#{html.escape(conv_id)}</code>\n\n"
+        "Обычные сообщения теперь уходят в диалог этой задачи.",
         parse_mode="HTML",
         reply_markup=task_card_keyboard(task["id"], task["status"]),
     )
@@ -713,6 +815,103 @@ async def on_noop(callback: CallbackQuery) -> None:
 # -- Messages (Text, Voice, Photo, Document) --
 
 
+async def _route_reply_to_original_conversation(
+    message: Message,
+    *,
+    client: BackendClient,
+    queue_processor: QueueProcessor,
+    text: str,
+    media_type: str,
+    media_path: str | None,
+    audio_bytes: bytes | None,
+) -> bool:
+    """Route one explicit Telegram Reply into its original conversation.
+
+    The durable link lookup happens before any active-mode logic, so the reply
+    goes to the replied-to message's conversation regardless of the user's
+    current context, and it never satisfies another task's clarification
+    request. The reply itself does not switch the active context: plain
+    messages after it keep going to the previously selected dialog until the
+    switch button is pressed.
+
+    Returns ``True`` when the message was fully handled (submitted to the
+    linked conversation, or explained because the link is lost); ``False``
+    when processing must continue through the ordinary active-context flow.
+    """
+    reply_to = message.reply_to_message
+    if reply_to is None:
+        return False
+    try:
+        link = await client.get_telegram_link(
+            message.chat.id, reply_to.message_id
+        )
+    except Exception as error:
+        logger.warning("telegram link lookup failed: %s", error)
+        link = None
+
+    if link is not None:
+        context_task_id = link.get("task_id")
+        logger.info(
+            "telegram reply routed to original conversation",
+            extra={
+                "event": "telegram_reply_route",
+                "basis": "link",
+                "conversation_id": link["conversation_id"],
+                "task_id": context_task_id,
+                "telegram_message_id": message.message_id,
+                "replied_to_message_id": reply_to.message_id,
+            },
+        )
+        await queue_processor.submit_message(
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            context_mode="task" if context_task_id else "talk",
+            context_task_id=context_task_id,
+            context_conversation_id=link["conversation_id"],
+            text=text,
+            media_type=media_type,
+            media_path=media_path,
+            audio_bytes=audio_bytes,
+        )
+        return True
+
+    from_bot = (
+        reply_to.from_user is not None
+        and message.bot is not None
+        and reply_to.from_user.id == message.bot.id
+    )
+    if from_bot:
+        logger.info(
+            "telegram reply to a bot message with a lost link",
+            extra={
+                "event": "telegram_reply_route",
+                "basis": "lost",
+                "telegram_message_id": message.message_id,
+                "replied_to_message_id": reply_to.message_id,
+            },
+        )
+        await message.answer(
+            "⚠️ Не удалось определить исходный диалог: связь сообщения потеряна "
+            "или диалог удалён. Ответ не отправлен — выберите диалог или задачу:",
+            reply_markup=mode_keyboard(),
+        )
+        return True
+
+    # A reply to a human message without a link (foreign or predating the
+    # link registry) is ordinary input; never guess a dialog from quoted text.
+    logger.info(
+        "telegram reply to an unlinked message continues as ordinary input",
+        extra={
+            "event": "telegram_reply_route",
+            "basis": "foreign",
+            "telegram_message_id": message.message_id,
+            "replied_to_message_id": reply_to.message_id,
+        },
+    )
+    return False
+
+
 @router.message(F.text | F.voice | F.photo | F.document)
 async def on_user_message(
     message: Message,
@@ -724,8 +923,9 @@ async def on_user_message(
     user_id = message.from_user.id
     state = storage.get_user_state(user_id)
 
-    # 1. Idle mode check
-    if state.mode == "idle":
+    # 1. Idle mode check — an explicit Reply is itself a dialog action and is
+    # routed below even from idle mode.
+    if state.mode == "idle" and message.reply_to_message is None:
         await message.answer(
             "⚠️ Режим не выбран. Пожалуйста, выберите действие:",
             reply_markup=mode_keyboard(),
@@ -806,6 +1006,25 @@ async def on_user_message(
             text = f"{caption}\n\n{notice}" if caption else notice
     else:
         text = message.text or ""
+
+    # 1.5 Reply routing: an explicit Reply targets the original conversation
+    # of the replied-to message, resolved before the active-mode and
+    # task-clarification branches so it can never be intercepted (in
+    # particular, it must not resume an unrelated waiting task). Media is
+    # already extracted above, so voice/photo/document replies keep their
+    # transcription and file handling.
+    if message.reply_to_message is not None:
+        routed = await _route_reply_to_original_conversation(
+            message,
+            client=client,
+            queue_processor=queue_processor,
+            text=text,
+            media_type=media_type,
+            media_path=media_path,
+            audio_bytes=audio_bytes,
+        )
+        if routed:
+            return
 
     # 2. Context resolution
     context_mode = state.mode

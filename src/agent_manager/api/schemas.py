@@ -251,6 +251,19 @@ class MessageCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class TelegramMessageLinkRead(BaseModel):
+    """Durable Telegram message → conversation link used for Reply routing."""
+
+    chat_id: int
+    telegram_message_id: int
+    conversation_id: str
+    message_id: str | None
+    turn_id: str | None
+    task_id: str | None
+    origin: str
+    created_at: dt.datetime
+
+
 class MessageRead(BaseModel):
     """Message representation returned by the API."""
 

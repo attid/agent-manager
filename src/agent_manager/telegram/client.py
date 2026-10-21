@@ -181,6 +181,23 @@ class BackendClient:
     async def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/conversations/{conversation_id}")
 
+    async def get_telegram_link(
+        self, chat_id: int, telegram_message_id: int
+    ) -> dict[str, Any] | None:
+        """Resolve one Telegram message to its conversation link, or ``None``.
+
+        ``None`` means no durable link exists for the chat/message pair — the
+        caller decides how to explain an unroutable Reply.
+        """
+        try:
+            return await self._request(
+                "GET", f"/telegram/links/{chat_id}/{telegram_message_id}"
+            )
+        except BackendError as error:
+            if error.status_code == 404:
+                return None
+            raise
+
     async def list_conversations(
         self, *, limit: int | None = None, offset: int = 0
     ) -> list[dict[str, Any]]:

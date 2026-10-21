@@ -92,6 +92,7 @@ from ..storage import (
     TaskNotFoundError,
     TaskRepository,
 )
+from ..storage.telegram_delivery import TelegramDeliveryRepository
 from .schemas import (
     AgentCreate,
     AgentPatch,
@@ -120,6 +121,7 @@ from .schemas import (
     TaskPatch,
     TaskRead,
     TaskSubscriptionCreate,
+    TelegramMessageLinkRead,
     TurnCreate,
     TurnRead,
     agent_to_read,
@@ -919,6 +921,7 @@ def create_app(
     @app.post("/conversations/ask", response_model=AskResponse)
     async def ask_agent(
         payload: AskRequest,
+        request: Request,
         conversation_repo: ConversationRepository = Depends(get_conversation_repository),
         turn_processor: TurnProcessor = Depends(get_turn_processor),
     ) -> AskResponse:
@@ -942,6 +945,7 @@ def create_app(
             role="user",
             text=payload.message,
             metadata=payload.metadata,
+            verified_caller=owner_for_grant(_execution_grant_for_request(request)),
         )
 
         turn_result = turn_processor.enqueue(
@@ -1451,6 +1455,7 @@ def create_app(
         conversation_id: str,
         payload: MessageCreate,
         response: Response,
+        request: Request,
         repository: ConversationRepository = Depends(
             get_conversation_repository
         ),
@@ -1471,6 +1476,7 @@ def create_app(
                 source=payload.source,
                 external_id=payload.external_id,
                 metadata=payload.metadata,
+                verified_caller=owner_for_grant(_execution_grant_for_request(request)),
             )
         except ConversationNotFoundError as error:
             raise HTTPException(
@@ -1486,6 +1492,42 @@ def create_app(
             response.status_code = status.HTTP_200_OK
         return message_append_to_response(
             result.message, replayed=result.replayed
+        )
+
+    @app.get(
+        "/telegram/links/{chat_id}/{telegram_message_id}",
+        response_model=TelegramMessageLinkRead,
+    )
+    def get_telegram_message_link(
+        chat_id: int,
+        telegram_message_id: int,
+        request: Request,
+    ) -> TelegramMessageLinkRead:
+        """Resolve one Telegram message to its durable conversation link.
+
+        The link is the single routing source for incoming Telegram Replies:
+        a hit names the original conversation (and task, when bound); a 404
+        means no durable link exists for that chat/message pair.
+        """
+        repo = TelegramDeliveryRepository(request.app.state.database)
+        link = repo.get_message_link(chat_id, telegram_message_id)
+        if link is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "telegram message link not found: "
+                    f"{chat_id}/{telegram_message_id}"
+                ),
+            )
+        return TelegramMessageLinkRead(
+            chat_id=link.chat_id,
+            telegram_message_id=link.telegram_message_id,
+            conversation_id=link.conversation_id,
+            message_id=link.message_id,
+            turn_id=link.turn_id,
+            task_id=link.task_id,
+            origin=link.origin,
+            created_at=link.created_at,
         )
 
     @app.get(

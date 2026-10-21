@@ -179,13 +179,14 @@ def test_queue_processor_sends_file(tmp_path: Path) -> None:
         assert "[SEND_FILE:" not in edited_text
         assert "Вот профиль разработчика:" in edited_text
 
-        # Verify send_document was called
+        # Verify send_document was called; the caption carries the dialog
+        # UUID footer so the attachment stays tied to its conversation.
         assert bot_mock.send_document.called
         doc_args = bot_mock.send_document.call_args[1]
         assert doc_args["chat_id"] == 100
         assert isinstance(doc_args["document"], FSInputFile)
         assert Path(doc_args["document"].path) == agent_md
-        assert doc_args["caption"] == "📄 agent-manager-developer.md"
+        assert doc_args["caption"] == "📄 agent-manager-developer.md\n\n#conv-001"
 
     asyncio.run(_run())
 

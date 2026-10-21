@@ -103,10 +103,32 @@ class TaskSubscriptions:
         return count
 
     async def deliver_replies(self, bot) -> int:
-        """Only event replies; ordinary Telegram turns keep their own delivery."""
-        from aiogram.types import FSInputFile
-        from .knowledge import SEND_FILE_PATTERN
+        """Only event replies; ordinary Telegram turns keep their own delivery.
 
+        Rendering and sending go through the unified Telegram messenger: the
+        same Markdown handling, the full conversation UUID on every part and
+        attachment caption, and the explicit context-switch button. The
+        subscription row keeps its own durable status machine and per-part
+        ``parts_sent`` progress; a delivery retry never re-runs the secretary.
+        """
+        from aiogram.types import BufferedInputFile, FSInputFile
+
+        from .storage.telegram_delivery import (
+            MESSAGE_ORIGIN_BOT,
+            TelegramDeliveryRepository,
+        )
+        from .telegram.keyboards import dialog_switch_keyboard
+        from .telegram.messenger import (
+            TELEGRAM_DOCUMENT_THRESHOLD,
+            compose_dialog_message,
+            send_markdown,
+            split_for_telegram,
+            strip_file_directives,
+            task_event_header,
+            with_conversation_footer,
+        )
+
+        delivery_repo = TelegramDeliveryRepository(self.database)
         with self.database.session() as session:
             pending = list(session.scalars(select(TaskSubscription).where(TaskSubscription.status == "queued")))
         delivered = 0
@@ -119,24 +141,74 @@ class TaskSubscriptions:
                 chat_id = (conversation.meta or {}).get("chat_id") or (conversation.meta or {}).get("user_id") or self.default_chat_id
                 if not chat_id:
                     continue
+                task = session.get(Task, row.task_id)
                 reply = session.scalar(select(Message).where(Message.id == turn.reply_message_id)) if turn.reply_message_id else None
                 text = reply.text if reply else "Не удалось разобрать результат задачи. Ход секретаря завершился ошибкой."
-            targets = SEND_FILE_PATTERN.findall(text)
-            clean = SEND_FILE_PATTERN.sub("", text).strip() or "📄 Результат задачи"
-            # Telegram's transport limit is 4096 text characters per message.
-            parts = [("text", clean[i:i + 4096]) for i in range(0, len(clean), 4096)]
+            task_number = task.number if task else None
+            task_title = task.title if task else None
+            clean, targets = strip_file_directives(text)
+            clean = clean or "📄 Результат задачи"
+            composed = compose_dialog_message(
+                header=task_event_header(task_number, task_title),
+                body=clean,
+            )
+            keyboard = dialog_switch_keyboard(
+                conversation_id=row.conversation_id,
+                task_id=row.task_id,
+                task_number=task_number,
+            )
+            parts: list[tuple[str, object]]
+            if len(composed) > TELEGRAM_DOCUMENT_THRESHOLD:
+                parts = [("document", composed)]
+            else:
+                parts = [("text", part) for part in split_for_telegram(composed, row.conversation_id)]
             parts += [("file", target) for target in targets]
+            last_text_index = max(
+                (index for index, (kind, _) in enumerate(parts) if kind == "text"),
+                default=None,
+            )
             for index, (kind, content) in enumerate(parts):
                 if index < row.parts_sent:
                     continue
                 if kind == "text":
-                    await bot.send_message(chat_id=chat_id, text=content, parse_mode=None)
+                    sent_id = await send_markdown(
+                        bot, chat_id, content,
+                        keyboard=keyboard if index == last_text_index else None,
+                    )
+                elif kind == "document":
+                    message = await bot.send_document(
+                        chat_id=chat_id,
+                        document=BufferedInputFile(content.encode("utf-8"), filename="результат_задачи.md"),
+                        caption=with_conversation_footer("📄 Результат задачи", row.conversation_id),
+                        reply_markup=keyboard,
+                    )
+                    sent_id = message.message_id
                 else:
                     path = self.knowledge_base.resolve_file(content) if self.knowledge_base else None
-                    if path is None:
-                        await bot.send_message(chat_id=chat_id, text=f"Не удалось найти запрошенный файл: {content}", parse_mode=None)
+                    if path is None or not path.is_file():
+                        sent_id = await send_markdown(
+                            bot, chat_id,
+                            with_conversation_footer(
+                                f"Не удалось найти запрошенный файл: {content}",
+                                row.conversation_id,
+                            ),
+                        )
                     else:
-                        await bot.send_document(chat_id=chat_id, document=FSInputFile(path))
+                        message = await bot.send_document(
+                            chat_id=chat_id,
+                            document=FSInputFile(path),
+                            caption=with_conversation_footer(f"📄 {path.name}", row.conversation_id),
+                        )
+                        sent_id = message.message_id
+                delivery_repo.record_message_link(
+                    chat_id=chat_id,
+                    telegram_message_id=sent_id,
+                    conversation_id=row.conversation_id,
+                    message_id=turn.reply_message_id,
+                    turn_id=row.turn_id,
+                    task_id=row.task_id,
+                    origin=MESSAGE_ORIGIN_BOT,
+                )
                 with self.database.session() as session:
                     stored = session.get(TaskSubscription, (row.task_id, row.conversation_id))
                     stored.parts_sent = index + 1
