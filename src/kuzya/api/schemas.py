@@ -41,6 +41,19 @@ class TaskAttachment(BaseModel):
     content_type: str | None = None
 
 
+#: Execution keys honoured inside task ``metadata``. Surfaced in the OpenAPI
+#: (and therefore MCP tool) schemas so external agents can drive per-task
+#: sandbox mounts without reading the handbook first.
+_TASK_METADATA_DESCRIPTION = (
+    "Arbitrary JSON. Execution keys honoured by the worker: "
+    "'allowed_hosts' (list of extra egress hosts), "
+    "'project_read_only' (bool: mount this task's workspace read-only), "
+    "'readonly_paths' (list of existing host directories mounted read-only "
+    "into the sandbox at the same absolute paths), "
+    "'allow_git_commit' (bool), 'attachments' (list of file references)."
+)
+
+
 class TaskCreate(BaseModel):
     """Payload accepted by ``POST /tasks``."""
 
@@ -51,7 +64,9 @@ class TaskCreate(BaseModel):
     status: str = "incoming"
     agent_id: str | None = None
     workspace: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(
+        default_factory=dict, description=_TASK_METADATA_DESCRIPTION
+    )
     attachments: list[TaskAttachment] | None = None
     id: str | None = None
 
@@ -197,7 +212,9 @@ class TaskPatch(BaseModel):
     status: str | None = None
     agent_id: str | None = None
     workspace: str | None = None
-    metadata: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = Field(
+        default=None, description=_TASK_METADATA_DESCRIPTION
+    )
     attachments: list[TaskAttachment] | None = None
 
     def replacements(self) -> dict[str, Any]:

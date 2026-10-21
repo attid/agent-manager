@@ -1066,3 +1066,124 @@ def test_review_cycle_uses_reviewer_profile_engine(
         ).read_text(encoding="utf-8")
     )
     assert metrics["runtime"]["engine"] == "codex"
+
+
+def _run_one_task_with_worker(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    db: Database,
+    agent_id: str,
+    *,
+    task_metadata: dict[str, Any] | None = None,
+) -> Any:
+    task_repo = TaskRepository(db)
+    task_repo.create(
+        title="Mount controls probe",
+        description="Check per-task mounts.",
+        status="in_progress",
+        workspace="test_ws",
+        metadata=task_metadata or {},
+    )
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(exist_ok=True)
+    worker = TaskExecutionWorker(
+        database=db,
+        artifact_root=tmp_path / "artifacts",
+        agent_id=agent_id,
+        runner_argv_prefix=fake_runner_argv,
+        workspace_map={"test_ws": str(workspace_dir)},
+    )
+    outcome = worker.step()
+    assert outcome is not None and outcome.status == "completed"
+    return task_repo.list()[0]
+
+
+def test_task_metadata_mount_controls(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """project_read_only and readonly_paths in task metadata reach the sandbox role."""
+    db, agent_id = setup_developer_agent
+    extra_ro = tmp_path / "reference-repo"
+    extra_ro.mkdir()
+
+    task = _run_one_task_with_worker(
+        tmp_path, fake_runner_argv, db, agent_id,
+        task_metadata={
+            "project_read_only": True,
+            "readonly_paths": [str(extra_ro)],
+        },
+    )
+    context = task.meta["execution_context"]
+    assert context["project_read_only"] is True
+    assert str(extra_ro) in context["readonly_paths"]
+
+    workspace_notes = list((tmp_path / "artifacts").rglob("workspace.md"))
+    assert workspace_notes, "workspace.md not written"
+    note = workspace_notes[0].read_text(encoding="utf-8")
+    assert "Project read-only: True" in note
+    assert "Extra read-only mounts" in note and str(extra_ro) in note
+
+
+def test_task_mount_controls_merge_with_profile(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """Task values merge on top of the profile defaults; explicit flag wins."""
+    db, agent_id = setup_developer_agent
+    profile_ro = tmp_path / "profile-ro"
+    profile_ro.mkdir()
+    extra_ro = tmp_path / "task-ro"
+    extra_ro.mkdir()
+    AgentProfileRepository(db).update(
+        agent_id=agent_id,
+        expected_revision=1,
+        runner_config={
+            "mode": "success",
+            "summary_text": "ok",
+            "project_read_only": False,
+            "readonly_paths": [str(profile_ro)],
+        },
+    )
+
+    task = _run_one_task_with_worker(
+        tmp_path, fake_runner_argv, db, agent_id,
+        task_metadata={
+            "project_read_only": True,
+            "readonly_paths": [str(extra_ro), str(profile_ro)],
+        },
+    )
+    context = task.meta["execution_context"]
+    assert context["project_read_only"] is True
+    # merged and deduplicated, profile first
+    assert context["readonly_paths"] == [str(profile_ro), str(extra_ro)]
+
+
+def test_task_without_mount_metadata_keeps_profile_policy(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """No task metadata: the profile mount policy applies unchanged."""
+    db, agent_id = setup_developer_agent
+    profile_ro = tmp_path / "profile-ro"
+    profile_ro.mkdir()
+    AgentProfileRepository(db).update(
+        agent_id=agent_id,
+        expected_revision=1,
+        runner_config={
+            "mode": "success",
+            "summary_text": "ok",
+            "project_read_only": True,
+            "readonly_paths": [str(profile_ro)],
+        },
+    )
+
+    task = _run_one_task_with_worker(
+        tmp_path, fake_runner_argv, db, agent_id, task_metadata={},
+    )
+    context = task.meta["execution_context"]
+    assert context["project_read_only"] is True
+    assert str(profile_ro) in context["readonly_paths"]

@@ -745,19 +745,43 @@ class TaskExecutionWorker:
                 if allowed_hosts:
                     runner_config["allowed_hosts"] = allowed_hosts
 
+                # Per-task mount controls. An explicit task flag wins over the
+                # profile default; extra read-only directories merge on top of
+                # the profile's list (the same merge pattern as allowed_hosts).
+                # The knowledge root is appended later, after workspace.md is
+                # rendered, so the note below states the requested mounts.
+                if isinstance(task_meta.get("project_read_only"), bool):
+                    runner_config["project_read_only"] = task_meta["project_read_only"]
+                ro_paths = list(runner_config.get("readonly_paths") or [])
+                if isinstance(task_meta.get("readonly_paths"), list):
+                    for path in task_meta["readonly_paths"]:
+                        if isinstance(path, str) and path not in ro_paths:
+                            ro_paths.append(path)
+                if ro_paths:
+                    runner_config["readonly_paths"] = ro_paths
+
                 workspace_file = exec_dir / "workspace.md"
-                workspace_file.write_text(
-                    f"# Execution workspace\nHost directory: {project_dir}\n"
-                    f"Sandbox root: /workspace\n"
-                    f"Working directory: /workspace/{runner_config.get('workdir', '.')}\n"
-                    f"Project read-only: {bool(runner_config.get('project_read_only', False))}\n"
-                    f"Sandbox network: {runner_config.get('network', True)}\n"
-                    f"Allowed hosts: {runner_config.get('allowed_hosts', [])}\n"
-                    "Outbox: /outbox (writable artifacts; write output files, logs or reports here)\n"
-                    "Inbox: /inbox (read-only input attachments)\n"
-                    "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.\n",
-                    encoding="utf-8",
-                )
+                workspace_lines = [
+                    "# Execution workspace",
+                    f"Host directory: {project_dir}",
+                    "Sandbox root: /workspace",
+                    f"Working directory: /workspace/{runner_config.get('workdir', '.')}",
+                    f"Project read-only: {bool(runner_config.get('project_read_only', False))}",
+                    f"Sandbox network: {runner_config.get('network', True)}",
+                    f"Allowed hosts: {runner_config.get('allowed_hosts', [])}",
+                ]
+                extra_ro = [str(p) for p in (runner_config.get("readonly_paths") or [])]
+                if extra_ro:
+                    workspace_lines.append(
+                        "Extra read-only mounts (visible at the same absolute paths): "
+                        + ", ".join(extra_ro)
+                    )
+                workspace_lines += [
+                    "Outbox: /outbox (writable artifacts; write output files, logs or reports here)",
+                    "Inbox: /inbox (read-only input attachments)",
+                    "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.",
+                ]
+                workspace_file.write_text("\n".join(workspace_lines) + "\n", encoding="utf-8")
                 runner_config["instructions"] = instructions
                 runner_config = _build_role_config(runner_config, agent_id=selected_agent_id, prompt_path=prompt_file)
                 runner_config["instructions"].append(str(workspace_file))
@@ -769,6 +793,7 @@ class TaskExecutionWorker:
                     "host_path": str(project_dir),
                     "sandbox_path": "/workspace",
                     "project_read_only": bool(runner_config.get("project_read_only", False)),
+                    "readonly_paths": list(runner_config.get("readonly_paths") or []),
                     "network": runner_config.get("network", True),
                     "allowed_hosts": list(runner_config.get("allowed_hosts") or []),
                     "provider": runtime_selection.provider,

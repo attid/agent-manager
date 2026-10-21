@@ -75,6 +75,38 @@ trusted LLM provider domains by default plus any explicit destinations declared 
 `runner_config.allowed_hosts` (e.g. `eurmtl.me`). Requests to unauthorized destinations
 receive HTTP 403 Forbidden.
 
+## Per-task mount controls
+
+Two execution keys in the **task metadata** override or extend the profile's
+mount policy for a single task (the same merge pattern as `allowed_hosts`):
+
+| Key | Type | Effect |
+|---|---|---|
+| `project_read_only` | `bool` | Mount **this task's** workspace `/workspace` read-only (`true`) or writable (`false`). An explicit task value wins over the profile default. |
+| `readonly_paths` | `list[str]` | Extra existing host directories mounted read-only into the sandbox at the same absolute paths, merged on top of the profile's `readonly_paths`. |
+
+Example — a task that works in its own project but may consult the kuzya
+repository read-only:
+
+```json
+POST /tasks
+{
+  "title": "Переделать уведомления",
+  "workspace": "mtl-task",
+  "metadata": {
+    "readonly_paths": ["/home/itolstov/Projects/mtl/kuzya"]
+  }
+}
+```
+
+The same keys can be set through `PATCH /tasks/{id}` before execution, so
+API and MCP callers can flip read-only on or off per task. Every `readonly_paths`
+entry must pass the Runner validation (an existing directory, outside the
+project and state, no credential or system directories); an invalid path fails
+the launch loudly. The effective values are written into the task's
+`metadata.execution_context` and into the per-execution `workspace.md` the
+agent sees, so both operators and the agent can tell which mounts are live.
+
 ## Execution context stored on tasks
 
 When the worker runs a task it resolves the workspace again and records the
