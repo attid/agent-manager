@@ -33,6 +33,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote, unquote_to_bytes
 
 import sqlalchemy as sa
 from fastapi import (
@@ -1210,6 +1211,41 @@ def create_app(
             content_type=content_type,
         )
 
+    def _raw_artifact_name(
+        request: Request,
+        task_id: str,
+        fallback: str,
+    ) -> str:
+        """Recover a literal artifact filename from the undecoded URL path.
+
+        Starlette exposes ``scope["path"]`` after percent-decoding. A stored
+        name that itself contains a valid escape such as ``%20`` or ``%FF``
+        would otherwise be decoded a second time and become unreachable.
+        """
+        raw_path = request.scope.get("raw_path")
+        if not isinstance(raw_path, (bytes, bytearray)):
+            return fallback
+        try:
+            marker = (
+                b"/tasks/"
+                + quote(task_id, safe="").encode("ascii")
+                + b"/artifacts/"
+            )
+        except UnicodeEncodeError:
+            marker = b"/artifacts/"
+        index = raw_path.rfind(marker)
+        if index < 0:
+            marker = b"/artifacts/"
+            index = raw_path.rfind(marker)
+        if index < 0:
+            return fallback
+        try:
+            return unquote_to_bytes(
+                raw_path[index + len(marker) :]
+            ).decode("utf-8", errors="surrogateescape")
+        except (UnicodeDecodeError, ValueError):
+            return fallback
+
     @app.get("/tasks/{task_id}/artifacts/{artifact_name:path}")
     def get_task_artifact(
         task_id: str,
@@ -1220,6 +1256,7 @@ def create_app(
         task = repository.get(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="task not found")
+        artifact_name = _raw_artifact_name(request, task_id, artifact_name)
         meta = task.meta or {}
         provenance = meta.get("provenance") or {}
         artifact_file = None
@@ -1236,11 +1273,26 @@ def create_app(
                 Path(artifact_root) / str(task.id) / "artifacts",
             ]:
                 cand = cand_dir / artifact_name
-                if cand.is_file():
-                    artifact_file = cand
-                    break
+                if not cand.is_file():
+                    continue
+                try:
+                    resolved_dir = cand_dir.resolve(strict=True)
+                    resolved_cand = cand.resolve(strict=True)
+                except OSError:
+                    continue
+                if not resolved_cand.is_relative_to(resolved_dir):
+                    continue
+                artifact_file = resolved_cand
+                break
         if artifact_file is None or not artifact_file.is_file():
-            raise HTTPException(status_code=404, detail=f"artifact not found: {artifact_name}")
+            safe_label = artifact_name.encode(
+                "utf-8",
+                errors="backslashreplace",
+            ).decode("utf-8")
+            raise HTTPException(
+                status_code=404,
+                detail=f"artifact not found: {safe_label}",
+            )
         content = artifact_file.read_bytes()
         return Response(content=content, media_type="text/plain; charset=utf-8")
 

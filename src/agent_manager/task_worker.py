@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -136,6 +137,329 @@ def render_task_document(task: Task) -> str:
             "## Замечания ревьювера (review_feedback)\n\n" + feedback
         )
     return "\n\n".join(sections) + "\n"
+
+
+#: Fallback when the destination filesystem does not expose ``PC_NAME_MAX``.
+_DEFAULT_NAME_MAX = 255
+#: Deterministic digest lengths used for collision and length fallbacks.
+_ARTIFACT_HASH_LENGTHS = (12, 16, 24, 32, 64)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """Truncate ``text`` to at most ``max_bytes`` filesystem bytes.
+
+    File-name limits are byte limits, not character limits. ``os.fsencode``
+    accepts surrogate-escaped input, and ignoring a split multi-byte sequence
+    never leaves an invalid Unicode name.
+    """
+    if max_bytes <= 0:
+        return ""
+    encoded = os.fsencode(text)
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _split_artifact_extension(name: str) -> tuple[str, str]:
+    """Split a conventional final extension while leaving hidden names alone."""
+    dot = name.rfind(".")
+    if dot <= 0 or dot == len(name) - 1:
+        return name, ""
+    return name[:dot], name[dot:]
+
+
+def _filesystem_name_max(directory: Path) -> int:
+    """Return the real per-component file-name limit for ``directory``."""
+    try:
+        value = os.pathconf(directory, "PC_NAME_MAX")
+    except (AttributeError, OSError, ValueError):
+        return _DEFAULT_NAME_MAX
+    return value if isinstance(value, int) and value > 0 else _DEFAULT_NAME_MAX
+
+
+def _safe_text(value: str) -> str:
+    """Make filesystem-derived text safe for JSON, URLs and log lines.
+
+    Surrogate-escaped filename bytes and control characters are replaced with
+    printable ``~XX`` markers. A tilde is URL-safe and the original relative
+    path still drives collision hashing, so distinct files stay distinct.
+    """
+    chunks: list[str] = []
+    for char in value:
+        code = ord(char)
+        if 0xDC80 <= code <= 0xDCFF:
+            chunks.append(f"~{code - 0xDC00:02X}")
+        elif 0xD800 <= code <= 0xDFFF:
+            chunks.append(f"~u{code:04X}")
+        elif code < 0x20 or code == 0x7F:
+            chunks.append(f"~{code:02X}")
+        else:
+            chunks.append(char)
+    return "".join(chunks)
+
+
+def _artifact_error_entry(source: Any, error: Any) -> dict[str, str]:
+    """Build a provenance-safe artifact-error record."""
+    return {
+        "source": _safe_text(str(source)),
+        "error": _safe_text(str(error)),
+    }
+
+
+def _artifact_base_name(relative_path: str) -> str:
+    """Join relative path components with ``_`` to form the artifact name."""
+    return "_".join(
+        _safe_text(part) for part in relative_path.split("/")
+    )
+
+
+def _hashed_artifact_name(
+    base_name: str,
+    relative_path: str,
+    max_bytes: int,
+    digest_length: int,
+) -> str:
+    """Shorten ``base_name`` deterministically, retaining extension and hash.
+
+    The digest is derived from the original relative path, so equal visible
+    prefixes remain distinguishable even after truncation or collision
+    handling.
+    """
+    stem, suffix = _split_artifact_extension(base_name)
+    digest = hashlib.sha256(os.fsencode(relative_path)).hexdigest()
+    marker = f"_{digest[:digest_length]}"
+    marker_bytes = len(os.fsencode(marker))
+    if marker_bytes >= max_bytes:
+        return _truncate_utf8(digest, max_bytes) or "artifact"
+
+    # Preserve the extension whenever the name budget allows it. Pathological
+    # extensions are themselves truncated rather than overflowing the name.
+    suffix = _truncate_utf8(suffix, max_bytes - marker_bytes)
+    budget = max_bytes - marker_bytes - len(os.fsencode(suffix))
+    prefix = _truncate_utf8(stem, budget)
+    name = prefix + marker + suffix
+    return name or _truncate_utf8(digest, max_bytes) or "artifact"
+
+
+def _allocate_artifact_names(
+    relative_paths: Sequence[str],
+    *,
+    max_bytes: int,
+    reserved: Sequence[str] = (),
+) -> dict[str, str]:
+    """Map every relative outbox path to a unique artifact file name.
+
+    Root files keep their original name unless it collides with a reserved
+    generated artifact (``summary.md``/``session.jsonl``). Nested paths have
+    their components joined with ``_``. Collisions and over-long names get a
+    short hash of the original relative path, making allocation deterministic
+    and lossless. Names already reserved by the worker are never overwritten.
+    """
+    reserved_names = set(reserved)
+    ordered = sorted(
+        set(relative_paths),
+        key=lambda rel: (
+            "/" in rel,
+            _artifact_base_name(rel) in reserved_names,
+            rel,
+        ),
+    )
+    used = set(reserved_names)
+    allocated: dict[str, str] = {}
+    for relative_path in ordered:
+        base_name = _artifact_base_name(relative_path)
+        if len(os.fsencode(base_name)) <= max_bytes:
+            candidate = base_name
+        else:
+            candidate = _hashed_artifact_name(
+                base_name,
+                relative_path,
+                max_bytes,
+                _ARTIFACT_HASH_LENGTHS[0],
+            )
+        if candidate in used:
+            for digest_length in _ARTIFACT_HASH_LENGTHS:
+                candidate = _hashed_artifact_name(
+                    base_name,
+                    relative_path,
+                    max_bytes,
+                    digest_length,
+                )
+                if candidate not in used:
+                    break
+            else:
+                counter = 2
+                while True:
+                    candidate = _hashed_artifact_name(
+                        base_name,
+                        f"{relative_path}#{counter}",
+                        max_bytes,
+                        _ARTIFACT_HASH_LENGTHS[-1],
+                    )
+                    if candidate not in used:
+                        break
+                    counter += 1
+        used.add(candidate)
+        allocated[relative_path] = candidate
+    return allocated
+
+
+def _outbox_relative_files(
+    outbox_root: Path,
+    errors: list[dict[str, str]],
+) -> list[str]:
+    """Discover regular files below ``outbox_root`` without following links."""
+
+    def record(path: Path, reason: str) -> None:
+        try:
+            relative = path.relative_to(outbox_root).as_posix()
+        except ValueError:
+            relative = str(path)
+        entry = _artifact_error_entry(relative, reason)
+        logger.warning(
+            "Skipping outbox entry %r: %s",
+            entry["source"],
+            entry["error"],
+        )
+        errors.append(entry)
+
+    def on_scan_error(error: OSError) -> None:
+        path = Path(error.filename) if error.filename else outbox_root
+        record(path, f"directory scan failed: {error}")
+
+    files: list[str] = []
+    try:
+        walker = os.walk(
+            outbox_root,
+            topdown=True,
+            followlinks=False,
+            onerror=on_scan_error,
+        )
+        for dirpath, dirnames, filenames in walker:
+            dirnames.sort()
+            for dirname in list(dirnames):
+                candidate = Path(dirpath) / dirname
+                if candidate.is_symlink():
+                    record(candidate, "symlinked directories are not followed")
+                    dirnames.remove(dirname)
+            filenames.sort()
+            for filename in filenames:
+                candidate = Path(dirpath) / filename
+                if candidate.is_symlink():
+                    record(candidate, "symlinked files are not collected")
+                    continue
+                try:
+                    is_regular = candidate.is_file()
+                except OSError as error:
+                    record(candidate, f"cannot inspect file: {error}")
+                    continue
+                if not is_regular:
+                    record(candidate, "not a regular file")
+                    continue
+                files.append(candidate.relative_to(outbox_root).as_posix())
+    except OSError as error:
+        record(outbox_root, f"directory scan failed: {error}")
+    return files
+
+
+def _collect_outbox_artifacts(
+    outbox_dir: str | os.PathLike[str],
+    destination_dir: str | os.PathLike[str],
+    *,
+    reserved_names: Sequence[str] = (),
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Copy every regular file below ``outbox_dir`` into the artifact store.
+
+    Returns ``(collected, errors)``. Only successfully copied files appear in
+    ``collected``; failures are logged and reported in ``errors`` so a caller
+    can never mistake a partial collection for a complete attachment list.
+    Symlinks are never followed and every resolved source must stay inside the
+    outbox root.
+    """
+    outbox_path = Path(outbox_dir)
+    destination_path = Path(destination_dir)
+    errors: list[dict[str, str]] = []
+    if not outbox_path.is_dir():
+        entry = _artifact_error_entry(
+            outbox_path,
+            "outbox directory is not available",
+        )
+        logger.warning(
+            "No outbox artifacts collected from %r: %s",
+            entry["source"],
+            entry["error"],
+        )
+        return [], [entry]
+    try:
+        outbox_root = outbox_path.resolve(strict=True)
+    except OSError as error:
+        entry = _artifact_error_entry(outbox_path, error)
+        logger.warning(
+            "Cannot resolve outbox directory %r: %s",
+            entry["source"],
+            entry["error"],
+        )
+        return [], [entry]
+    try:
+        destination_path.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        entry = _artifact_error_entry(destination_path, error)
+        logger.error(
+            "Cannot create task artifact directory %r: %s",
+            entry["source"],
+            entry["error"],
+        )
+        return [], [entry]
+
+    relative_paths = _outbox_relative_files(outbox_root, errors)
+    names = _allocate_artifact_names(
+        relative_paths,
+        max_bytes=_filesystem_name_max(destination_path),
+        reserved=reserved_names,
+    )
+    collected: list[dict[str, Any]] = []
+    for relative_path in relative_paths:
+        source = outbox_root / relative_path
+        destination = destination_path / names[relative_path]
+        temp_destination = destination_path / f".collect-{uuid.uuid4().hex}.tmp"
+        try:
+            resolved_source = source.resolve(strict=True)
+            if not resolved_source.is_relative_to(outbox_root):
+                raise ValueError("resolved path escapes the outbox root")
+            shutil.copy2(resolved_source, temp_destination)
+            size = temp_destination.stat().st_size
+            os.replace(temp_destination, destination)
+        except Exception as error:  # A broken artifact must not fail the task.
+            entry = _artifact_error_entry(relative_path, error)
+            logger.warning(
+                "Failed to collect outbox artifact %r as %r: %s",
+                entry["source"],
+                destination.name,
+                entry["error"],
+            )
+            errors.append(entry)
+            try:
+                temp_destination.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                logger.warning(
+                    "Cannot remove partial outbox copy %s: %s",
+                    temp_destination,
+                    cleanup_error,
+                )
+            continue
+        collected.append(
+            {
+                "name": destination.name,
+                "path": str(destination),
+                "size": size,
+            }
+        )
+        logger.info(
+            "Collected outbox artifact %r as %r",
+            _safe_text(relative_path),
+            destination.name,
+        )
+    return collected, errors
 
 
 @dataclasses.dataclass(frozen=True)
@@ -637,17 +961,19 @@ class TaskExecutionWorker:
                     outcome_status = "completed"
                 task_artifacts_dir = self.artifact_root / str(task.id) / "artifacts"
                 task_artifacts_dir.mkdir(parents=True, exist_ok=True)
-                collected_artifacts = []
-                if outbox_dir.is_dir():
-                    for item in sorted(outbox_dir.iterdir()):
-                        if item.is_file():
-                            dest = task_artifacts_dir / item.name
-                            shutil.copy2(item, dest)
-                            collected_artifacts.append({
-                                "name": item.name,
-                                "path": str(dest),
-                                "size": dest.stat().st_size,
-                            })
+                collected_artifacts, artifact_errors = _collect_outbox_artifacts(
+                    outbox_dir,
+                    task_artifacts_dir,
+                    reserved_names=("summary.md", "session.jsonl"),
+                )
+                if artifact_errors:
+                    runner_result["artifact_errors"] = [
+                        _artifact_error_entry(
+                            item.get("source", ""),
+                            item.get("error", ""),
+                        )
+                        for item in artifact_errors
+                    ]
                 if summary_path and Path(summary_path).is_file():
                     sum_dest = task_artifacts_dir / "summary.md"
                     shutil.copy2(summary_path, sum_dest)
