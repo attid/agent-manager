@@ -61,7 +61,8 @@ def test_completion_resumes_same_dialogue_once_and_delivers_after_restart(migrat
         # result header, the full conversation UUID footer and the explicit
         # context-switch button, instead of a bare parse_mode=None text. The
         # delivery guarantee under test is unchanged: one send, no secretary
-        # re-run after restart.
+        # re-run after restart. The button targets the conversation the result
+        # arrived in; this dialog has no task binding of its own.
         bot.send_rich_message.assert_awaited_once()
         kwargs = bot.send_rich_message.await_args.kwargs
         assert kwargs["chat_id"] == 123
@@ -71,7 +72,7 @@ def test_completion_resumes_same_dialogue_once_and_delivers_after_restart(migrat
             f"#{conv.id}"
         )
         assert kwargs["reply_markup"] == dialog_switch_keyboard(
-            conversation_id=conv.id, task_id=task.id, task_number=task.number
+            conversation_id=conv.id
         )
         assert len(seen) == 2
     finally:
@@ -150,5 +151,65 @@ def test_subscription_api_confines_execution_to_its_original_conversation(migrat
             assert response.status_code == 200
             assert response.json()["task_id"] == task.id
             assert client.request("DELETE", route, json=own, headers=headers).json()["status"] == "cancelled"
+    finally:
+        db.dispose()
+
+
+def test_subscription_button_switches_to_subscribed_conversation(migrated_db):
+    """The result button must lead into the conversation the result arrived in.
+
+    Regression: the button used the finished task's own dialog (creating one
+    when absent), so pressing it from dialog A jumped the user into an
+    unrelated dialog B instead of continuing A.
+    """
+    db = Database.from_path(migrated_db)
+    try:
+        repo, task, conversations, conv_a = setup_subscription(db)
+        # The finished task belongs to its own, different dialog B…
+        conv_b = conversations.create_conversation(title="Task dialog")
+        repo.update(task.id, metadata={"conversation_id": conv_b.id})
+        # …while dialog A is where the user subscribed and receives the result.
+        service = TaskSubscriptions(db)
+        service.subscribe(task.id, conv_a.id)
+        repo.complete_execution(task.id, status="done", summary="Ready")
+        service.enqueue_ready()
+        QueueDispatcher(db, handler=lambda turn_input: "Finished").step()
+
+        bot = AsyncMock()
+        bot.send_rich_message.return_value.message_id = 701
+        assert asyncio.run(TaskSubscriptions(db).deliver_replies(bot)) == 1
+        kwargs = bot.send_rich_message.await_args.kwargs
+        assert kwargs["reply_markup"] == dialog_switch_keyboard(
+            conversation_id=conv_a.id
+        )
+        assert kwargs["rich_message"].markdown.endswith(f"#{conv_a.id}")
+    finally:
+        db.dispose()
+
+
+def test_subscription_button_uses_conversations_own_task_binding(migrated_db):
+    """When dialog A itself belongs to a task, its button keeps that binding."""
+    db = Database.from_path(migrated_db)
+    try:
+        repo, task, conversations, conv_a = setup_subscription(db)
+        owner_task = repo.create(
+            title="Диалог A задача", status="in_progress",
+            metadata={"conversation_id": conv_a.id},
+        )
+        service = TaskSubscriptions(db)
+        service.subscribe(task.id, conv_a.id)
+        repo.complete_execution(task.id, status="done", summary="Ready")
+        service.enqueue_ready()
+        QueueDispatcher(db, handler=lambda turn_input: "Finished").step()
+
+        bot = AsyncMock()
+        bot.send_rich_message.return_value.message_id = 702
+        assert asyncio.run(TaskSubscriptions(db).deliver_replies(bot)) == 1
+        kwargs = bot.send_rich_message.await_args.kwargs
+        assert kwargs["reply_markup"] == dialog_switch_keyboard(
+            conversation_id=conv_a.id,
+            task_id=owner_task.id,
+            task_number=owner_task.number,
+        )
     finally:
         db.dispose()

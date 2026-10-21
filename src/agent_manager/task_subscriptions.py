@@ -121,6 +121,7 @@ class TaskSubscriptions:
         from .telegram.messenger import (
             TELEGRAM_DOCUMENT_THRESHOLD,
             compose_dialog_message,
+            find_task_for_conversation,
             send_markdown,
             split_for_telegram,
             strip_file_directives,
@@ -152,10 +153,16 @@ class TaskSubscriptions:
                 header=task_event_header(task_number, task_title),
                 body=clean,
             )
+            # The switch button must lead into THIS conversation (where the
+            # result arrived), not into the finished task's own dialog: bind
+            # it to the task the conversation itself belongs to, if any.
+            bound_task = find_task_for_conversation(
+                self.database, row.conversation_id
+            )
             keyboard = dialog_switch_keyboard(
                 conversation_id=row.conversation_id,
-                task_id=row.task_id,
-                task_number=task_number,
+                task_id=bound_task.id if bound_task is not None else None,
+                task_number=bound_task.number if bound_task is not None else None,
             )
             parts: list[tuple[str, object]]
             if len(composed) > TELEGRAM_DOCUMENT_THRESHOLD:
@@ -173,6 +180,7 @@ class TaskSubscriptions:
                 if kind == "text":
                     sent_id = await send_markdown(
                         bot, chat_id, content,
+                        conversation_id=row.conversation_id,
                         keyboard=keyboard if index == last_text_index else None,
                     )
                 elif kind == "document":
@@ -192,6 +200,7 @@ class TaskSubscriptions:
                                 f"Не удалось найти запрошенный файл: {content}",
                                 row.conversation_id,
                             ),
+                            conversation_id=row.conversation_id,
                         )
                     else:
                         message = await bot.send_document(
