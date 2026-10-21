@@ -619,9 +619,15 @@ def _capturing_runner(
     return run, captured
 
 
-def test_agy_backend_uses_plan_mode_high_effort_and_project_cwd(
+def test_agy_backend_uses_plan_mode_and_project_cwd_without_implicit_effort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """No implicit --model/--effort: agy's default model rejects --effort.
+
+    Regression: the backend always sent ``--effort high`` while agy's default
+    model (and most models) support no effort levels, so every agy review
+    exited 1 with "invalid model selection" before touching the model.
+    """
     monkeypatch.setattr(
         "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
@@ -634,26 +640,27 @@ def test_agy_backend_uses_plan_mode_high_effort_and_project_cwd(
 
     cmd = captured["cmd"]
     assert cmd[0] == "/fake/bin/agy"
-    assert cmd[1:6] == [
+    assert cmd[1:4] == [
         "--mode",
         "plan",
         "--dangerously-skip-permissions",
-        "--effort",
-        "high",
     ]
-    assert cmd[6] == "-p"
-    assert "# Code Review: Task #task-1" in cmd[7]
+    assert cmd[4] == "-p"
+    assert "--effort" not in cmd
+    assert "--model" not in cmd
+    assert "# Code Review: Task #task-1" in cmd[5]
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     assert captured["kwargs"]["timeout"] == 180.0
     assert result.verdict == VERDICT_APPROVED
     assert result.runtime["engine"] == "agy"
+    assert "effort" not in result.runtime
     review_dir = tmp_path / "artifacts" / "task-1" / "review"
     assert (review_dir / "stdout.txt").is_file()
     assert (review_dir / "stderr.txt").is_file()
     assert (review_dir / "review_report_r1.md").is_file()
 
 
-def test_agy_backend_uses_configured_effort_and_timeout(
+def test_agy_backend_uses_configured_effort_model_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -664,9 +671,11 @@ def test_agy_backend_uses_configured_effort_and_timeout(
     request = _engine_request(
         tmp_path, "agy", effort="medium", timeout_seconds=42
     )
+    request.reviewer_runner_config["model"] = "gemini-3.8-flash-high"
     _executor(runner).execute(request)
 
     cmd = captured["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.8-flash-high"
     assert cmd[cmd.index("--effort") + 1] == "medium"
     assert captured["kwargs"]["timeout"] == 42
 

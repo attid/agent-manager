@@ -1309,24 +1309,45 @@ class _ExternalReviewerBackend(_ReviewerBackend):
 
 
 class AgyReviewerBackend(_ExternalReviewerBackend):
-    """Run the native ``agy`` plan-mode reviewer."""
+    """Run the native ``agy`` plan-mode reviewer.
+
+    ``--model`` and ``--effort`` are passed only when explicitly configured
+    in the reviewer ``runner_config``. agy's default model (from
+    ``~/.pi/agent/settings.json``) supports no effort levels, and most models
+    reject ``--effort`` outright — an implicit ``--effort high`` made every
+    run exit 1 with "invalid model selection". With no explicit config the
+    command relies on agy's own defaults, which always run.
+    """
 
     engine = "agy"
 
     @staticmethod
-    def _effort(context: _ReviewerRunContext) -> str:
+    def _model(context: _ReviewerRunContext) -> str | None:
         runner_config = context.request.reviewer_runner_config or {}
-        requested = (
-            runner_config.get("effort")
-            if isinstance(runner_config, Mapping)
-            else None
-        )
-        return str(requested or "high")
+        if not isinstance(runner_config, Mapping):
+            return None
+        requested = runner_config.get("model")
+        return str(requested) if requested else None
+
+    @staticmethod
+    def _effort(context: _ReviewerRunContext) -> str | None:
+        runner_config = context.request.reviewer_runner_config or {}
+        if not isinstance(runner_config, Mapping):
+            return None
+        requested = runner_config.get("effort")
+        return str(requested) if requested else None
 
     def _runtime_details(
         self, context: _ReviewerRunContext
     ) -> Mapping[str, Any]:
-        return {"effort": self._effort(context)}
+        details: dict[str, Any] = {}
+        model = self._model(context)
+        effort = self._effort(context)
+        if model is not None:
+            details["model"] = model
+        if effort is not None:
+            details["effort"] = effort
+        return details
 
     def _build_command(
         self,
@@ -1334,17 +1355,15 @@ class AgyReviewerBackend(_ExternalReviewerBackend):
         prompt: str,
         context: _ReviewerRunContext,
     ) -> list[str]:
+        command = [str(binary), "--mode", "plan", "--dangerously-skip-permissions"]
+        model = self._model(context)
+        if model is not None:
+            command += ["--model", model]
         effort = self._effort(context)
-        return [
-            str(binary),
-            "--mode",
-            "plan",
-            "--dangerously-skip-permissions",
-            "--effort",
-            effort,
-            "-p",
-            prompt,
-        ]
+        if effort is not None:
+            command += ["--effort", effort]
+        command += ["-p", prompt]
+        return command
 
 
 class CodexReviewerBackend(_ExternalReviewerBackend):
