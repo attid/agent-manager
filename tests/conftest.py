@@ -32,7 +32,7 @@ def upgrade_to_head(db_path: pathlib.Path) -> None:
 @pytest.fixture
 def db_path(tmp_path: pathlib.Path) -> pathlib.Path:
     """Path to a not-yet-created file database."""
-    return tmp_path / "agent_manager_test.db"
+    return tmp_path / "kuzya_test.db"
 
 
 @pytest.fixture

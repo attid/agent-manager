@@ -6,13 +6,13 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.dispatcher import QueueDispatcher
-from agent_manager.permissions import ExecutionPermissions
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import ConversationRepository, Database, TaskRepository
-from agent_manager.task_subscriptions import TaskSubscriptions
-from agent_manager.telegram.keyboards import dialog_switch_keyboard
+from kuzya.api import create_app
+from kuzya.dispatcher import QueueDispatcher
+from kuzya.permissions import ExecutionPermissions
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import ConversationRepository, Database, TaskRepository
+from kuzya.task_subscriptions import TaskSubscriptions
+from kuzya.telegram.keyboards import dialog_switch_keyboard
 
 
 def setup_subscription(db):

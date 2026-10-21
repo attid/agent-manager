@@ -12,14 +12,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_manager.storage import (
+from kuzya.storage import (
     AgentProfileRepository,
     Database,
     TaskRepository,
 )
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.task_worker import TaskExecutionWorker, TaskOutcome
-from agent_manager.telegram.notifier import (
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.task_worker import TaskExecutionWorker, TaskOutcome
+from kuzya.telegram.notifier import (
     TelegramNotifier,
     build_task_outcome_keyboard,
     format_duration_ms,
@@ -44,7 +44,7 @@ def fake_runner_argv() -> list[str]:
 def setup_developer_agent(migrated_db: Path) -> tuple[Database, str]:
     db = Database.from_path(migrated_db)
     agent_repo = AgentProfileRepository(db)
-    agent_id = "agent-manager-developer"
+    agent_id = "kuzya-developer"
     agent_repo.create(
         agent_id=agent_id,
         name="Developer",
@@ -224,7 +224,7 @@ def test_task_worker_parses_pretty_printed_runner_result(
     """
     test_db = Database.from_path(migrated_db)
     AgentProfileRepository(test_db).create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Coding prompt.",
@@ -250,7 +250,7 @@ def test_task_worker_parses_pretty_printed_runner_result(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=["true"],
     )
@@ -562,7 +562,7 @@ def test_task_worker_code_review_cycle_invoked(migrated_db: Path, tmp_path: Path
     test_db = Database.from_path(migrated_db)
     agent_repo = AgentProfileRepository(test_db)
     agent_repo.create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Coding prompt.",
@@ -579,7 +579,7 @@ def test_task_worker_code_review_cycle_invoked(migrated_db: Path, tmp_path: Path
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=["true"],
     )
@@ -665,7 +665,7 @@ def test_task_worker_run_review_cycle_metrics_and_reload(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=["true"],
     )
@@ -728,7 +728,7 @@ def test_task_worker_malformed_review_fails_task(
     test_db = Database.from_path(migrated_db)
     agent_repo = AgentProfileRepository(test_db)
     agent_repo.create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Coding prompt.",
@@ -756,7 +756,7 @@ def test_task_worker_malformed_review_fails_task(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=fake_runner_argv,
         runtime_defaults=RuntimeDefaultsResolver(
@@ -794,7 +794,7 @@ def test_review_changes_requested_resumes_original_developer_session(
     session_id = "11111111-1111-1111-1111-111111111111"
     argv_log = tmp_path / "dev_resume_argv.json"
     agent_repo.create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Coding prompt.",
@@ -830,7 +830,7 @@ def test_review_changes_requested_resumes_original_developer_session(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=fake_runner_argv,
         runtime_defaults=RuntimeDefaultsResolver(
@@ -931,7 +931,7 @@ def test_review_fix_round_unions_changed_files(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=["true"],
     )
@@ -999,7 +999,7 @@ def test_review_cycle_uses_reviewer_profile_engine(
 ) -> None:
     """The stored ``runner_config.engine`` must reach the review executor."""
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     test_db = Database.from_path(migrated_db)
@@ -1022,7 +1022,7 @@ def test_review_cycle_uses_reviewer_profile_engine(
     worker = TaskExecutionWorker(
         database=test_db,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         default_workspace=str(tmp_path),
         runner_argv_prefix=["true"],
     )

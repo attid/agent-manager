@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import AgentProfileRepository, Database, TaskRepository
-from agent_manager.task_worker import TaskExecutionWorker
+from kuzya.api import create_app
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import AgentProfileRepository, Database, TaskRepository
+from kuzya.task_worker import TaskExecutionWorker
 
 
 def test_task_assignment_roundtrip(migrated_db: Path, tmp_path: Path):
@@ -55,7 +55,7 @@ def test_workspace_preflight_reports_real_mount_and_rejects_missing(
         client.post(
             "/agents",
             json={
-                "agent_id": "agent-manager-developer",
+                "agent_id": "kuzya-developer",
                 "name": "Default",
                 "role": "developer",
                 "system_prompt": "Default.",
@@ -136,7 +136,7 @@ def test_unknown_workspace_fails_without_launch_or_fallback(
     db = Database.from_path(migrated_db)
     try:
         AgentProfileRepository(db).create(
-            agent_id="agent-manager-developer",
+            agent_id="kuzya-developer",
             name="Default",
             role="developer",
             system_prompt="Default.",
@@ -177,7 +177,7 @@ def test_missing_assigned_agent_never_runs_default(migrated_db: Path, tmp_path: 
     db = Database.from_path(migrated_db)
     try:
         AgentProfileRepository(db).create(
-            agent_id="agent-manager-developer",
+            agent_id="kuzya-developer",
             name="Default",
             role="developer",
             system_prompt="Wrong agent.",
@@ -211,7 +211,7 @@ def test_preflight_rejects_unknown_agent(migrated_db: Path, tmp_path: Path):
 def test_profile_markdown_preserves_reviewed_policy_and_skills(
     migrated_db: Path, tmp_path: Path
 ):
-    from agent_manager.knowledge import (
+    from kuzya.knowledge import (
         KnowledgeBase,
         format_agent_profile_markdown,
         parse_agent_profile_markdown,

@@ -13,8 +13,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.permissions import (
+from kuzya.api import create_app
+from kuzya.permissions import (
     ADMIN_OWNER,
     ADMIN_RESOURCE,
     GIT_ACTIONS,
@@ -24,7 +24,7 @@ from agent_manager.permissions import (
     execution_owner,
     resources_for_execution,
 )
-from agent_manager.storage import Database, OperationRepository
+from kuzya.storage import Database, OperationRepository
 
 ADMIN_TOKEN = "administrative-token"
 ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}

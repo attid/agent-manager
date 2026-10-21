@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
+from kuzya.api import create_app
 
 
 def _app(db_path: pathlib.Path):

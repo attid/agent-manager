@@ -18,13 +18,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import update
 
-from agent_manager.instance import InstanceContext
-from agent_manager.permissions import ExecutionPermissions
-from agent_manager.persistent_conversation import PersistentConversationHandler
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.secretary import TurnInput, TurnProcessor
-from agent_manager.session_operations import pending_items
-from agent_manager.storage import (
+from kuzya.instance import InstanceContext
+from kuzya.permissions import ExecutionPermissions
+from kuzya.persistent_conversation import PersistentConversationHandler
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.secretary import TurnInput, TurnProcessor
+from kuzya.session_operations import pending_items
+from kuzya.storage import (
     AgentProfileRepository,
     ConversationRepository,
     ConversationRuntimeBusyError,
@@ -33,7 +33,7 @@ from agent_manager.storage import (
     Database,
     OperationRepository,
 )
-from agent_manager.storage.models import ConversationRuntime
+from kuzya.storage.models import ConversationRuntime
 
 FAKE_RUNNER = pathlib.Path(__file__).with_name("fake_pi_runner.py")
 
@@ -975,7 +975,7 @@ def test_child_launch_happens_outside_database_transactions(
         monkeypatch.setattr(Database, "session", tracked_session)
 
         observed: list[int] = []
-        import agent_manager.pi_reply as pi_reply_module
+        import kuzya.pi_reply as pi_reply_module
 
         original_run = pi_reply_module.subprocess.run
 

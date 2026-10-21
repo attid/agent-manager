@@ -8,14 +8,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_manager.git_engine import GitEngine, GitEngineResult
-from agent_manager.operation_handlers import git_commit_push_handler
-from agent_manager.operation_worker import (
+from kuzya.git_engine import GitEngine, GitEngineResult
+from kuzya.operation_handlers import git_commit_push_handler
+from kuzya.operation_worker import (
     OPERATION_KIND_GIT_COMMIT_PUSH,
     OperationContext,
     OperationInstanceContext,
 )
-from agent_manager.storage import Database, TaskRepository
+from kuzya.storage import Database, TaskRepository
 
 
 @pytest.fixture

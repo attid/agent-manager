@@ -7,7 +7,7 @@ write. `task_type` does **not** select an executor.
 ## Workspace resolution
 
 `GET /workspaces/resolve` is a read-only preflight
-(`src/agent_manager/api/app.py`, `resolve_task_workspace`). It returns:
+(`src/kuzya/api/app.py`, `resolve_task_workspace`). It returns:
 
 ```json
 {
@@ -20,7 +20,7 @@ write. `task_type` does **not** select an executor.
 }
 ```
 
-Rules (`src/agent_manager/workspaces.py`):
+Rules (`src/kuzya/workspaces.py`):
 
 - An explicit `workspace` that does not exist is an error (`422`), never a
   silent fallback to another project.
@@ -85,7 +85,7 @@ what was requested.
 ## Instance isolation and operation scoping
 
 - Explicit per-instance paths and backend settings are a first-class typed
-  context (`src/agent_manager/instance.py`, `InstanceContext`): state root,
+  context (`src/kuzya/instance.py`, `InstanceContext`): state root,
   workspaces root, skills root, knowledge root, artifact root, default
   workspace and backend/OpenViking addresses. Components receive it from
   `RunnerConfig` instead of re-deriving a host path.
@@ -96,11 +96,11 @@ what was requested.
   `target_id` (kind-specific action plus the `task:<id>` resource), so a
   review grant cannot submit a Git action and a task-scoped grant cannot
   target another task. Scoped callers cannot list the queue and read only
-  their own operations (`src/agent_manager/permissions.py`).
+  their own operations (`src/kuzya/permissions.py`).
 
 ## Related
 
-- `src/agent_manager/workspaces.py`
-- `src/agent_manager/api/app.py` (`GET /workspaces/resolve`)
+- `src/kuzya/workspaces.py`
+- `src/kuzya/api/app.py` (`GET /workspaces/resolve`)
 - `src/pi_runner/core.py`
 - `docs/sandbox-security.md`

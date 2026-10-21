@@ -1,6 +1,6 @@
 """Opt-in real-model acceptance for the isolated Pirozhki instance.
 
-These tests are skipped unless ``AGENT_MANAGER_REAL_MODEL_E2E`` is truthy.
+These tests are skipped unless ``KUZYA_REAL_MODEL_E2E`` is truthy.
 They then compose the production ``pi_runner`` and the real default system
 profiles against a disposable instance and drive the platform through the
 normal conversation/turn and operation APIs with whatever provider/model the
@@ -29,8 +29,8 @@ import sys
 
 import pytest
 
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import AnalysisRepository
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import AnalysisRepository
 
 from .pirozhki_harness import REPO_ROOT, PirozhkiInstance, pirozhki_instance, run_git
 
@@ -38,13 +38,13 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def _real_model_enabled() -> bool:
-    return os.environ.get("AGENT_MANAGER_REAL_MODEL_E2E", "").strip().lower() in _TRUTHY
+    return os.environ.get("KUZYA_REAL_MODEL_E2E", "").strip().lower() in _TRUTHY
 
 
 pytestmark = pytest.mark.skipif(
     not _real_model_enabled(),
     reason=(
-        "opt-in real-model acceptance: set AGENT_MANAGER_REAL_MODEL_E2E=1 "
+        "opt-in real-model acceptance: set KUZYA_REAL_MODEL_E2E=1 "
         "to run against the host Pi runtime"
     ),
 )

@@ -8,8 +8,8 @@ from alembic import command
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.storage import Database, TaskRepository
+from kuzya.api import create_app
+from kuzya.storage import Database, TaskRepository
 from .conftest import alembic_config
 
 

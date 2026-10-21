@@ -8,8 +8,8 @@ import sqlite3
 from alembic import command
 from sqlalchemy import inspect, text
 
-from agent_manager.storage.database import Database
-from agent_manager.storage.repository import TaskRepository
+from kuzya.storage.database import Database
+from kuzya.storage.repository import TaskRepository
 
 from .conftest import alembic_config, upgrade_to_head
 

@@ -9,17 +9,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiogram.exceptions import TelegramBadRequest
 
-from agent_manager.storage import ConversationRepository, Database, TaskRepository
-from agent_manager.storage.telegram_delivery import (
+from kuzya.storage import ConversationRepository, Database, TaskRepository
+from kuzya.storage.telegram_delivery import (
     DELIVERY_STATUS_PENDING,
     DELIVERY_STATUS_SENT,
     INPUT_SOURCE_TELEGRAM,
     TelegramDeliveryRepository,
     reply_delivery_key,
 )
-from agent_manager.secretary import TurnProcessor
-from agent_manager.telegram.keyboards import dialog_switch_keyboard
-from agent_manager.telegram.messenger import (
+from kuzya.secretary import TurnProcessor
+from kuzya.telegram.keyboards import dialog_switch_keyboard
+from kuzya.telegram.messenger import (
     TelegramDeliveryService,
     api_question_header,
     compose_dialog_message,
@@ -31,8 +31,8 @@ from agent_manager.telegram.messenger import (
     split_for_telegram,
     with_conversation_footer,
 )
-from agent_manager.telegram.state import UserStateStorage
-from agent_manager.telegram.worker import QueueProcessor
+from kuzya.telegram.state import UserStateStorage
+from kuzya.telegram.worker import QueueProcessor
 
 
 def _bot(message_id: int = 501) -> AsyncMock:

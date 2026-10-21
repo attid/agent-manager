@@ -1,14 +1,14 @@
-# Agent Manager agent handbook
+# Kuzya agent handbook
 
 This directory is the discoverable, read-only operating contract for agents
 (secretary and system agents) and for engineers integrating with the platform.
-It describes the committed behaviour of Agent Manager as of base commit
+It describes the committed behaviour of Kuzya as of base commit
 `fc7a3f7`, which already contains the T01 durable operation queue.
 
 > **Integrated snapshot.** T02I (instance isolation and scoped execution
 > permissions), T03 (independent review executor), T04 (analysis,
 > recommendations and approvals) and T05 (capability inventory, parity
-> checks and discovery injection) are present. `src/agent_manager/capabilities.py`
+> checks and discovery injection) are present. `src/kuzya/capabilities.py`
 > is the machine-readable inventory and `tests/test_capabilities.py` checks it
 > against the live OpenAPI document and the registered Pi JS tools. Source
 > remains the source of truth.
@@ -22,7 +22,7 @@ It describes the committed behaviour of Agent Manager as of base commit
 
 This handbook does not replace the customized identity prompts stored in the
 registry (`system-secretary`, `system-code-reviewer`, `system-log-analyzer`,
-`agent-manager-developer`). Those identity prompts are data and must remain
+`kuzya-developer`). Those identity prompts are data and must remain
 intact. The platform operating contract is injected as an additional
 instruction file, not as a replacement prompt (see
 [Profiles, runtime and skills](profiles-runtime-skills.md#platform-operating-instruction-injection)).
@@ -32,12 +32,12 @@ instruction file, not as a replacement prompt (see
 There is no separate registry of capabilities. Read them from the four
 authoritative sources, in this order:
 
-1. **REST surface** — `src/agent_manager/api/app.py` and the generated
+1. **REST surface** — `src/kuzya/api/app.py` and the generated
    OpenAPI document:
 
    ```bash
    PYTHONPATH=src .venv/bin/python -c \
-     "from agent_manager.api.app import create_app; \
+     "from kuzya.api.app import create_app; \
       app=create_app('sqlite:////tmp/probe.db'); \
       spec=app.openapi(); \
       [print(m.upper(), p) for p in sorted(spec['paths']) \
@@ -53,11 +53,11 @@ authoritative sources, in this order:
 
 3. **Tool exposure policy** — an agent only receives the tools listed in
    `runner_config.tools` for its current `AgentProfile` revision. The default
-   secretary tool list is in `src/agent_manager/knowledge.py`
+   secretary tool list is in `src/kuzya/knowledge.py`
    (`ensure_default_profiles`, `sec_tools`).
 
 4. **Executable parity tests** — `tests/test_capabilities.py` compares the
-   machine-readable inventory in `src/agent_manager/capabilities.py` with the
+   machine-readable inventory in `src/kuzya/capabilities.py` with the
    live OpenAPI document and the real tools registered by `policy.mjs` (via
    `tests/policy_tool_names.mjs`). `tests/platform_tools_contract.mjs` runs the
    real `policy.mjs` tools against a temporary HTTP backend, and
@@ -112,14 +112,14 @@ Operation protocol statuses (`accepted`/`pending`, `running`,
 
 When prose and source disagree, source wins:
 
-- REST: `src/agent_manager/api/app.py`, `src/agent_manager/api/schemas.py`
-- Tools and permissions: `src/agent_manager/capabilities.py`,
-  `src/pi_runner/policy.mjs`, `src/agent_manager/permissions.py`
-- Operations: `src/agent_manager/storage/operations.py`,
-  `src/agent_manager/operation_worker.py`,
-  `src/agent_manager/operation_handlers.py`
-- Turns: `src/agent_manager/secretary.py`, `src/agent_manager/dispatcher.py`
-- Profiles/runtime: `src/agent_manager/storage/agents.py`,
-  `src/agent_manager/profile_runtime.py`,
-  `src/agent_manager/runtime_defaults.py`
+- REST: `src/kuzya/api/app.py`, `src/kuzya/api/schemas.py`
+- Tools and permissions: `src/kuzya/capabilities.py`,
+  `src/pi_runner/policy.mjs`, `src/kuzya/permissions.py`
+- Operations: `src/kuzya/storage/operations.py`,
+  `src/kuzya/operation_worker.py`,
+  `src/kuzya/operation_handlers.py`
+- Turns: `src/kuzya/secretary.py`, `src/kuzya/dispatcher.py`
+- Profiles/runtime: `src/kuzya/storage/agents.py`,
+  `src/kuzya/profile_runtime.py`,
+  `src/kuzya/runtime_defaults.py`
 - Isolation: `src/pi_runner/core.py`

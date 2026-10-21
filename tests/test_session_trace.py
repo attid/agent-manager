@@ -7,22 +7,22 @@ import pathlib
 from types import SimpleNamespace
 from typing import Any
 
-from agent_manager.analysis import (
+from kuzya.analysis import (
     AnalyzerRunResult,
     build_evidence_package,
 )
-from agent_manager.operation_handlers import register_default_operation_handlers
-from agent_manager.operation_worker import (
+from kuzya.operation_handlers import register_default_operation_handlers
+from kuzya.operation_worker import (
     OPERATION_KIND_ANALYSIS,
     OperationInstanceContext,
     OperationWorker,
 )
-from agent_manager.session_trace import (
+from kuzya.session_trace import (
     EVENTS_FILENAME,
     SESSION_FILENAME,
     build_task_trace,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     AnalysisRepository,
     Database,
     OperationRepository,

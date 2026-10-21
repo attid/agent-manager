@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import FSInputFile
 
-from agent_manager.knowledge import (
+from kuzya.knowledge import (
     DEFAULT_KNOWLEDGE_DIR,
     KnowledgeBase,
     KnowledgeDocumentNotFoundError,
@@ -16,14 +16,14 @@ from agent_manager.knowledge import (
     contained_target_path,
     format_agent_profile_markdown,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     AgentProfile,
     AgentProfileRepository,
     Database,
 )
-from agent_manager.telegram.state import UserStateStorage
-from agent_manager.telegram.transcription import DeepgramTranscriber
-from agent_manager.telegram.worker import QueueProcessor
+from kuzya.telegram.state import UserStateStorage
+from kuzya.telegram.transcription import DeepgramTranscriber
+from kuzya.telegram.worker import QueueProcessor
 
 
 def test_format_agent_profile_markdown() -> None:
@@ -53,21 +53,21 @@ def test_knowledge_base_initialize(tmp_path: Path) -> None:
     kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
     kb.initialize()
 
-    assert (tmp_path / "knowledge/projects/agent-manager/summary.md").is_file()
+    assert (tmp_path / "knowledge/projects/kuzya/summary.md").is_file()
     assert (tmp_path / "knowledge/components/aiogram/rules.md").is_file()
     assert (tmp_path / "knowledge/components/bubblewrap/rules.md").is_file()
 
-    summary = (tmp_path / "knowledge/projects/agent-manager/summary.md").read_text(
+    summary = (tmp_path / "knowledge/projects/kuzya/summary.md").read_text(
         encoding="utf-8"
     )
-    assert "Agent Manager" in summary
+    assert "Kuzya" in summary
 
 
 def test_knowledge_base_sync_agents(tmp_path: Path, migrated_db: Path) -> None:
     db = Database.from_path(migrated_db)
     repo = AgentProfileRepository(db)
     repo.create(
-        agent_id="agent-manager-secretary",
+        agent_id="kuzya-secretary",
         name="Secretary",
         role="secretary",
         system_prompt="Manage tasks and dialogs.",
@@ -84,7 +84,7 @@ def test_knowledge_base_sync_agents(tmp_path: Path, migrated_db: Path) -> None:
     assert "delete_knowledge" in content
     assert 'agent_id: "system-secretary"' in content
 
-    dev_file = tmp_path / "knowledge/agents/agent-manager-developer.md"
+    dev_file = tmp_path / "knowledge/agents/kuzya-developer.md"
     assert dev_file.is_file()
 
 
@@ -93,10 +93,10 @@ def test_knowledge_base_resolve_file(tmp_path: Path) -> None:
     kb.initialize()
 
     # 1. Project shorthand
-    res_proj = kb.resolve_file("agent-manager")
+    res_proj = kb.resolve_file("kuzya")
     assert res_proj is not None
     assert res_proj.name == "summary.md"
-    assert "projects/agent-manager" in str(res_proj)
+    assert "projects/kuzya" in str(res_proj)
 
     # 2. Component shorthand
     res_comp = kb.resolve_file("aiogram")
@@ -125,7 +125,7 @@ def test_queue_processor_sends_file(tmp_path: Path) -> None:
         kb.initialize()
 
         # Create dummy agent markdown
-        agent_md = kb_dir / "agents/agent-manager-developer.md"
+        agent_md = kb_dir / "agents/kuzya-developer.md"
         agent_md.write_text("# Developer Profile", encoding="utf-8")
 
         # Mocks
@@ -144,7 +144,7 @@ def test_queue_processor_sends_file(tmp_path: Path) -> None:
             return_value=[
                 {
                     "id": "rep-789",
-                    "text": "Вот профиль разработчика:\n[SEND_FILE: agent-manager-developer]\nОзнакомьтесь.",
+                    "text": "Вот профиль разработчика:\n[SEND_FILE: kuzya-developer]\nОзнакомьтесь.",
                 }
             ]
         )
@@ -186,7 +186,7 @@ def test_queue_processor_sends_file(tmp_path: Path) -> None:
         assert doc_args["chat_id"] == 100
         assert isinstance(doc_args["document"], FSInputFile)
         assert Path(doc_args["document"].path) == agent_md
-        assert doc_args["caption"] == "📄 agent-manager-developer.md\n\n#conv-001"
+        assert doc_args["caption"] == "📄 kuzya-developer.md\n\n#conv-001"
 
     asyncio.run(_run())
 
@@ -195,7 +195,7 @@ def test_knowledge_base_hot_reload_agent(tmp_path: Path, migrated_db: Path) -> N
     db = Database.from_path(migrated_db)
     repo = AgentProfileRepository(db)
     repo.create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Initial instructions.",
@@ -205,16 +205,16 @@ def test_knowledge_base_hot_reload_agent(tmp_path: Path, migrated_db: Path) -> N
     kb = KnowledgeBase(root_dir=tmp_path / "knowledge")
     kb.initialize(database=db)
 
-    agent_file = tmp_path / "knowledge/agents/agent-manager-developer.md"
+    agent_file = tmp_path / "knowledge/agents/kuzya-developer.md"
     assert agent_file.is_file()
 
     # No changes yet -> sync returns False
-    assert not kb.sync_agent_from_file("agent-manager-developer", db)
-    assert repo.get_current("agent-manager-developer").revision == 1
+    assert not kb.sync_agent_from_file("kuzya-developer", db)
+    assert repo.get_current("kuzya-developer").revision == 1
 
     # Modify markdown file on disk
     updated_md = """---
-agent_id: "agent-manager-developer"
+agent_id: "kuzya-developer"
 name: "Developer"
 role: "developer"
 tools: ["read", "write"]
@@ -227,8 +227,8 @@ Updated new instructions for developer.
     agent_file.write_text(updated_md, encoding="utf-8")
 
     # Hot reload triggered
-    assert kb.sync_agent_from_file("agent-manager-developer", db)
-    updated_profile = repo.get_current("agent-manager-developer")
+    assert kb.sync_agent_from_file("kuzya-developer", db)
+    updated_profile = repo.get_current("kuzya-developer")
     assert updated_profile.revision == 2
     assert "Updated new instructions" in updated_profile.system_prompt
     assert updated_profile.runner_config.get("tools") == ["read", "write"]
@@ -244,7 +244,7 @@ def test_knowledge_base_catalog_and_git(tmp_path: Path) -> None:
     # Verify catalog contains projects and components
     catalog = kb.get_catalog_index()
     assert "## Knowledge Base Catalog" in catalog
-    assert "agent-manager" in catalog
+    assert "kuzya" in catalog
     assert "aiogram" in catalog
     assert "bubblewrap" in catalog
 
@@ -354,7 +354,7 @@ def test_contained_target_path_rejects_escapes_and_allows_nested_names(
 
     # Traversal and absolute paths are rejected by containment, not by an
     # arbitrary name allowlist.
-    for target in ("../../escape", "/tmp/agent-manager-escape"):
+    for target in ("../../escape", "/tmp/kuzya-escape"):
         with pytest.raises(KnowledgePathError):
             contained_target_path(kb.projects_dir, target, "summary.md")
 

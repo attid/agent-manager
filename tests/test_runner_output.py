@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from agent_manager.runner_output import extract_runner_result
+from kuzya.runner_output import extract_runner_result
 
 
 def test_parses_pretty_printed_runner_result() -> None:

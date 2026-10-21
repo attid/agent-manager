@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Deploy Agent Manager to an isolated production environment.
+"""Deploy Kuzya to an isolated production environment.
 
 Ensures strict separation between development repository and system runtime:
-- Prod Application: ~/.local/lib/agent-manager/app
-- Prod Virtualenv:  ~/.local/lib/agent-manager/venv
-- Prod Config:      ~/.config/agent-manager/agent-manager.env
-- Systemd Service:  ~/.config/systemd/user/agent-manager.service
+- Prod Application: ~/.kuzya/app
+- Prod Virtualenv:  ~/.kuzya/venv
+- Prod Config:      ~/.kuzya/kuzya.env
+- Systemd Service:  ~/.kuzya/kuzya.service (wired via `systemctl --user link`)
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("deploy")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PROD_APP = Path.home() / ".local/lib/agent-manager/app"
-DEFAULT_PROD_VENV = Path.home() / ".local/lib/agent-manager/venv"
-DEFAULT_CONFIG_DIR = Path.home() / ".config/agent-manager"
-DEFAULT_SYSTEMD_DIR = Path.home() / ".config/systemd/user"
-DEFAULT_DATA_DIR = Path.home() / ".local/share/agent-manager"
+DEFAULT_PROD_APP = Path.home() / ".kuzya/app"
+DEFAULT_PROD_VENV = Path.home() / ".kuzya/venv"
+DEFAULT_CONFIG_DIR = Path.home() / ".kuzya"
+DEFAULT_PROD_ROOT = Path.home() / ".kuzya"
+DEFAULT_DATA_DIR = Path.home() / ".kuzya/data"
 
 
 def copy_app_files(source_root: Path, target_root: Path) -> None:
@@ -86,9 +86,9 @@ def setup_prod_venv(prod_venv: Path, prod_app: Path) -> None:
 
 
 def setup_config_file(config_dir: Path) -> Path:
-    """Ensure ~/.config/agent-manager/agent-manager.env exists with safe permissions."""
+    """Ensure ~/.kuzya/kuzya.env exists with safe permissions."""
     config_dir.mkdir(parents=True, exist_ok=True)
-    env_file = config_dir / "agent-manager.env"
+    env_file = config_dir / "kuzya.env"
 
     if env_file.exists():
         logger.info("Configuration file %s already exists, keeping existing secrets.", env_file)
@@ -96,31 +96,31 @@ def setup_config_file(config_dir: Path) -> Path:
 
     logger.info("Creating default configuration file at %s...", env_file)
     default_api_token = f"am_{secrets.token_urlsafe(24)}"
-    env_content = f"""# Agent Manager System Configuration
+    env_content = f"""# Kuzya System Configuration
 # Generated automatically during deployment
 
 # HTTP API and Multi-Bearer Auth
-AGENT_MANAGER_HOST=127.0.0.1
-AGENT_MANAGER_PORT=18767
+KUZYA_HOST=127.0.0.1
+KUZYA_PORT=18767
 # List of comma-separated allowed Bearer tokens for Tailscale / internal access
-AGENT_MANAGER_API_TOKENS={default_api_token}
+KUZYA_API_TOKENS={default_api_token}
 
 # SQLite Database (Transactional storage)
-AGENT_MANAGER_DB_URL=sqlite:////home/itolstov/.local/share/agent-manager/tasks.db
-AGENT_MANAGER_AUTO_MIGRATE=true
+KUZYA_DB_URL=sqlite:////home/itolstov/.kuzya/data/tasks.db
+KUZYA_AUTO_MIGRATE=true
 
 # Filesystem Roots
-AGENT_MANAGER_ARTIFACT_ROOT=/home/itolstov/.local/share/agent-manager/artifacts
-AGENT_MANAGER_KNOWLEDGE_ROOT=/home/itolstov/.local/share/agent-manager/knowledge
-AGENT_MANAGER_DEFAULT_WORKSPACE=/home/itolstov/Projects/mtl/AgentManager
-AGENT_MANAGER_RUNNER_PREFIX=/home/itolstov/.local/lib/agent-manager/venv/bin/python -m pi_runner
+KUZYA_ARTIFACT_ROOT=/home/itolstov/.kuzya/data/artifacts
+KUZYA_KNOWLEDGE_ROOT=/home/itolstov/.kuzya/data/knowledge
+KUZYA_DEFAULT_WORKSPACE=/home/itolstov/Projects/mtl/kuzya
+KUZYA_RUNNER_PREFIX=/home/itolstov/.kuzya/venv/bin/python -m pi_runner
 
 # Telegram Secretary Bot (Заполните ваши данные для работы бота)
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_USER_ID=
-AGENT_MANAGER_BACKEND_URL=http://127.0.0.1:18767
-TELEGRAM_STATE_DB_PATH=/home/itolstov/.local/share/agent-manager/telegram_state.db
-TELEGRAM_MEDIA_DIR=/home/itolstov/.local/share/agent-manager/media
+KUZYA_BACKEND_URL=http://127.0.0.1:18767
+TELEGRAM_STATE_DB_PATH=/home/itolstov/.kuzya/data/telegram_state.db
+TELEGRAM_MEDIA_DIR=/home/itolstov/.kuzya/data/media
 
 # Audio Transcription (Deepgram)
 DEEPGRAM_API_KEY=
@@ -135,13 +135,18 @@ LOG_FORMAT=text
     return env_file
 
 
-def setup_systemd_service(systemd_dir: Path, prod_app: Path, prod_venv: Path, env_file: Path) -> Path:
-    """Create systemd user unit file."""
-    systemd_dir.mkdir(parents=True, exist_ok=True)
-    service_file = systemd_dir / "agent-manager.service"
+def setup_systemd_service(prod_root: Path, prod_app: Path, prod_venv: Path, env_file: Path) -> Path:
+    """Write the systemd user unit inside ~/.kuzya and link it.
+
+    The unit file lives with the rest of the installation (one directory,
+    ~/.kuzya); `systemctl --user link` registers it, leaving only a symlink
+    under ~/.config/systemd/user — the minimum systemd physically requires.
+    """
+    prod_root.mkdir(parents=True, exist_ok=True)
+    service_file = prod_root / "kuzya.service"
 
     unit_content = f"""[Unit]
-Description=Agent Manager Service (FastAPI + Dispatcher + TaskWorker + Telegram Bot)
+Description=Kuzya Service (FastAPI + Dispatcher + TaskWorker + Telegram Bot)
 After=network.target
 
 [Service]
@@ -150,7 +155,7 @@ WorkingDirectory={prod_app}
 EnvironmentFile={env_file}
 Environment=PYTHONPATH={prod_app}/src
 Environment="PATH=/home/itolstov/.nvm/versions/node/v24.19.0/bin:/home/itolstov/.local/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart={prod_venv}/bin/python -m agent_manager.runner
+ExecStart={prod_venv}/bin/python -m kuzya.runner
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
@@ -162,6 +167,14 @@ WantedBy=default.target
     service_file.write_text(unit_content, encoding="utf-8")
     logger.info("Systemd unit written to %s", service_file)
 
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "link", "--force", str(service_file)],
+            check=True,
+        )
+        logger.info("Linked %s into the systemd user manager", service_file)
+    except Exception as e:
+        logger.warning("Could not link the unit (run it manually): %s", e)
     try:
         subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
         logger.info("Executed systemctl --user daemon-reload")
@@ -179,7 +192,7 @@ def verify_prod_installation(prod_venv: Path, prod_app: Path) -> None:
     cmd = [
         str(python_bin),
         "-c",
-        "import agent_manager.runner, aiogram, fastapi, sqlalchemy, alembic, httpx, multipart; print('INTEGRITY_OK')",
+        "import kuzya.runner, aiogram, fastapi, sqlalchemy, alembic, httpx, multipart; print('INTEGRITY_OK')",
     ]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(prod_app / "src")
@@ -192,12 +205,12 @@ def verify_prod_installation(prod_venv: Path, prod_app: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Deploy Agent Manager to isolated production")
+    parser = argparse.ArgumentParser(description="Deploy Kuzya to isolated production")
     parser.add_argument("--source", type=Path, default=REPO_ROOT, help="Source repository root")
     parser.add_argument("--prod-app", type=Path, default=DEFAULT_PROD_APP, help="Target production app directory")
     parser.add_argument("--prod-venv", type=Path, default=DEFAULT_PROD_VENV, help="Target production virtualenv")
     parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR, help="Target config directory")
-    parser.add_argument("--systemd-dir", type=Path, default=DEFAULT_SYSTEMD_DIR, help="Target systemd user directory")
+    parser.add_argument("--prod-root", type=Path, default=DEFAULT_PROD_ROOT, help="Target single installation root (~/.kuzya)")
     args = parser.parse_args()
 
     # Create data directories
@@ -210,14 +223,14 @@ def main() -> None:
     copy_app_files(args.source, args.prod_app)
     setup_prod_venv(args.prod_venv, args.prod_app)
     env_file = setup_config_file(args.config_dir)
-    setup_systemd_service(args.systemd_dir, args.prod_app, args.prod_venv, env_file)
+    setup_systemd_service(args.prod_root, args.prod_app, args.prod_venv, env_file)
     verify_prod_installation(args.prod_venv, args.prod_app)
 
     logger.info("=== Deployment completed successfully! ===")
     logger.info("To control the service:")
-    logger.info("  systemctl --user start agent-manager.service")
-    logger.info("  systemctl --user status agent-manager.service")
-    logger.info("  journalctl --user -u agent-manager.service -f")
+    logger.info("  systemctl --user start kuzya.service")
+    logger.info("  systemctl --user status kuzya.service")
+    logger.info("  journalctl --user -u kuzya.service -f")
 
 
 if __name__ == "__main__":

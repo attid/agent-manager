@@ -3,7 +3,7 @@
 These tests exercise the ``/agents`` endpoints through a real ``TestClient``
 against migrated temporary file databases, complementing the storage-level
 coverage in ``tests/test_agents.py``. There is no graph entry for this new
-module yet; it sits on the existing ``agent_manager.api`` boundary and wraps
+module yet; it sits on the existing ``kuzya.api`` boundary and wraps
 ``AgentProfileRepository`` without changing it.
 """
 
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 from alembic import command
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
+from kuzya.api import create_app
 
 from .conftest import alembic_config
 

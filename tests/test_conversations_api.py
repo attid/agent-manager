@@ -3,7 +3,7 @@
 These tests complement the storage-level ``tests/test_conversations.py`` by
 exercising the same durability guarantees through a real ``TestClient``
 against migrated temporary file databases. There is no graph entry for this
-module yet; it sits on the existing ``agent_manager.api`` boundary only.
+module yet; it sits on the existing ``kuzya.api`` boundary only.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 from alembic import command
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
+from kuzya.api import create_app
 
 from .conftest import alembic_config
 

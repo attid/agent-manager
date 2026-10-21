@@ -11,19 +11,19 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.permissions import (
+from kuzya.api import create_app
+from kuzya.permissions import (
     ADMIN_RESOURCE,
     ExecutionPermissions,
     actions_for_tools,
     resources_for_execution,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     AgentProfileRepository,
     Database,
     TaskRepository,
 )
-from agent_manager.task_worker import TaskExecutionWorker
+from kuzya.task_worker import TaskExecutionWorker
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ def fake_runner_argv() -> list[str]:
 def setup_developer_agent(migrated_db: Path) -> tuple[Database, str]:
     db = Database.from_path(migrated_db)
     agent_repo = AgentProfileRepository(db)
-    agent_id = "agent-manager-developer"
+    agent_id = "kuzya-developer"
     agent_repo.create(
         agent_id=agent_id,
         name="Developer",

@@ -5,7 +5,7 @@ result; read the operation, the report and its recommendations.
 
 ## Analyzer profile
 
-`system-log-analyzer` (`src/agent_manager/knowledge.py`) is read-only:
+`system-log-analyzer` (`src/kuzya/knowledge.py`) is read-only:
 
 - `role: analyzer`, `tools: ["read", "bash"]`, `project_read_only: true`,
   `network: true`; the profile revision is frozen per execution and receives
@@ -26,7 +26,7 @@ The tool returns a durable `pending` operation. Inspect it with
 
 ## Executor and evidence
 
-`analysis_operation_handler` (`src/agent_manager/analysis.py`) is registered
+`analysis_operation_handler` (`src/kuzya/analysis.py`) is registered
 for the `analysis` kind by `register_default_operation_handlers`. It:
 
 - resolves the target task and raises `OperationExecutionError` when it is
@@ -36,7 +36,7 @@ for the `analysis` kind by `register_default_operation_handlers`. It:
   operations targeting the task, review/metrics evidence reachable from the
   task, and a bounded diagnostic trace from the task's own
   `session.jsonl`/`events.jsonl` artifacts. Unrelated tasks are not read.
-- the trace (`src/agent_manager/session_trace.py`) contains tool-call names,
+- the trace (`src/kuzya/session_trace.py`) contains tool-call names,
   statuses, durations, redacted arguments, repeated paths, error excerpts,
   timestamps, usage counters and artifact availability. It never contains the
   raw transcript, assistant text, file contents or full tool output. Sensitive
@@ -86,7 +86,7 @@ analyzer instructions state that `trace.status` is authoritative:
 `unavailable` means there are no artifact observations for that source, so a
 hypothesis must not be presented as an observed event.
 
-The secretary client (`src/agent_manager/telegram/client.py`) and tools
+The secretary client (`src/kuzya/telegram/client.py`) and tools
 (`list_analysis_reports`, `get_analysis_report`, `list_recommendations`,
 `preview_recommendation`, `approve_recommendation`, `apply_recommendation`)
 expose the same surface. They are enabled for the secretary profile only
@@ -109,7 +109,7 @@ expose the same surface. They are enabled for the secretary profile only
   approve/apply to the management action `analysis.approve`. A task-scoped
   `analysis.read` grant cannot read another task's report by id (that needs
   wildcard authority), and `analysis.trigger` does not grant approval.
-- `cmd_analyze` (`src/agent_manager/telegram/handlers.py`) shows a stored
+- `cmd_analyze` (`src/kuzya/telegram/handlers.py`) shows a stored
   report without launching a model; when none exists it submits the real
   durable operation and renders its stored pending/failed/succeeded outcome.
   A repeated call while an operation is pending replays the same
@@ -119,8 +119,8 @@ expose the same surface. They are enabled for the secretary profile only
 
 ## Related
 
-- `src/agent_manager/analysis.py`
-- `src/agent_manager/storage/analysis.py`
-- `src/agent_manager/telegram/handlers.py`
-- `src/agent_manager/operation_handlers.py`
+- `src/kuzya/analysis.py`
+- `src/kuzya/storage/analysis.py`
+- `src/kuzya/telegram/handlers.py`
+- `src/kuzya/operation_handlers.py`
 - `docs/plans/platform-completion/T04.md`

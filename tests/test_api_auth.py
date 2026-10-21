@@ -7,9 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 import httpx
 
-from agent_manager.api import create_app
-from agent_manager.permissions import ExecutionPermissions
-from agent_manager.telegram.client import BackendClient, BackendError
+from kuzya.api import create_app
+from kuzya.permissions import ExecutionPermissions
+from kuzya.telegram.client import BackendClient, BackendError
 
 
 def test_api_auth_open_mode_when_no_tokens(migrated_db: Path) -> None:
@@ -136,8 +136,8 @@ def test_backend_client_with_bearer_token(migrated_db: Path) -> None:
 def test_delete_knowledge_requires_knowledge_write_scope(
     migrated_db: Path, tmp_path: Path
 ) -> None:
-    from agent_manager.knowledge import KnowledgeBase
-    from agent_manager.permissions import (
+    from kuzya.knowledge import KnowledgeBase
+    from kuzya.permissions import (
         ExecutionPermissions,
         actions_for_tools,
         resources_for_execution,

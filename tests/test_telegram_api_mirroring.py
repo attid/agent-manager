@@ -13,18 +13,18 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.permissions import ExecutionPermissions
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import ConversationRepository, Database
-from agent_manager.storage.telegram_delivery import (
+from kuzya.api import create_app
+from kuzya.permissions import ExecutionPermissions
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import ConversationRepository, Database
+from kuzya.storage.telegram_delivery import (
     DELIVERY_KIND_API_QUESTION,
     DELIVERY_KIND_REPLY,
     DELIVERY_STATUS_PENDING,
     DELIVERY_STATUS_SENT,
     TelegramDeliveryRepository,
 )
-from agent_manager.telegram.messenger import TelegramDeliveryService
+from kuzya.telegram.messenger import TelegramDeliveryService
 
 
 def test_ask_stamps_verified_caller_and_enqueues_question_copy(migrated_db) -> None:

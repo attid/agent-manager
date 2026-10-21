@@ -15,20 +15,20 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.instance import InstanceContext
-from agent_manager.knowledge import KnowledgeBase
-from agent_manager.permissions import (
+from kuzya.api import create_app
+from kuzya.instance import InstanceContext
+from kuzya.knowledge import KnowledgeBase
+from kuzya.permissions import (
     ADMIN_RESOURCE,
     ExecutionPermissions,
     actions_for_tools,
     resolve_requirement,
     resources_for_execution,
 )
-from agent_manager.runner import RunnerConfig
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import AgentProfileRepository, Database, TaskRepository
-from agent_manager.task_worker import TaskExecutionWorker
+from kuzya.runner import RunnerConfig
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import AgentProfileRepository, Database, TaskRepository
+from kuzya.task_worker import TaskExecutionWorker
 
 from .conftest import upgrade_to_head
 
@@ -90,7 +90,7 @@ def test_task_scoped_management_tools_do_not_widen_to_wildcard() -> None:
     # so its management tools keep the wildcard authority they need.
     conversation_resources = resources_for_execution(
         actions_for_tools(["create_task", "update_task", "trigger_review"]),
-        agent_id="agent-manager-secretary",
+        agent_id="kuzya-secretary",
     )
     assert conversation_resources == frozenset({ADMIN_RESOURCE})
 
@@ -309,10 +309,10 @@ def test_distinct_instances_have_independent_files_urls_and_profiles(
         # Profile state is instance-local: each database has its own
         # developer profile pointing at its own explicit workspace.
         first_dev = AgentProfileRepository(first_db).get_current(
-            "agent-manager-developer"
+            "kuzya-developer"
         )
         second_dev = AgentProfileRepository(second_db).get_current(
-            "agent-manager-developer"
+            "kuzya-developer"
         )
         assert first_dev is not None and second_dev is not None
         assert first_dev.runner_config["project"] == str(

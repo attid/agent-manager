@@ -17,9 +17,9 @@ from contextlib import contextmanager
 
 from sqlalchemy import select
 
-from agent_manager.dispatcher import QueueDispatcher, TurnOutcome
-from agent_manager.secretary import TurnInput, TurnProcessor
-from agent_manager.storage import (
+from kuzya.dispatcher import QueueDispatcher, TurnOutcome
+from kuzya.secretary import TurnInput, TurnProcessor
+from kuzya.storage import (
     ConversationRepository,
     Database,
     Turn,
@@ -270,7 +270,7 @@ def test_handler_exception_fails_turn_logs_traceback_and_continues(
         dispatcher = QueueDispatcher(database, handler)
 
         with caplog.at_level(
-            logging.ERROR, logger="agent_manager.dispatcher"
+            logging.ERROR, logger="kuzya.dispatcher"
         ):
             failed = dispatcher.step()
             succeeded = dispatcher.step()
@@ -331,7 +331,7 @@ def test_loop_level_error_is_logged_and_loop_survives(
 
         stop_event = threading.Event()
         with caplog.at_level(
-            logging.ERROR, logger="agent_manager.dispatcher"
+            logging.ERROR, logger="kuzya.dispatcher"
         ):
             thread = threading.Thread(
                 target=dispatcher.run_loop,

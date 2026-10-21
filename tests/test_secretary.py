@@ -14,7 +14,7 @@ import pytest
 from alembic import command
 from sqlalchemy import event, inspect, select
 
-from agent_manager.secretary import (
+from kuzya.secretary import (
     StaleClaimError,
     TurnConversationMismatchError,
     TurnInputMessageNotFoundError,
@@ -23,7 +23,7 @@ from agent_manager.secretary import (
     TurnProcessor,
     TurnStateError,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     ConversationRepository,
     Database,
     TaskRepository,

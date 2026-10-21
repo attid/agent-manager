@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from agent_manager.review_executor import (
+from kuzya.review_executor import (
     DEFAULT_REVIEWER_PROMPT,
     ReviewExecutionError,
     ReviewExecutor,
@@ -59,7 +59,7 @@ def _executor(
 
 
 def _passive_resolver():
-    from agent_manager.runtime_defaults import RuntimeDefaultsResolver
+    from kuzya.runtime_defaults import RuntimeDefaultsResolver
 
     return RuntimeDefaultsResolver(global_settings_path="/nonexistent/settings.json")
 
@@ -623,7 +623,7 @@ def test_agy_backend_uses_plan_mode_high_effort_and_project_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner(
@@ -657,7 +657,7 @@ def test_agy_backend_uses_configured_effort_and_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
@@ -676,7 +676,7 @@ def test_native_engines_prepend_reviewer_system_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
@@ -700,7 +700,7 @@ def test_native_engines_omit_empty_reviewer_system_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner('{"verdict": "approved", "findings": []}')
@@ -716,7 +716,7 @@ def test_codex_backend_uses_review_uncommitted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, captured = _capturing_runner(
@@ -768,10 +768,10 @@ def test_missing_external_engine_binary_fails_clearly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which", lambda _name: None
+        "kuzya.review_executor.shutil.which", lambda _name: None
     )
     monkeypatch.setattr(
-        "agent_manager.review_executor.Path.home", lambda: tmp_path / "home"
+        "kuzya.review_executor.Path.home", lambda: tmp_path / "home"
     )
     runner, captured = _capturing_runner("unused")
     with pytest.raises(ReviewExecutionError) as excinfo:
@@ -785,7 +785,7 @@ def test_external_engine_json_retains_findings(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     stdout = (
@@ -821,7 +821,7 @@ def test_default_engine_uses_pi_runner_backend(
 
     # A missing external binary must not matter: no engine means the Pi runner.
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which", lambda _name: None
+        "kuzya.review_executor.shutil.which", lambda _name: None
     )
     result = _executor(run).execute(_engine_request(tmp_path, None))
 
@@ -838,7 +838,7 @@ def test_external_nonzero_exit_persists_stdout_and_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "agent_manager.review_executor.shutil.which",
+        "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
     runner, _captured = _capturing_runner(
@@ -854,7 +854,7 @@ def test_external_nonzero_exit_persists_stdout_and_failure(
 
 @pytest.mark.parametrize('engine', ['pi', 'agy', 'codex'])
 def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, monkeypatch, engine):
-    monkeypatch.setattr('agent_manager.review_executor.shutil.which', lambda name: f'/fake/bin/{name}')
+    monkeypatch.setattr('kuzya.review_executor.shutil.which', lambda name: f'/fake/bin/{name}')
     prompts = []
     replies = iter(['ВЕРДИКТ: ОДОБРЕНО', '{"verdict":"approved"}', '{"verdict":"approved","findings":[]}'])
     def run(cmd, **kwargs):
@@ -909,7 +909,7 @@ def test_json_contract_stops_after_three_invalid_results(tmp_path, reply):
     '{"verdict":"approved","findings":[{}]}',
 ])
 def test_review_json_rejects_incomplete_or_ambiguous_data(text):
-    from agent_manager.review_executor import parse_review_json
+    from kuzya.review_executor import parse_review_json
     with pytest.raises(ReviewFormatError):
         parse_review_json(text)
 
@@ -919,7 +919,7 @@ def test_review_json_rejects_incomplete_or_ambiguous_data(text):
     ('line', 0), ('line', 1.5), ('line', '2'), ('evidence', []),
 ])
 def test_review_json_validates_finding_fields(field, value):
-    from agent_manager.review_executor import parse_review_json
+    from kuzya.review_executor import parse_review_json
     finding = {'severity': 'P2', 'file': 'app.py', 'line': 1, 'message': 'Fix null check'}
     finding[field] = value
     with pytest.raises(ReviewFormatError, match=field):
@@ -927,7 +927,7 @@ def test_review_json_validates_finding_fields(field, value):
 
 
 def test_review_json_renders_findings_without_trusting_report_markers():
-    from agent_manager.review_executor import parse_review_json
+    from kuzya.review_executor import parse_review_json
     verdict, findings, report = parse_review_json(json.dumps({
         'verdict': 'changes_requested',
         'findings': [{'severity': 'P1', 'file': 'app.py', 'line': 2, 'message': 'Fix race', 'evidence': 'shared write'}],

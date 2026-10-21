@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import select
 
-from agent_manager.storage import Base, Database, Task, TaskRepository
+from kuzya.storage import Base, Database, Task, TaskRepository
 
 
 def test_threads_create_tasks_without_lost_rows(

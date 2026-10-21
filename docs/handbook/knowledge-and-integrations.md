@@ -2,9 +2,9 @@
 
 ## Knowledge base
 
-`KnowledgeBase` (`src/agent_manager/knowledge.py`) manages a filesystem tree
-rooted at `AGENT_MANAGER_KNOWLEDGE_ROOT` (default
-`~/.local/share/agent-manager/knowledge`):
+`KnowledgeBase` (`src/kuzya/knowledge.py`) manages a filesystem tree
+rooted at `KUZYA_KNOWLEDGE_ROOT` (default
+`~/.kuzya/data/knowledge`):
 
 ```
 <root>/
@@ -68,7 +68,7 @@ profile API.
 
 ### Deferred write acknowledgement
 
-`src/agent_manager/session_operations.py` (`unapplied_items`) yields each
+`src/kuzya/session_operations.py` (`unapplied_items`) yields each
 record once and records a SHA-256 receipt in `<name>.applied.json` after the
 consumer body returns. A crash before the receipt means the record is retried,
 so consumers must be idempotent. This is why a deferred tool reports
@@ -103,7 +103,7 @@ Drain targets:
 
 ## Skills
 
-- Installed skills live in `~/.local/share/agent-manager/skills/<name>/`
+- Installed skills live in `~/.kuzya/data/skills/<name>/`
   (mirrored inside the sandbox at `/skills`).
 - `list_skills` reads `SKILL.md` descriptions.
 - `install_skill` and `create_skill` are session-deferred writes.
@@ -118,7 +118,7 @@ Drain targets:
   `POST <openviking_url>/api/v1/search/search`.
 - `openviking_read(uri)` calls
   `GET <openviking_url>/api/v1/content/read?uri=...`.
-- Both are direct HTTP calls from `policy.mjs`, not through the Agent Manager
+- Both are direct HTTP calls from `policy.mjs`, not through the Kuzya
   API, and both return a specific "OpenViking не настроен" diagnostic when the
   instance does not inject `openviking_url`/`openviking_token`. They never
   invent an address or credential: `getBackendConfig()` returns only the
@@ -152,7 +152,7 @@ Drain targets:
 
 ## Telegram
 
-- Bot and handlers live in `src/agent_manager/telegram/`.
+- Bot and handlers live in `src/kuzya/telegram/`.
 - Voice messages are transcribed and delivered with a prefix that marks the
   text as an automatic speech transcript with possible ASR errors; agents must
   treat the transcript as the user's message and must not claim the audio did
@@ -170,7 +170,7 @@ Drain targets:
 ## Dialog context, UUID and Telegram delivery
 
 Every secretary-related message that reaches the owner's Telegram chat is
-rendered by the unified messenger (`src/agent_manager/telegram/messenger.py`)
+rendered by the unified messenger (`src/kuzya/telegram/messenger.py`)
 and ends with the full conversation UUID hashtag (for example
 `#34acbd180d064f6d8588a039c0f1b6bc`) on every part and attachment caption.
 The hashtag is for reading, copying and diagnostics only; routing never parses
@@ -228,8 +228,8 @@ deployment tooling, not part of the application runtime contract.
 
 ## Related
 
-- `src/agent_manager/knowledge.py`
-- `src/agent_manager/session_operations.py`
-- `src/agent_manager/persistent_conversation.py`
+- `src/kuzya/knowledge.py`
+- `src/kuzya/session_operations.py`
+- `src/kuzya/persistent_conversation.py`
 - `src/pi_runner/policy.mjs`
 - `docs/knowledge-base.md`, `docs/telegram.md`

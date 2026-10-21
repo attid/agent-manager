@@ -4,7 +4,7 @@ There are two entry points to one implementation. Do not confuse them.
 
 ## Shared implementation
 
-`src/agent_manager/review_executor.py` owns the read-only review round:
+`src/kuzya/review_executor.py` owns the read-only review round:
 `ReviewExecutor.execute(ReviewRequest) -> ReviewResult`. Both the automatic
 task cycle and the durable operation use it, so a manual review and an
 automatic review validate the same way.
@@ -91,7 +91,7 @@ administrative keys and uses `read`/`bash` with `project_read_only=true` and
 
 ## Automatic review inside task execution
 
-`TaskExecutionWorker._run_review_cycle` (`src/agent_manager/task_worker.py`)
+`TaskExecutionWorker._run_review_cycle` (`src/kuzya/task_worker.py`)
 runs for coding tasks with `changed_files` that did not disable review. It:
 
 - loads the current `system-code-reviewer` profile (hot-reloading its file if
@@ -130,7 +130,7 @@ The tool returns the operation with `status` starting at `pending`. The
 operation id is the durable handle; submission is **not** a verdict. Inspect
 the operation (`GET /operations/{id}`) for `status`, `result` and `error`.
 
-`review_operation_handler` (`src/agent_manager/operation_handlers.py`) is
+`review_operation_handler` (`src/kuzya/operation_handlers.py`) is
 registered by `register_default_operation_handlers`. It loads the target task
 directly, so a review still runs when the task's execution status is already
 `completed`; it never reruns the developer. A failure updates the task
@@ -146,8 +146,8 @@ metadata with the diagnostics and records the operation `failed`.
 
 ## Related
 
-- `src/agent_manager/review_executor.py`
-- `src/agent_manager/task_worker.py`
-- `src/agent_manager/operation_handlers.py`
-- `src/agent_manager/operation_worker.py`
+- `src/kuzya/review_executor.py`
+- `src/kuzya/task_worker.py`
+- `src/kuzya/operation_handlers.py`
+- `src/kuzya/operation_worker.py`
 - `docs/plans/platform-completion/T03.md`

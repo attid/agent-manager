@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from agent_manager.pi_reply import (
+from kuzya.pi_reply import (
     PiReplyCommandError,
     PiReplyConfigurationError,
     PiReplyFailedError,
@@ -22,8 +22,8 @@ from agent_manager.pi_reply import (
     PiReplyProtocolError,
     PiReplySummaryError,
 )
-from agent_manager.secretary import TurnInput, TurnProcessor
-from agent_manager.storage import ConversationRepository, Database
+from kuzya.secretary import TurnInput, TurnProcessor
+from kuzya.storage import ConversationRepository, Database
 
 FAKE_RUNNER = pathlib.Path(__file__).with_name("fake_pi_runner.py")
 
@@ -387,7 +387,7 @@ def test_failed_process_exposes_safe_connection_error_category(tmp_path: pathlib
 
 
 def test_telegram_error_summary_hides_traceback_and_escapes_diagnostics() -> None:
-    from agent_manager.telegram.worker import secretary_error_summary
+    from kuzya.telegram.worker import secretary_error_summary
 
     assert secretary_error_summary(
         'Traceback\nFile "/private/artifacts"\nPiReplyCommandError: model_connection_error; see artifacts in /private'

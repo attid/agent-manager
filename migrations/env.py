@@ -1,10 +1,10 @@
-"""Alembic environment for the Agent Manager SQLite database.
+"""Alembic environment for the Kuzya SQLite database.
 
 The database URL is resolved from, in order:
 
 1. the ``sqlalchemy.url`` Alembic option (for example set programmatically in
    tests or with ``-x sqlalchemy.url=...``);
-2. the ``AGENT_MANAGER_DB_URL`` environment variable.
+2. the ``KUZYA_DB_URL`` environment variable.
 
 SQLite pragmas (foreign keys, bounded busy timeout) are applied to every
 connection, and the file is switched to WAL journal mode before migrations
@@ -19,8 +19,8 @@ from alembic import context
 from sqlalchemy import create_engine
 from sqlalchemy import pool
 
-from agent_manager.storage.database import configure_sqlite_engine
-from agent_manager.storage.models import Base
+from kuzya.storage.database import configure_sqlite_engine
+from kuzya.storage.models import Base
 
 config = context.config
 
@@ -30,11 +30,11 @@ target_metadata = Base.metadata
 def _database_url() -> str:
     url = config.get_main_option("sqlalchemy.url")
     if not url:
-        url = os.environ.get("AGENT_MANAGER_DB_URL")
+        url = os.environ.get("KUZYA_DB_URL")
     if not url:
         raise RuntimeError(
             "No database URL configured. Set the 'sqlalchemy.url' Alembic "
-            "option or the AGENT_MANAGER_DB_URL environment variable."
+            "option or the KUZYA_DB_URL environment variable."
         )
     return url
 

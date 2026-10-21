@@ -20,10 +20,10 @@ from aiogram.types import (
     Voice,
 )
 
-from agent_manager.api import create_app
-from agent_manager.telegram.client import BackendClient
-from agent_manager.telegram.config import TelegramConfig
-from agent_manager.telegram.handlers import (
+from kuzya.api import create_app
+from kuzya.telegram.client import BackendClient
+from kuzya.telegram.config import TelegramConfig
+from kuzya.telegram.handlers import (
     AuthMiddleware,
     cmd_list,
     cmd_new,
@@ -37,9 +37,9 @@ from agent_manager.telegram.handlers import (
     on_cancel_queue,
     on_user_message,
 )
-from agent_manager.telegram.state import UserStateStorage
-from agent_manager.telegram.transcription import DeepgramTranscriber
-from agent_manager.telegram.worker import QueueProcessor
+from kuzya.telegram.state import UserStateStorage
+from kuzya.telegram.transcription import DeepgramTranscriber
+from kuzya.telegram.worker import QueueProcessor
 import functools
 
 
@@ -141,7 +141,7 @@ def user_storage(tmp_path: pathlib.Path) -> UserStateStorage:
 def test_telegram_config_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token-xyz")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "99999")
-    monkeypatch.setenv("AGENT_MANAGER_BACKEND_URL", "http://127.0.0.1:18767/")
+    monkeypatch.setenv("KUZYA_BACKEND_URL", "http://127.0.0.1:18767/")
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg-key-123")
     monkeypatch.setenv("TELEGRAM_STATE_DB_PATH", str(tmp_path / "state.db"))
     monkeypatch.setenv("TELEGRAM_MEDIA_DIR", str(tmp_path / "media"))
@@ -674,7 +674,7 @@ async def test_deepgram_transcriber_mock_and_parsing() -> None:
 
 
 def test_task_categories_keyboard_pagination() -> None:
-    from agent_manager.telegram.keyboards import task_categories_keyboard
+    from kuzya.telegram.keyboards import task_categories_keyboard
 
     # Generate 15 dummy tasks with numbers
     dummy_tasks = [{"id": f"task-{i}", "title": f"Task {i}", "number": i} for i in range(1, 16)]
@@ -761,7 +761,7 @@ async def test_waiting_for_input_task_user_reply_resumes(
 
 @sync_test
 async def test_setup_bot_commands() -> None:
-    from agent_manager.telegram.bot import BOT_COMMANDS, setup_bot_commands
+    from kuzya.telegram.bot import BOT_COMMANDS, setup_bot_commands
     mock_bot = AsyncMock()
     await setup_bot_commands(mock_bot)
     assert mock_bot.set_my_commands.called
@@ -780,7 +780,7 @@ async def test_setup_bot_commands() -> None:
 async def test_cmd_analyze(
     test_backend_client: BackendClient,
 ) -> None:
-    from agent_manager.telegram.handlers import cmd_analyze
+    from kuzya.telegram.handlers import cmd_analyze
     task = await test_backend_client.create_task(
         title="Check bot token",
         description="Verify token",

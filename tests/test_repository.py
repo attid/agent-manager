@@ -7,7 +7,7 @@ import pathlib
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from agent_manager.storage import (
+from kuzya.storage import (
     Database,
     DuplicateTaskIdError,
     TaskAlreadyRunningError,

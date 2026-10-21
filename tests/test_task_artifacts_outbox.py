@@ -14,9 +14,9 @@ from urllib.parse import quote
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.storage import AgentProfileRepository, Database, TaskRepository
-from agent_manager.task_worker import (
+from kuzya.api import create_app
+from kuzya.storage import AgentProfileRepository, Database, TaskRepository
+from kuzya.task_worker import (
     TaskExecutionWorker,
     _allocate_artifact_names,
     _collect_outbox_artifacts,
@@ -35,7 +35,7 @@ def _run_worker_with_outbox(
     """Run one real worker step while a fake child writes ``files`` to /outbox."""
     database = Database.from_path(migrated_db)
     AgentProfileRepository(database).create(
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         name="Developer",
         role="developer",
         system_prompt="Collect outbox files.",
@@ -75,13 +75,13 @@ def _run_worker_with_outbox(
             stderr="",
         )
 
-    monkeypatch.setattr("agent_manager.task_worker.subprocess.run", fake_run)
+    monkeypatch.setattr("kuzya.task_worker.subprocess.run", fake_run)
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     worker = TaskExecutionWorker(
         database=database,
         artifact_root=tmp_path / "artifacts",
-        agent_id="agent-manager-developer",
+        agent_id="kuzya-developer",
         runner_argv_prefix=["true"],
         default_workspace=str(workspace),
     )
@@ -341,7 +341,7 @@ def test_collect_skips_symlinks_and_never_escapes_outbox(
     os.symlink(outside, outbox / "linked")
     os.symlink(nested / "kept.txt", outbox / "inside-link.txt")
 
-    with caplog.at_level(logging.WARNING, logger="agent_manager.task_worker"):
+    with caplog.at_level(logging.WARNING, logger="kuzya.task_worker"):
         collected, errors = _collect_outbox_artifacts(
             outbox, tmp_path / "artifacts"
         )
@@ -451,8 +451,8 @@ def test_collect_reports_unreadable_file_without_false_success(
             raise PermissionError("permission denied")
         return real_copy(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr("agent_manager.task_worker.shutil.copy2", flaky_copy)
-    with caplog.at_level(logging.WARNING, logger="agent_manager.task_worker"):
+    monkeypatch.setattr("kuzya.task_worker.shutil.copy2", flaky_copy)
+    with caplog.at_level(logging.WARNING, logger="kuzya.task_worker"):
         collected, errors = _collect_outbox_artifacts(
             outbox, tmp_path / "artifacts"
         )
@@ -481,7 +481,7 @@ def test_worker_does_not_publish_failed_outbox_copy(
             raise PermissionError("permission denied")
         return real_copy(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr("agent_manager.task_worker.shutil.copy2", flaky_copy)
+    monkeypatch.setattr("kuzya.task_worker.shutil.copy2", flaky_copy)
     database, task, artifact_root = _run_worker_with_outbox(
         migrated_db,
         tmp_path,

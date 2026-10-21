@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from agent_manager.api import create_app
-from agent_manager.capabilities import (
+from kuzya.api import create_app
+from kuzya.capabilities import (
     CAPABILITIES,
     ENDPOINT_CAPABILITIES,
     HANDBOOK,
@@ -30,9 +30,9 @@ from agent_manager.capabilities import (
     render_handbook_discovery,
     write_handbook_discovery,
 )
-from agent_manager.knowledge import KnowledgeBase
-from agent_manager.permissions import actions_for_tools
-from agent_manager.storage import AgentProfileRepository, Database
+from kuzya.knowledge import KnowledgeBase
+from kuzya.permissions import actions_for_tools
+from kuzya.storage import AgentProfileRepository, Database
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY_SOURCE = REPO_ROOT / "src/pi_runner/policy.mjs"
@@ -186,7 +186,7 @@ def test_is_platform_agent_covers_secretary_and_system_agents() -> None:
     assert is_platform_agent("system-code-reviewer", ["read"])
     assert is_platform_agent("system-log-analyzer", [])
     assert is_platform_agent("triage", ["create_task"])
-    assert not is_platform_agent("agent-manager-developer", ["read", "bash"])
+    assert not is_platform_agent("kuzya-developer", ["read", "bash"])
     assert not is_platform_agent("triage", ["read", "bash"])
 
 
@@ -198,7 +198,7 @@ def test_write_handbook_discovery_only_for_platform_agents(tmp_path: Path) -> No
     assert "docs/handbook/tools-and-api.md" in written.read_text()
     assert (
         write_handbook_discovery(
-            tmp_path, agent_id="agent-manager-developer", tools=["read"]
+            tmp_path, agent_id="kuzya-developer", tools=["read"]
         )
         is None
     )

@@ -3,7 +3,7 @@
 This handbook is documentation. Verification has two goals: (1) prove that
 the described contracts match the code, and (2) keep the integration parity
 checks runnable. The executable inventory and parity check live in
-`src/agent_manager/capabilities.py` and `tests/test_capabilities.py`.
+`src/kuzya/capabilities.py` and `tests/test_capabilities.py`.
 
 ## Bounded repository checks
 
@@ -66,7 +66,7 @@ The final full suite and the end-to-end acceptance belong to the coordinator
 ```bash
 # Endpoints (no database opened at import):
 PYTHONPATH=src .venv/bin/python -c \
-  "from agent_manager.api.app import create_app; \
+  "from kuzya.api.app import create_app; \
    app=create_app('sqlite:////tmp/probe.db'); \
    [print(m.upper(), p) for p in sorted(app.openapi()['paths']) \
     for m in sorted(app.openapi()['paths'][p])]"
@@ -75,10 +75,10 @@ PYTHONPATH=src .venv/bin/python -c \
 grep -n 'name: "' src/pi_runner/policy.mjs
 
 # Registered executors:
-grep -n 'worker.register' src/agent_manager/operation_handlers.py
+grep -n 'worker.register' src/kuzya/operation_handlers.py
 
 # Hardcoded-findings gap (must be empty after T04):
-grep -n 'Критического дефицита документации' src/agent_manager/telegram/handlers.py
+grep -n 'Критического дефицита документации' src/kuzya/telegram/handlers.py
 ```
 
 ## Runtime checks (isolated instance only)

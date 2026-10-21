@@ -18,7 +18,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.analysis import (
+from kuzya.analysis import (
     ANALYZER_AGENT_ID,
     AnalysisParseError,
     AnalyzerRunResult,
@@ -29,16 +29,16 @@ from agent_manager.analysis import (
     content_hash,
     parse_analyzer_output,
 )
-from agent_manager.api import create_app
-from agent_manager.knowledge import KnowledgeBase
-from agent_manager.operation_handlers import register_default_operation_handlers
-from agent_manager.operation_worker import (
+from kuzya.api import create_app
+from kuzya.knowledge import KnowledgeBase
+from kuzya.operation_handlers import register_default_operation_handlers
+from kuzya.operation_worker import (
     OPERATION_KIND_ANALYSIS,
     OperationInstanceContext,
     OperationWorker,
 )
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import (
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import (
     AgentProfileRepository,
     AnalysisRepository,
     Database,
@@ -46,8 +46,8 @@ from agent_manager.storage import (
     RecommendationStateError,
     TaskRepository,
 )
-from agent_manager.telegram.client import BackendClient
-from agent_manager.telegram.handlers import cmd_analyze
+from kuzya.telegram.client import BackendClient
+from kuzya.telegram.handlers import cmd_analyze
 
 FAKE_RUNNER = pathlib.Path(__file__).with_name("fake_pi_runner.py")
 
@@ -106,14 +106,14 @@ def _profile_recommendation(
     }
 
 
-def _project_recommendation(target_id: str = "agent-manager") -> dict[str, Any]:
+def _project_recommendation(target_id: str = "kuzya") -> dict[str, Any]:
     return {
         "target_kind": "project",
         "target_id": target_id,
         "title": "Update project summary",
         "rationale": "The summary omits the analysis workflow.",
         "evidence": ["task:task-one"],
-        "proposed_content": "# Проект: Agent Manager\n\n- **Порт API**: 18767\n",
+        "proposed_content": "# Проект: Kuzya\n\n- **Порт API**: 18767\n",
     }
 
 
@@ -585,7 +585,7 @@ def test_project_recommendation_applies_and_detects_stale_content(
     database = Database.from_path(migrated_db)
     try:
         knowledge = KnowledgeBase(tmp_path / "knowledge")
-        knowledge.create_or_update_project_summary("agent-manager", "Old summary")
+        knowledge.create_or_update_project_summary("kuzya", "Old summary")
         recommendation = _seed_recommendation(
             database,
             tmp_path,
@@ -594,7 +594,7 @@ def test_project_recommendation_applies_and_detects_stale_content(
         )
         assert recommendation.target_kind == "project"
         assert recommendation.target_content_hash == content_hash(
-            (knowledge.projects_dir / "agent-manager" / "summary.md").read_text(
+            (knowledge.projects_dir / "kuzya" / "summary.md").read_text(
                 encoding="utf-8"
             )
         )
@@ -604,7 +604,7 @@ def test_project_recommendation_applies_and_detects_stale_content(
         applied = service.apply(recommendation.id)
         assert applied.status == "applied"
         summary = (
-            knowledge.projects_dir / "agent-manager" / "summary.md"
+            knowledge.projects_dir / "kuzya" / "summary.md"
         ).read_text(encoding="utf-8")
         assert "Порт API" in summary
         assert applied.applied_content_hash == content_hash(summary)
@@ -614,18 +614,18 @@ def test_project_recommendation_applies_and_detects_stale_content(
         stale = _seed_recommendation(
             database,
             tmp_path,
-            recommendation=_project_recommendation("agent-manager"),
+            recommendation=_project_recommendation("kuzya"),
             knowledge_base=knowledge,
             task_id="task-two",
         )
         service.approve(stale.id)
         knowledge.create_or_update_project_summary(
-            "agent-manager", "Even newer summary written by someone else."
+            "kuzya", "Even newer summary written by someone else."
         )
         with pytest.raises(RecommendationConflictError):
             service.apply(stale.id)
         current = (
-            knowledge.projects_dir / "agent-manager" / "summary.md"
+            knowledge.projects_dir / "kuzya" / "summary.md"
         ).read_text(encoding="utf-8")
         assert "Even newer summary" in current
         stored = AnalysisRepository(database).get_recommendation(stale.id)
@@ -1142,7 +1142,7 @@ def test_analysis_rejects_recommendation_target_outside_knowledge_base(
         knowledge = KnowledgeBase(tmp_path / "knowledge")
         knowledge.projects_dir.mkdir(parents=True, exist_ok=True)
 
-        for target_id in ("../../escape", "/tmp/agent-manager-escape"):
+        for target_id in ("../../escape", "/tmp/kuzya-escape"):
             runner = _runner(
                 _report_text([_project_recommendation(target_id)])
             )
@@ -1169,7 +1169,7 @@ def test_analysis_rejects_recommendation_target_outside_knowledge_base(
             )
 
         assert not (tmp_path / "escape").exists()
-        assert not pathlib.Path("/tmp/agent-manager-escape").exists()
+        assert not pathlib.Path("/tmp/kuzya-escape").exists()
     finally:
         database.dispose()
 

@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 
-from agent_manager.storage import (
+from kuzya.storage import (
     Conversation,
     ConversationNotFoundError,
     ConversationRepository,

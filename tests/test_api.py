@@ -10,8 +10,8 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.storage import Database, TaskRepository
+from kuzya.api import create_app
+from kuzya.storage import Database, TaskRepository
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -149,10 +149,10 @@ def test_persistence_across_distinct_app_instances(
 def test_import_does_not_create_database(tmp_path: pathlib.Path) -> None:
     db_file = tmp_path / "import-side-effect.db"
     env = os.environ.copy()
-    env["AGENT_MANAGER_DB_URL"] = f"sqlite:///{db_file}"
+    env["KUZYA_DB_URL"] = f"sqlite:///{db_file}"
     env["PYTHONPATH"] = "src"
     result = subprocess.run(
-        [sys.executable, "-c", "import agent_manager.api.app"],
+        [sys.executable, "-c", "import kuzya.api.app"],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -371,7 +371,7 @@ def test_create_turn_error_handling(
 
 
 def test_knowledge_api_endpoints(migrated_db: pathlib.Path, tmp_path: pathlib.Path) -> None:
-    from agent_manager.knowledge import KnowledgeBase
+    from kuzya.knowledge import KnowledgeBase
 
     kb = KnowledgeBase(tmp_path / "knowledge")
     kb.initialize()

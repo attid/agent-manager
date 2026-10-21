@@ -8,15 +8,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiogram.types import CallbackQuery, Chat, Message, User
 
-from agent_manager.telegram.config import TelegramConfig
-from agent_manager.telegram.handlers import (
+from kuzya.telegram.config import TelegramConfig
+from kuzya.telegram.handlers import (
     on_switch_conversation,
     on_switch_task,
     on_talk_task,
     on_user_message,
 )
-from agent_manager.telegram.state import UserStateStorage
-from agent_manager.telegram.worker import QueueProcessor
+from kuzya.telegram.state import UserStateStorage
+from kuzya.telegram.worker import QueueProcessor
 
 
 def _user(user_id: int = 12345) -> User:

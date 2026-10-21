@@ -425,9 +425,9 @@ def _run_migrations(db_path: Path) -> None:
 class TestUpstreamIntegration(unittest.TestCase):
     def test_task_worker_propagates_allowed_hosts_to_role_json(self):
         """TaskExecutionWorker writes allowed_hosts and restricted network to role.json."""
-        from agent_manager.storage import Database, AgentProfileRepository, TaskRepository
-        from agent_manager.task_worker import TaskExecutionWorker
-        from agent_manager.runtime_defaults import RuntimeDefaultsResolver
+        from kuzya.storage import Database, AgentProfileRepository, TaskRepository
+        from kuzya.task_worker import TaskExecutionWorker
+        from kuzya.runtime_defaults import RuntimeDefaultsResolver
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -482,8 +482,8 @@ class TestUpstreamIntegration(unittest.TestCase):
 
     def test_profile_runtime_freezes_allowed_hosts(self):
         """freeze_profile_handler preserves allowed_hosts in runner_role.json & snapshot.json."""
-        from agent_manager.storage import Database, AgentProfileRepository
-        from agent_manager.profile_runtime import freeze_profile_handler
+        from kuzya.storage import Database, AgentProfileRepository
+        from kuzya.profile_runtime import freeze_profile_handler
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -521,8 +521,8 @@ class TestUpstreamIntegration(unittest.TestCase):
 
     def test_knowledge_format_markdown_includes_allowed_hosts(self):
         """format_agent_profile_markdown includes allowed_hosts in runner_config policy."""
-        from agent_manager.storage import Database, AgentProfileRepository
-        from agent_manager.knowledge import format_agent_profile_markdown
+        from kuzya.storage import Database, AgentProfileRepository
+        from kuzya.knowledge import format_agent_profile_markdown
 
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "test.db"

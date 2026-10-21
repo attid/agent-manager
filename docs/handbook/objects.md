@@ -1,7 +1,7 @@
 # Objects and links
 
 The platform stores seven durable object types. All live in one SQLite
-database (`src/agent_manager/storage/models.py`), all use naive UTC
+database (`src/kuzya/storage/models.py`), all use naive UTC
 timestamps, and all secondary JSON is stored under a `metadata` column
 exposed in Python as `meta`.
 
@@ -85,7 +85,7 @@ exposed in Python as `meta`.
 - `claim_token` fences `complete` and `fail`, so a stale worker cannot close a
   newer claim.
 - Kinds currently defined: `review`, `analysis`, `git.commit_push`,
-  `git.rollback` (`src/agent_manager/operation_worker.py`). Only the two Git
+  `git.rollback` (`src/kuzya/operation_worker.py`). Only the two Git
   kinds have registered executors in this snapshot.
 
 ## Link diagram
@@ -106,6 +106,6 @@ than corrupting the queue.
 
 ## Related
 
-- Storage contract: `src/agent_manager/storage/__init__.py`
+- Storage contract: `src/kuzya/storage/__init__.py`
 - Migration chain: `migrations/versions/0001`–`0009`
   (`0008_operation_owner`, `0009_analysis`)

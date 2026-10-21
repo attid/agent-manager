@@ -39,7 +39,7 @@ from alembic.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-from agent_manager.analysis import (
+from kuzya.analysis import (
     ANALYZER_AGENT_ID,
     ANALYZER_OUTPUT_CONTRACT,
     AnalysisRepository,
@@ -47,13 +47,13 @@ from agent_manager.analysis import (
     build_evidence_package,
     parse_analyzer_output,
 )
-from agent_manager.operation_handlers import register_default_operation_handlers
-from agent_manager.operation_worker import (
+from kuzya.operation_handlers import register_default_operation_handlers
+from kuzya.operation_worker import (
     OPERATION_KIND_ANALYSIS,
     OperationInstanceContext,
     OperationWorker,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     AgentProfileRepository,
     Database,
     OperationRepository,
@@ -224,7 +224,7 @@ class TestChallengerTask40Analysis(unittest.TestCase):
         self.analyzer_state = self.tmp_path / "analyzer_state"
         self.analyzer_state.mkdir()
 
-        # Ensure PYTHONPATH includes agent-manager/src
+        # Ensure PYTHONPATH includes kuzya/src
         src_path = str(Path(__file__).resolve().parent.parent / "src")
         self.old_pythonpath = os.environ.get("PYTHONPATH")
         if self.old_pythonpath:

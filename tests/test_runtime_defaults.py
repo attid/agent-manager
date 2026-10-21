@@ -14,14 +14,14 @@ import sys
 
 import pytest
 
-from agent_manager.profile_runtime import freeze_profile_handler
-from agent_manager.runtime_defaults import (
+from kuzya.profile_runtime import freeze_profile_handler
+from kuzya.runtime_defaults import (
     RuntimeDefaultsConfigurationError,
     RuntimeDefaultsResolver,
     resolve_runtime_defaults,
 )
-from agent_manager.secretary import TurnInput
-from agent_manager.storage import AgentProfileRepository, Database
+from kuzya.secretary import TurnInput
+from kuzya.storage import AgentProfileRepository, Database
 
 FAKE_RUNNER = pathlib.Path(__file__).with_name("fake_pi_runner.py")
 

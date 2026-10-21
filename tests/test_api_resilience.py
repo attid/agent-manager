@@ -9,7 +9,7 @@ import uuid
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
+from kuzya.api import create_app
 
 
 def _app(db_path: pathlib.Path):
@@ -26,7 +26,7 @@ def test_request_id_is_propagated_and_request_duration_is_logged(
 
     @app.get("/log-context")
     def log_context_endpoint() -> dict[str, bool]:
-        logging.getLogger("agent_manager.tests.api").info(
+        logging.getLogger("kuzya.tests.api").info(
             "endpoint log line"
         )
         return {"ok": True}

@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from agent_manager.logging import (
+from kuzya.logging import (
     ContextFormatter,
     JSONFormatter,
     LOG_CONTEXT_FIELDS,
@@ -18,14 +18,14 @@ from agent_manager.logging import (
     get_log_context,
 )
 
-_MANAGED_HANDLER_ATTRIBUTE = "_agent_manager_managed_handler"
+_MANAGED_HANDLER_ATTRIBUTE = "_kuzya_managed_handler"
 
 
 @pytest.fixture
 def isolated_logger() -> logging.Logger:
     """Return a logger that does not propagate into the root test capture."""
 
-    logger = logging.getLogger("agent_manager.tests.logging")
+    logger = logging.getLogger("kuzya.tests.logging")
     previous_handlers = list(logger.handlers)
     previous_level = logger.level
     previous_propagate = logger.propagate
@@ -111,7 +111,7 @@ def test_structured_formatter_contains_context_fields_and_message(
     output = stream.getvalue()
     assert "timestamp=" in output
     assert "level=INFO" in output
-    assert "logger=agent_manager.tests.logging" in output
+    assert "logger=kuzya.tests.logging" in output
     assert "request_id=req-42" in output
     assert "task_id=task-7" in output
     assert "processed payload" in output
@@ -133,7 +133,7 @@ def test_json_formatter_emits_one_structured_object(
     assert len(lines) == 1
     payload = json.loads(lines[0])
     assert payload["level"] == "WARNING"
-    assert payload["logger"] == "agent_manager.tests.logging"
+    assert payload["logger"] == "kuzya.tests.logging"
     assert payload["message"] == "json message"
     assert payload["timestamp"]
     assert payload["request_id"] == "req-json"

@@ -16,17 +16,17 @@ from typing import Any
 
 import pytest
 
-from agent_manager.operation_handlers import (
+from kuzya.operation_handlers import (
     register_default_operation_handlers,
     review_operation_handler,
 )
-from agent_manager.operation_worker import (
+from kuzya.operation_worker import (
     OPERATION_KIND_REVIEW,
     OperationInstanceContext,
     OperationWorker,
 )
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import (
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import (
     AgentProfileRepository,
     Database,
     OperationRepository,
@@ -120,7 +120,7 @@ def test_completed_task_review_is_approved_without_rerunning_developer(
         workspace.mkdir()
         developer_log = tmp_path / "developer_argv.json"
         AgentProfileRepository(database).create(
-            agent_id="agent-manager-developer",
+            agent_id="kuzya-developer",
             name="Developer",
             role="developer",
             system_prompt="Developer.",

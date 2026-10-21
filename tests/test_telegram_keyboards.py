@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardMarkup
 
-from agent_manager.telegram.keyboards import task_categories_keyboard
+from kuzya.telegram.keyboards import task_categories_keyboard
 
 
 def _tabs(keyboard: InlineKeyboardMarkup) -> dict[str, str]:

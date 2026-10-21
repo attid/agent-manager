@@ -23,13 +23,13 @@ bindings in this snapshot; the execution factory does not load them.
 
 ## Default system identities
 
-`src/agent_manager/knowledge.py` (`ensure_default_profiles`) seeds and
+`src/kuzya/knowledge.py` (`ensure_default_profiles`) seeds and
 maintains:
 
 | `agent_id` | Role | Purpose |
 |---|---|---|
 | `system-secretary` | `secretary` | Telegram-facing platform controller. |
-| `agent-manager-developer` | `developer` | Default coding executor. |
+| `kuzya-developer` | `developer` | Default coding executor. |
 | `system-code-reviewer` | `reviewer` | Read-only code reviewer. |
 | `system-log-analyzer` | `analyzer` | Read-only session/log analyzer. |
 
@@ -43,7 +43,7 @@ state and files are synchronized by `sync_agents_from_files`,
 ## Runtime defaults
 
 Provider/model selection is deliberately **not** stored as the profile's
-durable truth. `src/agent_manager/runtime_defaults.py` resolves it per
+durable truth. `src/kuzya/runtime_defaults.py` resolves it per
 execution, with field-level precedence:
 
 1. explicit `provider` / `model` / `pi_auth_provider` / `models_file` in the
@@ -68,7 +68,7 @@ Behaviour:
 
 ## Frozen execution
 
-`src/agent_manager/profile_runtime.py` freezes one revision for one run:
+`src/kuzya/profile_runtime.py` freezes one revision for one run:
 
 ```
 <artifact_root>/<uuid>/
@@ -88,7 +88,7 @@ Behaviour:
 
 ## Conversation pinning and resume
 
-`src/agent_manager/persistent_conversation.py` (`PersistentConversationHandler`)
+`src/kuzya/persistent_conversation.py` (`PersistentConversationHandler`)
 pins a conversation to the profile revision and native Runner session stored in
 `conversation_runtimes`:
 
@@ -109,7 +109,7 @@ database and on disk; a fresh process reconstructs it.
 
 ## Platform operating instruction injection
 
-The platform contract (`src/agent_manager/secretary_contract.py`,
+The platform contract (`src/kuzya/secretary_contract.py`,
 `SECRETARY_CONTRACT`) is appended as an extra instruction document for the
 platform secretary; it does not replace the customized identity prompt. In
 `PersistentConversationHandler._prepare_execution`, when the execution role
@@ -117,7 +117,7 @@ exposes `create_task` (the secretary), the handler writes a
 `knowledge_catalog.md` instruction containing `SECRETARY_CONTRACT` plus the
 knowledge-base catalog.
 
-`src/agent_manager/capabilities.py` adds a short handbook discovery block for
+`src/kuzya/capabilities.py` adds a short handbook discovery block for
 the secretary and every `system-*` agent (`is_platform_agent`). It always
 lists the full read-only handbook index, but lists only the profile's enabled
 platform tools (`executable_tool_names`). The block is appended as an extra
@@ -149,10 +149,10 @@ modified. `KnowledgeBase.initialize` copies `docs/handbook/*.md` into
 
 ## Related
 
-- `src/agent_manager/capabilities.py`
-- `src/agent_manager/storage/agents.py`
-- `src/agent_manager/runtime_defaults.py`
-- `src/agent_manager/profile_runtime.py`
-- `src/agent_manager/persistent_conversation.py`
-- `src/agent_manager/secretary_contract.py`
+- `src/kuzya/capabilities.py`
+- `src/kuzya/storage/agents.py`
+- `src/kuzya/runtime_defaults.py`
+- `src/kuzya/profile_runtime.py`
+- `src/kuzya/persistent_conversation.py`
+- `src/kuzya/secretary_contract.py`
 - `docs/runtime-defaults.md`

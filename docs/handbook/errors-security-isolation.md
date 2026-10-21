@@ -38,10 +38,10 @@
 
 - Loopback only: the API default host is `127.0.0.1`.
 - `BearerAuthMiddleware` fixes the authenticated/`require_auth` decision when
-  the app is built. Administrative tokens from `AGENT_MANAGER_API_TOKENS`
+  the app is built. Administrative tokens from `KUZYA_API_TOKENS`
   receive unrestricted access and are never handed to a child execution.
 - Execution tokens issued by `ExecutionPermissions`
-  (`src/agent_manager/permissions.py`) are accepted only for the granted
+  (`src/kuzya/permissions.py`) are accepted only for the granted
   action and resource. Scoped tokens with `tasks.write` can upload attachments
   only to their assigned task (`POST /tasks/{task_id}/attachments`), receiving
   `403 Forbidden` on foreign tasks. `resolve_requirement` maps every declared route, so a
@@ -103,8 +103,8 @@ aliases and interpreted programs are outside it.
 
 ## Related
 
-- `src/agent_manager/api/app.py`
-- `src/agent_manager/operation_worker.py`
-- `src/agent_manager/persistent_conversation.py`
+- `src/kuzya/api/app.py`
+- `src/kuzya/operation_worker.py`
+- `src/kuzya/persistent_conversation.py`
 - `src/pi_runner/core.py`, `src/pi_runner/cli.py`, `src/pi_runner/policy.mjs`
 - `docs/sandbox-security.md`, `docs/deployment.md`

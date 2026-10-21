@@ -12,14 +12,14 @@ import pathlib
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.operation_worker import (
+from kuzya.api import create_app
+from kuzya.operation_worker import (
     OPERATION_KIND_GIT_COMMIT_PUSH,
     OPERATION_KIND_REVIEW,
     OperationExecutionError,
     OperationWorker,
 )
-from agent_manager.storage import (
+from kuzya.storage import (
     Database,
     OperationConflictError,
     OperationRepository,

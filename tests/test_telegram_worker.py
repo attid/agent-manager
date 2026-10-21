@@ -6,9 +6,9 @@ import asyncio
 import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_manager.telegram.state import UserStateStorage
-from agent_manager.telegram.transcription import DeepgramTranscriber
-from agent_manager.telegram.worker import QueueProcessor
+from kuzya.telegram.state import UserStateStorage
+from kuzya.telegram.transcription import DeepgramTranscriber
+from kuzya.telegram.worker import QueueProcessor
 
 
 def _context_processor(

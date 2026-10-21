@@ -12,9 +12,9 @@ import pathlib
 
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.secretary import ReconciliationResult, TurnProcessor
-from agent_manager.storage import (
+from kuzya.api import create_app
+from kuzya.secretary import ReconciliationResult, TurnProcessor
+from kuzya.storage import (
     AgentProfileRepository,
     ConversationRepository,
     ConversationRuntimeRepository,
@@ -205,14 +205,14 @@ def test_reconcile_logs_warning_with_structured_context(
         processor, turn = _running_turn(database)
 
         with caplog.at_level(
-            logging.WARNING, logger="agent_manager.secretary"
+            logging.WARNING, logger="kuzya.secretary"
         ):
             processor.reconcile_startup_orphans()
 
         records = [
             record
             for record in caplog.records
-            if record.name == "agent_manager.secretary"
+            if record.name == "kuzya.secretary"
         ]
         assert len(records) == 1
         record = records[0]
@@ -320,7 +320,7 @@ def test_startup_lifespan_reconciles_crash_orphans(
     finally:
         database.dispose()
 
-    with caplog.at_level(logging.INFO, logger="agent_manager.api.app"):
+    with caplog.at_level(logging.INFO, logger="kuzya.api.app"):
         with TestClient(_app(migrated_db)) as client:
             assert client.get("/health").status_code == 200
 
@@ -355,7 +355,7 @@ def test_startup_lifespan_logs_info_without_orphans(
     migrated_db: pathlib.Path,
     caplog,
 ) -> None:
-    with caplog.at_level(logging.INFO, logger="agent_manager.api.app"):
+    with caplog.at_level(logging.INFO, logger="kuzya.api.app"):
         with TestClient(_app(migrated_db)) as client:
             assert client.get("/health").status_code == 200
 

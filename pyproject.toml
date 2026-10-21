@@ -1,5 +1,5 @@
 [project]
-name = "agent-manager"
+name = "kuzya"
 version = "0.1.0"
 description = "Task-oriented agent system"
 readme = "README.md"
@@ -26,7 +26,7 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [project.scripts]
-agent-manager = "agent_manager:main"
+kuzya = "kuzya:main"
 pi-runner = "pi_runner.cli:main"
 runner = "pi_runner.cli:main"
 

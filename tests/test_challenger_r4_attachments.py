@@ -35,7 +35,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
+from kuzya.api import create_app
 
 
 @pytest.mark.parametrize(

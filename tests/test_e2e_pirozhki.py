@@ -16,13 +16,13 @@ import pathlib
 import httpx
 import pytest
 
-from agent_manager.permissions import (
+from kuzya.permissions import (
     GIT_ACTIONS,
     REVIEW_TRIGGER,
     actions_for_tools,
     resources_for_execution,
 )
-from agent_manager.storage import AnalysisRepository
+from kuzya.storage import AnalysisRepository
 
 from .pirozhki_harness import (
     PirozhkiInstance,

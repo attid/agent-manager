@@ -29,25 +29,25 @@ from typing import Any, Iterator
 import httpx
 import uvicorn
 
-from agent_manager.api import create_app
-from agent_manager.dispatcher import QueueDispatcher
-from agent_manager.instance import InstanceContext
-from agent_manager.knowledge import KnowledgeBase
-from agent_manager.operation_handlers import register_default_operation_handlers
-from agent_manager.operation_worker import (
+from kuzya.api import create_app
+from kuzya.dispatcher import QueueDispatcher
+from kuzya.instance import InstanceContext
+from kuzya.knowledge import KnowledgeBase
+from kuzya.operation_handlers import register_default_operation_handlers
+from kuzya.operation_worker import (
     OperationInstanceContext,
     OperationWorker,
 )
-from agent_manager.permissions import ExecutionPermissions
-from agent_manager.persistent_conversation import PersistentConversationHandler
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import (
+from kuzya.permissions import ExecutionPermissions
+from kuzya.persistent_conversation import PersistentConversationHandler
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import (
     AgentProfileRepository,
     Database,
     OperationRepository,
     TaskRepository,
 )
-from agent_manager.task_worker import TaskExecutionWorker
+from kuzya.task_worker import TaskExecutionWorker
 
 ADMIN_TOKEN = "pirozhki-admin-token"
 ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
@@ -76,7 +76,7 @@ def init_git_repo(path: pathlib.Path) -> None:
 
 
 class PirozhkiInstance:
-    """One disposable, fully wired Agent Manager instance."""
+    """One disposable, fully wired Kuzya instance."""
 
     def __init__(
         self,
@@ -432,7 +432,7 @@ def build_pirozhki_instance(
         task_worker = TaskExecutionWorker(
             database=database,
             artifact_root=artifact_root / "tasks",
-            agent_id="agent-manager-developer",
+            agent_id="kuzya-developer",
             runner_argv_prefix=list(runner_prefix),
             default_workspace=str(project_workspace),
             knowledge_base=knowledge_base,

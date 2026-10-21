@@ -127,7 +127,7 @@ export default function policy(pi) {
     description: "Attach and send a document from the knowledge base or workspace to the user in Telegram.",
     parameters: Type.Object({
       target: Type.String({
-        description: "Target file path or shorthand name (e.g. 'agent-manager-developer', 'projects/agent-manager/summary.md', 'README.md')"
+        description: "Target file path or shorthand name (e.g. 'kuzya-developer', 'projects/kuzya/summary.md', 'README.md')"
       })
     }),
     async execute(toolCallId, params) {
@@ -211,7 +211,7 @@ export default function policy(pi) {
     description: "Read a document, project summary, component rules, or agent profile from the knowledge base.",
     parameters: Type.Object({
       query: Type.String({
-        description: "Path or query in knowledge base (e.g. 'projects/agent-manager/summary.md', 'components/aiogram/rules.md', 'agent-manager-developer')"
+        description: "Path or query in knowledge base (e.g. 'projects/kuzya/summary.md', 'components/aiogram/rules.md', 'kuzya-developer')"
       })
     }),
     async execute(toolCallId, params) {

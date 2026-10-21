@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 import uvicorn
 
-from agent_manager.api import create_app
-from agent_manager.knowledge import KnowledgeBase
+from kuzya.api import create_app
+from kuzya.knowledge import KnowledgeBase
 
 
 def test_platform_tools_against_http_backend(tmp_path: Path, migrated_db: Path):

@@ -11,7 +11,7 @@ import pathlib
 
 import pytest
 
-from agent_manager.attachments import (
+from kuzya.attachments import (
     AttachmentSourceMissingError,
     ConversationAttachmentStore,
 )

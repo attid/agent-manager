@@ -8,8 +8,8 @@ import pathlib
 import httpx
 from fastapi.testclient import TestClient
 
-from agent_manager.api import create_app
-from agent_manager.telegram.client import BackendClient
+from kuzya.api import create_app
+from kuzya.telegram.client import BackendClient
 
 
 def _app(db_path: pathlib.Path):

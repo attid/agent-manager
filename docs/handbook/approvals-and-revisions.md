@@ -21,7 +21,7 @@ Agent tools must not write a profile to "check" an earlier write. Read
 
 ## Explicit approval rules
 
-The platform operating contract (`src/agent_manager/secretary_contract.py`)
+The platform operating contract (`src/kuzya/secretary_contract.py`)
 requires:
 
 1. Prepare a complete Markdown draft (name, id, role, prompt, tools, skills,
@@ -56,7 +56,7 @@ inside `agents/`.
 
 ## Recommendation approvals
 
-The recommendation lifecycle is implemented (`src/agent_manager/analysis.py`,
+The recommendation lifecycle is implemented (`src/kuzya/analysis.py`,
 `RecommendationService`):
 
 - proposal generation never applies the change;
@@ -72,8 +72,8 @@ The recommendation lifecycle is implemented (`src/agent_manager/analysis.py`,
 
 ## Related
 
-- `src/agent_manager/storage/agents.py`
-- `src/agent_manager/api/app.py` (`/agents` endpoints)
-- `src/agent_manager/secretary_contract.py`
-- `src/agent_manager/persistent_conversation.py`
+- `src/kuzya/storage/agents.py`
+- `src/kuzya/api/app.py` (`/agents` endpoints)
+- `src/kuzya/secretary_contract.py`
+- `src/kuzya/persistent_conversation.py`
 - `docs/plans/platform-completion/T02I.md`, `T04.md`

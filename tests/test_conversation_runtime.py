@@ -17,8 +17,8 @@ from alembic import command
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import (
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import (
     AgentProfileRepository,
     ConversationRepository,
     ConversationRuntimeAgentConflictError,
@@ -33,7 +33,7 @@ from agent_manager.storage import (
     ConversationRuntimeTurnStateError,
     Database,
 )
-from agent_manager.storage.models import ConversationRuntime
+from kuzya.storage.models import ConversationRuntime
 
 from .conftest import alembic_config
 

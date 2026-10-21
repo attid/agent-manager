@@ -1,7 +1,7 @@
 # Capability inventory
 
 The authoritative machine-readable inventory is
-`src/agent_manager/capabilities.py`. It declares every registered Pi JS tool
+`src/kuzya/capabilities.py`. It declares every registered Pi JS tool
 and REST endpoint with its method, schema, result status, permission action,
 operation kind and handbook document. `audit_capabilities` compares that
 declaration with the generated OpenAPI document, the real tools registered by
@@ -56,13 +56,13 @@ tool grants no backend action, so it cannot widen raw-HTTP authority.
 | `apply_recommendation` | API write | `POST /recommendations/{id}/apply` | `applied` | `analysis.approve` |
 
 The six analysis/recommendation tools are exposed to the secretary profile
-only (`sec_tools` in `src/agent_manager/knowledge.py`); they are not added
+only (`sec_tools` in `src/kuzya/knowledge.py`); they are not added
 unconditionally to every execution.
 
 ## Operation kinds and executors
 
-Source: `src/agent_manager/operation_worker.py`,
-`src/agent_manager/operation_handlers.py`.
+Source: `src/kuzya/operation_worker.py`,
+`src/kuzya/operation_handlers.py`.
 
 | Kind | Registered executor | Effect |
 |---|---|---|
@@ -77,7 +77,7 @@ Executors run outside any database transaction. Registration seam:
 
 ## REST inventory
 
-Source: `src/agent_manager/api/app.py`. Groups: health;
+Source: `src/kuzya/api/app.py`. Groups: health;
 workspaces/resolve; tasks (create/read/list/patch/import, status counts via
 `GET /tasks/counts`, attachment upload via
 `POST /tasks/{task_id}/attachments`, artifacts and per-task analysis);
@@ -90,9 +90,9 @@ See [Tools and API discovery](tools-and-api.md#rest-endpoints).
 
 | Worker | Source | Claims | Effect |
 |---|---|---|---|
-| `QueueDispatcher` | `src/agent_manager/dispatcher.py` | pending turns | Runs secretary handler, stores reply. |
-| `TaskExecutionWorker` | `src/agent_manager/task_worker.py` | `in_progress` tasks | Runs agent, `ReviewExecutor`, updates status. |
-| `OperationWorker` | `src/agent_manager/operation_worker.py` | queued operations | Dispatches to registered executors. |
+| `QueueDispatcher` | `src/kuzya/dispatcher.py` | pending turns | Runs secretary handler, stores reply. |
+| `TaskExecutionWorker` | `src/kuzya/task_worker.py` | `in_progress` tasks | Runs agent, `ReviewExecutor`, updates status. |
+| `OperationWorker` | `src/kuzya/operation_worker.py` | queued operations | Dispatches to registered executors. |
 
 ## Truthfulness rules
 
@@ -120,7 +120,7 @@ backend.
 
 ## Related
 
-- `src/agent_manager/capabilities.py`
-- `src/agent_manager/permissions.py`
+- `src/kuzya/capabilities.py`
+- `src/kuzya/permissions.py`
 - `tests/test_capabilities.py`, `tests/platform_tools_contract.mjs`
 - `docs/plans/platform-completion/T05.md`

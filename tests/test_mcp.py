@@ -27,8 +27,8 @@ from fastapi import FastAPI
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from agent_manager.api import create_app
-from agent_manager.api.mcp import attach_mcp_endpoint
+from kuzya.api import create_app
+from kuzya.api.mcp import attach_mcp_endpoint
 
 TOKEN = "mcp-test-token"
 TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -113,7 +113,7 @@ async def test_handshake_and_tool_list_match_business_endpoints(
             ) as (read, write):
                 async with ClientSession(read, write) as session:
                     init = await session.initialize()
-                    assert init.server_info.name == "agent-manager"
+                    assert init.server_info.name == "kuzya"
                     tools = (await session.list_tools()).tools
         finally:
             await client.aclose()

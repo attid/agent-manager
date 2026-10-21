@@ -15,15 +15,15 @@ import uuid
 
 import pytest
 
-from agent_manager.pi_reply import PiReplyHandler
-from agent_manager.profile_runtime import (
+from kuzya.pi_reply import PiReplyHandler
+from kuzya.profile_runtime import (
     FrozenProfileHandler,
     ProfileRuntimeConfigurationError,
     ProfileSnapshotNotFoundError,
     freeze_profile_handler,
 )
-from agent_manager.secretary import TurnInput, TurnProcessor
-from agent_manager.storage import (
+from kuzya.secretary import TurnInput, TurnProcessor
+from kuzya.storage import (
     AgentProfileNotFoundError,
     AgentProfileRepository,
     ConversationRepository,

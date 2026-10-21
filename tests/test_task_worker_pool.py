@@ -12,15 +12,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent_manager.runner import RunnerConfig
-from agent_manager.runtime_defaults import RuntimeDefaultsResolver
-from agent_manager.storage import AgentProfileRepository, Database, TaskRepository
-from agent_manager.task_worker import (
+from kuzya.runner import RunnerConfig
+from kuzya.runtime_defaults import RuntimeDefaultsResolver
+from kuzya.storage import AgentProfileRepository, Database, TaskRepository
+from kuzya.task_worker import (
     MAX_TASK_CONCURRENCY,
     TaskExecutionWorkerPool,
 )
 
-_DEVELOPER_AGENT_ID = "agent-manager-developer"
+_DEVELOPER_AGENT_ID = "kuzya-developer"
 
 
 def _create_database(migrated_db: Path) -> Database:
@@ -136,7 +136,7 @@ def test_pool_executes_different_workspaces_in_parallel(
         f"{pool.worker_id}-1",
     ]
     try:
-        with patch("agent_manager.task_worker.subprocess.run", side_effect=fake_run):
+        with patch("kuzya.task_worker.subprocess.run", side_effect=fake_run):
             pool.start()
             _wait_for(lambda: len(outcomes) == 2)
     finally:
@@ -200,7 +200,7 @@ def test_pool_executes_same_workspace_tasks_sequentially(
         on_task_finished=on_finished,
     )
     try:
-        with patch("agent_manager.task_worker.subprocess.run", side_effect=fake_run):
+        with patch("kuzya.task_worker.subprocess.run", side_effect=fake_run):
             pool.start()
             _wait_for(lambda: len(outcomes) == 2)
     finally:
@@ -257,7 +257,7 @@ def test_pool_executes_null_workspace_tasks_sequentially(
         on_task_finished=on_finished,
     )
     try:
-        with patch("agent_manager.task_worker.subprocess.run", side_effect=fake_run):
+        with patch("kuzya.task_worker.subprocess.run", side_effect=fake_run):
             pool.start()
             _wait_for(lambda: len(outcomes) == 2)
     finally:
@@ -401,7 +401,7 @@ def test_pool_stop_waits_for_active_execution(
     )
     stopper = threading.Thread(target=lambda: pool.stop(timeout=5.0), daemon=True)
     try:
-        with patch("agent_manager.task_worker.subprocess.run", side_effect=fake_run):
+        with patch("kuzya.task_worker.subprocess.run", side_effect=fake_run):
             pool.start()
             assert started.wait(timeout=5.0)
             stopper.start()
@@ -449,7 +449,7 @@ def test_pool_stop_respects_timeout(
         on_task_finished=lambda _task, _outcome: None,
     )
     try:
-        with patch("agent_manager.task_worker.subprocess.run", side_effect=fake_run):
+        with patch("kuzya.task_worker.subprocess.run", side_effect=fake_run):
             pool.start()
             assert started.wait(timeout=5.0)
             began = time.monotonic()
@@ -524,7 +524,7 @@ def test_pool_rejects_invalid_concurrency(
 def test_runner_config_reads_task_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("AGENT_MANAGER_TASK_CONCURRENCY", " 5 ")
+    monkeypatch.setenv("KUZYA_TASK_CONCURRENCY", " 5 ")
     assert RunnerConfig.from_env().task_concurrency == 5
 
 
@@ -532,6 +532,6 @@ def test_runner_config_reads_task_concurrency(
 def test_runner_config_rejects_invalid_task_concurrency(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    monkeypatch.setenv("AGENT_MANAGER_TASK_CONCURRENCY", value)
+    monkeypatch.setenv("KUZYA_TASK_CONCURRENCY", value)
     with pytest.raises(ValueError, match="between 1 and 32"):
         RunnerConfig.from_env()

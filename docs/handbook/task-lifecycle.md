@@ -78,7 +78,7 @@ secretary must use `status="in_progress"` (or `update_task(..., status=
 
 ## Worker claim and workspace lock
 
-`TaskRepository.claim_in_progress` (`src/agent_manager/storage/repository.py`)
+`TaskRepository.claim_in_progress` (`src/kuzya/storage/repository.py`)
 skips a candidate when another task in the same `workspace` is
 `ready_to_commit` or already `in_progress`. A candidate whose metadata already
 contains `execution_status == "running"` is never claimed again: it remains
@@ -87,7 +87,7 @@ while allowing different workspaces to run in parallel.
 
 ## Execution
 
-`TaskExecutionWorker.step` (`src/agent_manager/task_worker.py`):
+`TaskExecutionWorker.step` (`src/kuzya/task_worker.py`):
 
 1. claims one `in_progress` task;
 2. selects `task.agent_id` or the worker default, loads the current profile and
@@ -139,7 +139,7 @@ claim. The worker renders `task.md` from the original description, every
 ## Turns (secretary lifecycle)
 
 Secretary conversations use a separate durable protocol
-(`src/agent_manager/secretary.py`, `src/agent_manager/dispatcher.py`):
+(`src/kuzya/secretary.py`, `src/kuzya/dispatcher.py`):
 
 - `POST /conversations/{id}/turns` enqueues one `pending` turn for an existing
   inbound user message. `input_message_id` is unique, so a replay returns the
@@ -167,11 +167,11 @@ logged and polling continues.
 
 - Each task execution receives an execution-scoped backend credential derived
   from its configured tools; a raw HTTP call cannot exceed that scope
-  (`src/agent_manager/permissions.py`).
+  (`src/kuzya/permissions.py`).
 - Workers build an explicit per-instance context rather than reading a host
-  path default (`src/agent_manager/instance.py`).
+  path default (`src/kuzya/instance.py`).
 - The `review` and `analysis` operation kinds have registered executors
-  (`src/agent_manager/operation_handlers.py`); a kind with no executor still
+  (`src/kuzya/operation_handlers.py`); a kind with no executor still
   fails visibly. See [Review](review.md) and
   [Analysis and recommendations](analysis-and-recommendations.md).
 - Secretary and `system-*` executions receive the injected platform discovery
@@ -180,8 +180,8 @@ logged and polling continues.
 
 ## Related
 
-- `src/agent_manager/task_worker.py`
-- `src/agent_manager/secretary.py`
-- `src/agent_manager/dispatcher.py`
-- `src/agent_manager/storage/repository.py`
-- `src/agent_manager/storage/models.py`
+- `src/kuzya/task_worker.py`
+- `src/kuzya/secretary.py`
+- `src/kuzya/dispatcher.py`
+- `src/kuzya/storage/repository.py`
+- `src/kuzya/storage/models.py`

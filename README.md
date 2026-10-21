@@ -1,4 +1,4 @@
-# Agent Manager
+# Kuzya
 
 Task-oriented agent orchestration system and engineering platform. This repository contains:
 - **Durable Storage**: File-backed SQLite with WAL mode, Alembic migrations, task repository, conversation/message storage, and immutable versioned agent-profile repository.
@@ -37,13 +37,13 @@ UV_CACHE_DIR=/tmp/uv-cache UV_PYTHON_DOWNLOADS=never \
 Apply all migrations to a fresh (or already migrated) file database:
 
 ```bash
-AGENT_MANAGER_DB_URL=sqlite:////tmp/agent_manager.db \
+KUZYA_DB_URL=sqlite:////tmp/kuzya.db \
   PYTHONPATH=src .venv/bin/alembic upgrade head
 ```
 
 Re-running the command is safe: Alembic records the applied revision in
 `alembic_version` and skips it. The URL is resolved from the
-`sqlalchemy.url` Alembic option first, then from the `AGENT_MANAGER_DB_URL`
+`sqlalchemy.url` Alembic option first, then from the `KUZYA_DB_URL`
 environment variable. A file-backed URL is required; in-memory SQLite is not
 supported because separate connections would not share state.
 
@@ -55,7 +55,7 @@ error instead of silently creating or replacing tables.
 
 `TaskExecutionWorkerPool` runs independent `TaskExecutionWorker` loops in one
 process. The pool size is configured by `RunnerConfig.task_concurrency` or the
-`AGENT_MANAGER_TASK_CONCURRENCY` environment variable and defaults to `3`; the
+`KUZYA_TASK_CONCURRENCY` environment variable and defaults to `3`; the
 value must be an integer from `1` to `32`. `int()` accepts surrounding
 whitespace, so `" 3 "` is valid.
 
@@ -83,17 +83,17 @@ shutdown path grants five seconds per configured worker
 single five-second window.
 
 ```bash
-AGENT_MANAGER_TASK_CONCURRENCY=5 PYTHONPATH=src .venv/bin/python -m agent_manager.runner
+KUZYA_TASK_CONCURRENCY=5 PYTHONPATH=src .venv/bin/python -m kuzya.runner
 ```
 
 ## HTTP API
 
 Build the application factory with a database URL, or omit the argument and
-set `AGENT_MANAGER_DB_URL`:
+set `KUZYA_DB_URL`:
 
 ```bash
-AGENT_MANAGER_DB_URL=sqlite:////tmp/agent_manager.db \
-  PYTHONPATH=src .venv/bin/uvicorn agent_manager.api.app:create_app \
+KUZYA_DB_URL=sqlite:////tmp/kuzya.db \
+  PYTHONPATH=src .venv/bin/uvicorn kuzya.api.app:create_app \
   --factory --host 127.0.0.1 --port 8000
 ```
 
@@ -344,7 +344,7 @@ of these routes as authorization for an agent is out of scope.
 ## Secretary turns over the Python boundary
 
 The one-turn secretary is a Python-only execution boundary in
-`agent_manager.secretary`. It persists a `turns` row for one existing
+`kuzya.secretary`. It persists a `turns` row for one existing
 inbound `user` message, claims work atomically, calls an injected handler
 **outside any database transaction**, and records either one assistant reply
 or the handler error. It adds no HTTP endpoints and performs no model,
@@ -403,8 +403,8 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import ConversationRepository, Database
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import ConversationRepository, Database
 
 with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / "demo.db"
@@ -448,7 +448,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 ## Pi Runner reply handler (host-side adapter)
 
-The module `agent_manager.pi_reply` adapts the existing Pi Runner to the
+The module `kuzya.pi_reply` adapts the existing Pi Runner to the
 secretary `Handler` contract (`TurnInput -> str`). It runs the Runner as a
 literal-argv child process and returns the Runner's summary text, so it plugs
 into `TurnProcessor.run_once` without changes to the processor, the schema or
@@ -466,20 +466,20 @@ retry. A failed call leaves the turn `failed` and only an explicit
 ```python
 import os
 
-from agent_manager.pi_reply import PiReplyHandler
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import Database
+from kuzya.pi_reply import PiReplyHandler
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import Database
 
 handler = PiReplyHandler(
     # Trusted argv prefix: host interpreter, Runner module and PYTHONPATH.
     runner_argv_prefix=["/path/to/host/python", "-m", "pi_runner"],
     role_config_path="/abs/path/role.json",
-    artifact_dir="/var/lib/agent-manager/pi-runs",
+    artifact_dir="/var/lib/kuzya/pi-runs",
     # env=None inherits os.environ unchanged; an explicit mapping replaces it.
     env={**os.environ, "PYTHONPATH": "/abs/path/to/host/src"},
 )
 
-processor = TurnProcessor(Database.from_path("/abs/path/agent_manager.db"))
+processor = TurnProcessor(Database.from_path("/abs/path/kuzya.db"))
 result = processor.run_once(handler)
 if result.status == "failed":
     print(handler.last_execution.provenance_path)
@@ -525,24 +525,24 @@ to the turn and attempt count, and to the artifact paths for diagnosis.
 
 ## Frozen profile handler (host-side factory)
 
-`agent_manager.profile_runtime.freeze_profile_handler` bridges the agent
+`kuzya.profile_runtime.freeze_profile_handler` bridges the agent
 registry to the existing Pi reply handler for one execution. It is a Python
 host boundary only: no API endpoint, persistent worker, job loop, history
 loader or model call is added. Load one revision, build a handler, pass it to
 the existing `TurnProcessor`, and build a new handler for a later execution.
 
 ```python
-from agent_manager.profile_runtime import freeze_profile_handler
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import Database
+from kuzya.profile_runtime import freeze_profile_handler
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import Database
 
-database = Database.from_path("/abs/path/agent_manager.db")
+database = Database.from_path("/abs/path/kuzya.db")
 frozen = freeze_profile_handler(
     database,
     "triage",
     # revision=None selects the latest revision at factory-call time.
     runner_argv_prefix=["/path/to/host/python", "-m", "pi_runner"],
-    artifact_root="/var/lib/agent-manager/profiles",
+    artifact_root="/var/lib/kuzya/profiles",
     # env=None inherits os.environ unchanged.
 )
 
@@ -586,7 +586,7 @@ explicit revisions raise `ProfileSnapshotNotFoundError`; malformed stored
 
 ## Persistent conversation handler (host-side integration)
 
-`agent_manager.persistent_conversation.PersistentConversationHandler` is a
+`kuzya.persistent_conversation.PersistentConversationHandler` is a
 single host handler (`TurnInput -> str`) that connects the accepted runtime
 binding repository to the existing frozen profile exports and the existing
 Pi reply adapter. It adds no dispatcher, HTTP endpoint, Telegram integration,
@@ -603,18 +603,18 @@ calls reuse the same pinned role export, `state_dir` and native session id in
 artifacts, never from handler memory, even in a brand-new process.
 
 ```python
-from agent_manager.persistent_conversation import (
+from kuzya.persistent_conversation import (
     PersistentConversationHandler,
 )
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import Database
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import Database
 
-database = Database.from_path("/var/lib/agent-manager/agent_manager.db")
+database = Database.from_path("/var/lib/kuzya/kuzya.db")
 handler = PersistentConversationHandler(
     database,
     "triage",
     runner_argv_prefix=["/path/to/host/python", "-m", "pi_runner"],
-    artifact_root="/var/lib/agent-manager/conversations",
+    artifact_root="/var/lib/kuzya/conversations",
     # env=None inherits os.environ unchanged.
 )
 
@@ -659,17 +659,17 @@ PYTHONPATH=src .venv/bin/python -m pytest tests/test_concurrency.py
 
 ## Public Python interfaces
 
-All storage public names are re-exported from `agent_manager.storage`. The
-secretary processor is exposed from `agent_manager.secretary`.
+All storage public names are re-exported from `kuzya.storage`. The
+secretary processor is exposed from `kuzya.secretary`.
 
 ### `Database`
 
 Owns one SQLAlchemy engine bound to a single SQLite file.
 
 ```python
-from agent_manager.storage import Database, TaskRepository
+from kuzya.storage import Database, TaskRepository
 
-database = Database.from_path("/tmp/agent_manager.db")
+database = Database.from_path("/tmp/kuzya.db")
 repository = TaskRepository(database)
 ```
 
@@ -707,9 +707,9 @@ to tasks: appending a message never creates a task. Every call opens a short
 transaction on its own connection.
 
 ```python
-from agent_manager.storage import ConversationRepository, Database
+from kuzya.storage import ConversationRepository, Database
 
-database = Database.from_path("/tmp/agent_manager.db")
+database = Database.from_path("/tmp/kuzya.db")
 conversations = ConversationRepository(database)
 
 conversation = conversations.create_conversation(title="Support")
@@ -844,14 +844,14 @@ tasks):
 
 ### `TurnProcessor`
 
-The one-turn processor from `agent_manager.secretary`; see *Secretary turns
+The one-turn processor from `kuzya.secretary`; see *Secretary turns
 over the Python boundary* for the full contract:
 
 ```python
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import Database
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import Database
 
-processor = TurnProcessor(Database.from_path("/tmp/agent_manager.db"))
+processor = TurnProcessor(Database.from_path("/tmp/kuzya.db"))
 processor.enqueue(conversation_id="conv", input_message_id="message-id")
 result = processor.run_once(lambda turn_input: f"echo:{turn_input.text}")
 ```

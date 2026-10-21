@@ -2,7 +2,7 @@
 
 import json
 
-from agent_manager.session_operations import (
+from kuzya.session_operations import (
     acknowledge_items,
     pending_items,
     unapplied_items,

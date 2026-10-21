@@ -14,8 +14,8 @@ import pytest
 from alembic import command
 from sqlalchemy import inspect
 
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import (
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import (
     AgentProfileNotFoundError,
     AgentProfileRepository,
     AgentProfileRevisionConflictError,

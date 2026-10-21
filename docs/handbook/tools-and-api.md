@@ -7,7 +7,7 @@ do not implement domain logic. This file is the discovery contract.
 ## REST endpoints
 
 Authoritative list is the generated OpenAPI document (`GET /openapi.json`).
-Current surface (`src/agent_manager/api/app.py`):
+Current surface (`src/kuzya/api/app.py`):
 
 | Method | Path | Success | Notes |
 |---|---|---|---|
@@ -51,14 +51,14 @@ Current surface (`src/agent_manager/api/app.py`):
 
 ## Authentication
 
-`BearerAuthMiddleware` (`src/agent_manager/api/app.py`) distinguishes two
+`BearerAuthMiddleware` (`src/kuzya/api/app.py`) distinguishes two
 credential classes:
 
-- administrative tokens from `AGENT_MANAGER_API_TOKENS` /
-  `AGENT_MANAGER_API_TOKEN` receive unrestricted access and are never handed to
+- administrative tokens from `KUZYA_API_TOKENS` /
+  `KUZYA_API_TOKEN` receive unrestricted access and are never handed to
   a child execution; and
 - execution tokens issued by `ExecutionPermissions`
-  (`src/agent_manager/permissions.py`) are accepted only inside their granted
+  (`src/kuzya/permissions.py`) are accepted only inside their granted
   action/resource scope. `resolve_requirement` maps each route to a concrete
   action and resource, so a raw HTTP call from a shell cannot bypass the tool
   exposure policy.
@@ -132,7 +132,7 @@ See [Capability inventory](capability-inventory.md) for the per-tool mapping.
 ## Tool exposure
 
 A model only sees the tools named in its `AgentProfile.runner_config.tools`.
-The default secretary list lives in `src/agent_manager/knowledge.py`
+The default secretary list lives in `src/kuzya/knowledge.py`
 (`sec_tools`). Changing a profile's `tools` array changes exposure on the next
 execution; it does not grant API permissions by itself.
 
@@ -141,7 +141,7 @@ execution; it does not grant API permissions by itself.
 ```bash
 # Endpoints and status codes
 PYTHONPATH=src .venv/bin/python -c \
-  "from agent_manager.api.app import create_app; \
+  "from kuzya.api.app import create_app; \
    app=create_app('sqlite:////tmp/probe.db'); \
    [print(m.upper(), p, sorted(app.openapi()['paths'][p][m]['responses'])) \
     for p in sorted(app.openapi()['paths']) \
@@ -152,14 +152,14 @@ grep -n 'name: "' src/pi_runner/policy.mjs
 
 # Operation kinds and registrations
 grep -n 'OPERATION_KIND_\|\.register(' \
-  src/agent_manager/operation_worker.py \
-  src/agent_manager/operation_handlers.py \
-  src/agent_manager/runner.py
+  src/kuzya/operation_worker.py \
+  src/kuzya/operation_handlers.py \
+  src/kuzya/runner.py
 ```
 
 ## Capability inventory
 
-`src/agent_manager/capabilities.py` is the machine-readable inventory of every
+`src/kuzya/capabilities.py` is the machine-readable inventory of every
 tool and route (method, schema, result status, permission action and handbook
 document). `audit_capabilities` compares it with the generated OpenAPI
 document, the tools actually registered by `policy.mjs` and
@@ -170,6 +170,6 @@ file.
 
 ## Related
 
-- `src/agent_manager/api/app.py`, `src/agent_manager/api/schemas.py`
+- `src/kuzya/api/app.py`, `src/kuzya/api/schemas.py`
 - `src/pi_runner/policy.mjs`
 - `docs/api.md`, `docs/secretary-tools.md`

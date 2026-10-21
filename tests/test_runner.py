@@ -1,4 +1,4 @@
-"""Tests for the unified agent_manager.runner."""
+"""Tests for the unified kuzya.runner."""
 
 from __future__ import annotations
 
@@ -11,21 +11,21 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from agent_manager.permissions import actions_for_tools, resources_for_execution
-from agent_manager.runner import (
-    AgentManagerServices,
+from kuzya.permissions import actions_for_tools, resources_for_execution
+from kuzya.runner import (
+    KuzyaServices,
     RunnerConfig,
     run_database_migrations,
 )
-from agent_manager.telegram.client import BackendClient
-from agent_manager.telegram.config import TelegramConfig
+from kuzya.telegram.client import BackendClient
+from kuzya.telegram.config import TelegramConfig
 
 
 def test_runner_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.delenv("AGENT_MANAGER_DB_URL", raising=False)
-    monkeypatch.delenv("AGENT_MANAGER_HOST", raising=False)
-    monkeypatch.delenv("AGENT_MANAGER_PORT", raising=False)
-    monkeypatch.delenv("AGENT_MANAGER_TASK_CONCURRENCY", raising=False)
+    monkeypatch.delenv("KUZYA_DB_URL", raising=False)
+    monkeypatch.delenv("KUZYA_HOST", raising=False)
+    monkeypatch.delenv("KUZYA_PORT", raising=False)
+    monkeypatch.delenv("KUZYA_TASK_CONCURRENCY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
     cfg = RunnerConfig.from_env()
@@ -37,10 +37,10 @@ def test_runner_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
 
 def test_runner_config_custom_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("AGENT_MANAGER_DB_URL", f"sqlite:///{tmp_path}/custom.db")
-    monkeypatch.setenv("AGENT_MANAGER_HOST", "0.0.0.0")
-    monkeypatch.setenv("AGENT_MANAGER_PORT", "9000")
-    monkeypatch.setenv("AGENT_MANAGER_AUTO_MIGRATE", "false")
+    monkeypatch.setenv("KUZYA_DB_URL", f"sqlite:///{tmp_path}/custom.db")
+    monkeypatch.setenv("KUZYA_HOST", "0.0.0.0")
+    monkeypatch.setenv("KUZYA_PORT", "9000")
+    monkeypatch.setenv("KUZYA_AUTO_MIGRATE", "false")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "mock-token-xyz")
     monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "12345")
 
@@ -53,7 +53,7 @@ def test_runner_config_custom_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert cfg.telegram_config.bot_token == "mock-token-xyz"
 
 
-def test_agent_manager_services_setup_and_lifecycle(
+def test_kuzya_services_setup_and_lifecycle(
     migrated_db: Path,
     tmp_path: Path,
 ) -> None:
@@ -73,7 +73,7 @@ def test_agent_manager_services_setup_and_lifecycle(
 
     loop = asyncio.new_event_loop()
     try:
-        services = AgentManagerServices(cfg)
+        services = KuzyaServices(cfg)
         services.setup(loop)
 
         assert services.database is not None
@@ -138,7 +138,7 @@ def test_service_created_telegram_client_uses_host_internal_principal(
         auto_migrate=False,
         telegram_config=telegram_config,
     )
-    services = AgentManagerServices(cfg)
+    services = KuzyaServices(cfg)
 
     # Route the httpx client created inside the real BackendClient to the
     # in-process ASGI app without opening a network socket. The app does not
@@ -154,7 +154,7 @@ def test_service_created_telegram_client_uses_host_internal_principal(
         return real_async_client(*args, **kwargs)
 
     monkeypatch.setattr(
-        "agent_manager.telegram.client.httpx.AsyncClient",
+        "kuzya.telegram.client.httpx.AsyncClient",
         _async_client_factory,
     )
 
@@ -188,12 +188,12 @@ def test_service_created_telegram_client_uses_host_internal_principal(
         # A secretary execution issues a scoped child credential.
         child_actions = actions_for_tools(["get_task"])
         child_grant = services.permissions.issue(
-            agent_id="agent-manager-developer",
+            agent_id="kuzya-developer",
             actions=child_actions,
             resources=resources_for_execution(
                 child_actions,
                 task_id=created["id"],
-                agent_id="agent-manager-developer",
+                agent_id="kuzya-developer",
             ),
             label=f"task:{created['id']}",
         )

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import sqlalchemy
 
-from agent_manager.secretary import TurnProcessor
-from agent_manager.storage import Database
-from agent_manager.storage.models import TelegramMessageLink
-from agent_manager.storage.repository import ConversationRepository
-from agent_manager.storage.telegram_delivery import (
+from kuzya.secretary import TurnProcessor
+from kuzya.storage import Database
+from kuzya.storage.models import TelegramMessageLink
+from kuzya.storage.repository import ConversationRepository
+from kuzya.storage.telegram_delivery import (
     DELIVERY_KIND_API_QUESTION,
     DELIVERY_KIND_REPLY,
     DELIVERY_KIND_TURN_ERROR,
