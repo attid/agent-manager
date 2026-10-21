@@ -157,13 +157,17 @@ async def send_markdown(
     chat_id: int,
     text: str,
     *,
+    conversation_id: str | None = None,
     reply_to_message_id: int | None = None,
     keyboard: Any = None,
 ) -> int:
     """Send one text part: rich Markdown, then plain text, then a document.
 
-    Returns the sent Telegram message id. Raises only when every transport
-    failed — the caller decides whether the outcome is retryable.
+    ``conversation_id`` only affects the last-resort document fallback: its
+    caption carries the dialog UUID so even a failed-format delivery keeps
+    its visible context. Returns the sent Telegram message id; raises only
+    when every transport failed — the caller decides whether the outcome is
+    retryable.
     """
     reply_parameters = (
         ReplyParameters(message_id=reply_to_message_id)
@@ -190,14 +194,48 @@ async def send_markdown(
         return message.message_id
     except Exception as plain_error:
         logger.debug("plain send failed, falling back to document: %s", plain_error)
+    caption = "📄 Текст прикреплён файлом:"
+    if conversation_id is not None:
+        caption = with_conversation_footer(caption, conversation_id)
     message = await bot.send_document(
         chat_id=chat_id,
         document=BufferedInputFile(text.encode("utf-8"), filename="сообщение.md"),
-        caption="📄 Текст прикреплён файлом:",
+        caption=caption,
         reply_parameters=reply_parameters,
         reply_markup=keyboard,
     )
     return message.message_id
+
+
+def build_delivery_parts(
+    raw_text: str,
+    conversation_id: str,
+    *,
+    header: str | None = None,
+    plate: str | None = None,
+) -> tuple[list[tuple[str, Any]], list[str]]:
+    """Build the canonical part plan for one dialog message.
+
+    Every sender of a durable delivery — the synchronous Telegram worker and
+    the outbox loop — must share this plan, so per-part progress recorded by
+    one side resumes exactly where the other left off. Returns the
+    text/document parts (files not included) and the extracted SEND_FILE
+    targets, in delivery order.
+    """
+    body, file_targets = strip_file_directives(raw_text)
+    if not body and file_targets:
+        body = "📄 Запрошенный документ:"
+    elif not body:
+        body = "Ответ получен."
+    composed = compose_dialog_message(header=header, body=body, plate=plate)
+    if len(composed) > TELEGRAM_DOCUMENT_THRESHOLD:
+        parts: list[tuple[str, Any]] = [("document", composed)]
+    else:
+        parts = [
+            ("text", part)
+            for part in split_for_telegram(composed, conversation_id)
+        ]
+    return parts, file_targets
 
 
 def find_task_for_conversation(database: Database, conversation_id: str) -> Task | None:
@@ -253,6 +291,40 @@ class TelegramDeliveryService:
         """Return the reply row for a turn without claiming it."""
         return self.repo.get_delivery_by_idempotency_key(reply_delivery_key(turn_id))
 
+    def record_delivery_progress(
+        self,
+        delivery: TelegramDelivery,
+        *,
+        part_index: int,
+        chat_id: int,
+        telegram_message_id: int,
+    ) -> None:
+        """Atomically persist progress and the link for one delivered part."""
+        self.repo.record_part_progress(
+            delivery.id,
+            part_index=part_index,
+            chat_id=chat_id,
+            telegram_message_id=telegram_message_id,
+            conversation_id=delivery.conversation_id,
+            message_id=delivery.message_id,
+            turn_id=delivery.turn_id,
+            task_id=(delivery.meta or {}).get("task_id"),
+            origin=MESSAGE_ORIGIN_BOT,
+        )
+
+    def mark_delivery_sent(self, delivery: TelegramDelivery) -> None:
+        """Finalize a delivery after every part was sent."""
+        self.repo.mark_sent(delivery.id)
+
+    def release_delivery(self, delivery: TelegramDelivery) -> None:
+        """Return a claimed delivery to ``pending`` without marking it sent.
+
+        Used by the synchronous worker when it cannot finish sending: the
+        outbox loop then resumes from the recorded per-part progress instead
+        of the row hanging in ``sending`` until the next restart.
+        """
+        self.repo.release_claim(delivery.id)
+
     def record_delivery_sent(
         self,
         delivery: TelegramDelivery,
@@ -262,19 +334,11 @@ class TelegramDeliveryService:
     ) -> None:
         """Persist per-part progress and links after a synchronous send."""
         for index, telegram_message_id in enumerate(telegram_message_ids):
-            self.repo.mark_part_sent(
-                delivery.id,
+            self.record_delivery_progress(
+                delivery,
                 part_index=index,
-                telegram_message_id=telegram_message_id,
-            )
-            self.repo.record_message_link(
                 chat_id=chat_id,
                 telegram_message_id=telegram_message_id,
-                conversation_id=delivery.conversation_id,
-                message_id=delivery.message_id,
-                turn_id=delivery.turn_id,
-                task_id=(delivery.meta or {}).get("task_id"),
-                origin=MESSAGE_ORIGIN_BOT,
             )
         self.repo.mark_sent(delivery.id)
 
@@ -322,15 +386,19 @@ class TelegramDeliveryService:
             self.repo.mark_failed(row.id, "message text is unavailable")
             return "failed"
 
-        body, file_targets = strip_file_directives(text)
-        if not body and file_targets:
-            body = "📄 Запрошенный документ:"
-
-        composed = compose_dialog_message(
+        # The part plan must never change between attempts: the saved
+        # parts_sent indexes the first attempt's splitting, and a re-rendered
+        # "other dialog" plate (context switched meanwhile) would shift part
+        # boundaries and silently skip undelivered files. The plate is frozen
+        # into the row at first use and reused verbatim on every retry.
+        plate = self._plan_plate(row)
+        parts, file_targets = build_delivery_parts(
+            text,
+            row.conversation_id,
             header=self._render_header(row),
-            body=body,
-            plate=self._foreign_plate(row),
+            plate=plate,
         )
+        parts += [("file", target) for target in file_targets]
 
         task = find_task_for_conversation(self.database, row.conversation_id)
         keyboard = dialog_switch_keyboard(
@@ -338,16 +406,6 @@ class TelegramDeliveryService:
             task_id=task.id if task is not None else None,
             task_number=task.number if task is not None else None,
         )
-
-        parts: list[tuple[str, Any]]
-        if len(composed) > TELEGRAM_DOCUMENT_THRESHOLD:
-            parts = [("document", composed)]
-        else:
-            parts = [
-                ("text", part)
-                for part in split_for_telegram(composed, row.conversation_id)
-            ]
-        parts += [("file", target) for target in file_targets]
 
         try:
             await self._send_parts(row, chat_id, parts, keyboard)
@@ -435,6 +493,37 @@ class TelegramDeliveryService:
             active_conversation_id=active.get("conversation_id"),
         )
 
+    def _plan_plate(self, row: TelegramDelivery) -> str | None:
+        """The plate of the frozen part plan: stored on first use, then reused.
+
+        The "other dialog" plate is a context snapshot and can legitimately
+        change between attempts (the user switches dialogs). The part plan —
+        and therefore the meaning of the persisted ``parts_sent`` — must not:
+        a re-rendered plate shifts text part boundaries and would make a
+        resume skip undelivered file parts.
+        """
+        meta = row.meta or {}
+        if "plate" in meta:
+            return meta["plate"]
+        plate = self._foreign_plate(row)
+        self.repo.freeze_delivery_plate(row.id, plate)
+        return plate
+
+    def ensure_delivery_plate(
+        self, delivery: TelegramDelivery, plate: str | None
+    ) -> str | None:
+        """Return the frozen plan plate, storing ``plate`` on first use.
+
+        The synchronous worker computes the plate from its own context probe;
+        this pins it on the delivery row so a later outbox retry rebuilds the
+        exact same part plan instead of a fresh, context-shifted one.
+        """
+        meta = delivery.meta or {}
+        if "plate" in meta:
+            return meta["plate"]
+        self.repo.freeze_delivery_plate(delivery.id, plate)
+        return plate
+
     async def _send_parts(
         self,
         row: TelegramDelivery,
@@ -454,6 +543,7 @@ class TelegramDeliveryService:
                     self.bot,
                     chat_id,
                     content,
+                    conversation_id=row.conversation_id,
                     keyboard=keyboard if index == last_text_index else None,
                 )
             elif kind == "document":
@@ -470,10 +560,12 @@ class TelegramDeliveryService:
                 message_id = message.message_id
             else:
                 message_id = await self._send_file(row, chat_id, content, keyboard)
-            self.repo.mark_part_sent(
-                row.id, part_index=index, telegram_message_id=message_id
-            )
-            self.repo.record_message_link(
+            # Progress and the Reply link commit atomically: a crash between
+            # two separate transactions could deliver a part whose Telegram
+            # message is then unroutable.
+            self.repo.record_part_progress(
+                row.id,
+                part_index=index,
                 chat_id=chat_id,
                 telegram_message_id=message_id,
                 conversation_id=row.conversation_id,
@@ -498,6 +590,7 @@ class TelegramDeliveryService:
                 with_conversation_footer(
                     f"⚠️ Документ не найден: {target}", row.conversation_id
                 ),
+                conversation_id=row.conversation_id,
             )
         message = await self.bot.send_document(
             chat_id=chat_id,

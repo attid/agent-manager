@@ -19,8 +19,10 @@ from .keyboards import (
 )
 from .messenger import (
     TelegramDeliveryService,
+    build_delivery_parts,
     compose_dialog_message,
     render_foreign_context_plate,
+    strip_file_directives,
     with_conversation_footer,
 )
 from .state import QueuedMessage, UserStateStorage
@@ -170,6 +172,10 @@ class QueueProcessor:
         chat_id = queued_msg.chat_id
         conv_id = queued_msg.context_conversation_id
         text = queued_msg.text
+        # The durable delivery row claimed for this turn's reply, if any. It
+        # lives outside the try so an unexpected error below can hand the
+        # delivery back to the outbox instead of leaving it stuck in sending.
+        claimed = None
 
         try:
             # 1. Transcribe voice if needed
@@ -252,7 +258,6 @@ class QueueProcessor:
 
                 # Claim the durable reply row before sending: whoever holds
                 # the claim sends; the other side must not send a copy.
-                claimed = None
                 outbox_owned = False
                 if self.delivery_service is not None:
                     claimed = self.delivery_service.claim_reply_delivery(turn_id)
@@ -262,9 +267,19 @@ class QueueProcessor:
                             is not None
                         )
 
-                # Extract and dispatch file attachments (e.g. [SEND_FILE: path])
-                file_targets = list(SEND_FILE_PATTERN.findall(reply_text))
-                clean_reply_text = SEND_FILE_PATTERN.sub("", reply_text).strip()
+                # Build the canonical part plan shared with the outbox, so
+                # per-part progress recorded here resumes exactly where the
+                # outbox would continue (and vice versa). The plate is pinned
+                # on the delivery row: a retry must rebuild this exact plan,
+                # not a fresh context snapshot.
+                plate = await self._foreign_plate(queued_msg, conv_id)
+                if claimed is not None and self.delivery_service is not None:
+                    plate = self.delivery_service.ensure_delivery_plate(claimed, plate)
+                text_parts, file_targets = build_delivery_parts(
+                    reply_text, conv_id, plate=plate
+                )
+                text_part_count = len(text_parts)
+                clean_reply_text = strip_file_directives(reply_text)[0]
                 if not clean_reply_text and file_targets:
                     clean_reply_text = "📄 Запрошенный документ:"
                 elif not clean_reply_text:
@@ -296,7 +311,6 @@ class QueueProcessor:
                         except Exception as pointer_err:
                             logger.warning("Failed to send reply pointer: %s", pointer_err)
                 else:
-                    plate = await self._foreign_plate(queued_msg, conv_id)
                     rendered_reply = with_conversation_footer(
                         compose_dialog_message(
                             header=None,
@@ -305,7 +319,10 @@ class QueueProcessor:
                         ),
                         conv_id,
                     )
-                    sent_message_ids: list[int] = []
+                    # The whole reply text (all text parts of the shared plan)
+                    # reaches the chat as one message: the edited status bubble
+                    # or a single send/document fallback.
+                    text_delivered_message_id: int | None = None
 
                     if status_msg_id:
                         edit_success = False
@@ -333,7 +350,7 @@ class QueueProcessor:
                                     pass
 
                         if edit_success:
-                            sent_message_ids.append(status_msg_id)
+                            text_delivered_message_id = status_msg_id
                         else:
                             doc_file = BufferedInputFile(
                                 rendered_reply.encode("utf-8"), filename="ответ_секретаря.md"
@@ -347,7 +364,7 @@ class QueueProcessor:
                                 reply_to_message_id=queued_msg.telegram_message_id,
                                 reply_markup=switch_keyboard,
                             )
-                            sent_message_ids.append(doc.message_id)
+                            text_delivered_message_id = doc.message_id
                     else:
                         if len(rendered_reply) <= 16384:
                             try:
@@ -357,7 +374,7 @@ class QueueProcessor:
                                     reply_to_message_id=queued_msg.telegram_message_id,
                                     reply_markup=switch_keyboard,
                                 )
-                                sent_message_ids.append(sent.message_id)
+                                text_delivered_message_id = sent.message_id
                             except Exception as send_err:
                                 logger.warning("send_rich_message failed, fallback to doc: %s", send_err)
                                 doc_file = BufferedInputFile(
@@ -372,7 +389,7 @@ class QueueProcessor:
                                     reply_to_message_id=queued_msg.telegram_message_id,
                                     reply_markup=switch_keyboard,
                                 )
-                                sent_message_ids.append(doc.message_id)
+                                text_delivered_message_id = doc.message_id
                         else:
                             doc_file = BufferedInputFile(
                                 rendered_reply.encode("utf-8"), filename="ответ_секретаря.md"
@@ -387,10 +404,23 @@ class QueueProcessor:
                                 reply_to_message_id=queued_msg.telegram_message_id,
                                 reply_markup=switch_keyboard,
                             )
-                            sent_message_ids.append(doc.message_id)
+                            text_delivered_message_id = doc.message_id
 
-                    # Send attached documents if found
-                    for file_query in file_targets:
+                    if claimed is not None and self.delivery_service is not None:
+                        if text_delivered_message_id is not None:
+                            self.delivery_service.record_delivery_progress(
+                                claimed,
+                                part_index=text_part_count - 1,
+                                chat_id=chat_id,
+                                telegram_message_id=text_delivered_message_id,
+                            )
+
+                    # Send attached documents if found. A failed file never
+                    # marks the delivery sent: the claim is released so the
+                    # outbox retries the remaining file parts from the shared
+                    # plan (the already-delivered text is not resent).
+                    delivery_released = False
+                    for file_index, file_query in enumerate(file_targets):
                         resolved_file = (
                             self.knowledge_base.resolve_file(file_query)
                             if self.knowledge_base is not None
@@ -405,12 +435,12 @@ class QueueProcessor:
                                         f"📄 {resolved_file.name}", conv_id
                                     ),
                                 )
-                                sent_message_ids.append(doc.message_id)
                                 logger.info(
                                     "Sent document %s to chat_id=%s",
                                     resolved_file,
                                     chat_id,
                                 )
+                                file_message_id = doc.message_id
                             except Exception as doc_err:
                                 logger.error(
                                     "Failed to send document %s: %s",
@@ -418,6 +448,25 @@ class QueueProcessor:
                                     doc_err,
                                     exc_info=doc_err,
                                 )
+                                if claimed is not None and self.delivery_service is not None:
+                                    self.delivery_service.release_delivery(claimed)
+                                    delivery_released = True
+                                try:
+                                    await self.bot.send_message(
+                                        chat_id=chat_id,
+                                        text=with_conversation_footer(
+                                            "⚠️ Не удалось отправить файл "
+                                            f"<code>{file_query}</code>. "
+                                            "Попробую доставить его автоматически.",
+                                            conv_id,
+                                        ),
+                                        parse_mode="HTML",
+                                    )
+                                except Exception as warn_err:
+                                    logger.warning(
+                                        "Failed to send file-retry notice: %s", warn_err
+                                    )
+                                break
                         else:
                             logger.warning(
                                 "Requested document could not be resolved: %s", file_query
@@ -430,14 +479,26 @@ class QueueProcessor:
                                 ),
                                 parse_mode="HTML",
                             )
-                            sent_message_ids.append(warn.message_id)
+                            file_message_id = warn.message_id
 
-                    if claimed is not None and self.delivery_service is not None:
-                        self.delivery_service.record_delivery_sent(
-                            claimed,
-                            chat_id=chat_id,
-                            telegram_message_ids=sent_message_ids,
-                        )
+                        if (
+                            claimed is not None
+                            and self.delivery_service is not None
+                            and not delivery_released
+                        ):
+                            self.delivery_service.record_delivery_progress(
+                                claimed,
+                                part_index=text_part_count + file_index,
+                                chat_id=chat_id,
+                                telegram_message_id=file_message_id,
+                            )
+
+                    if (
+                        claimed is not None
+                        and self.delivery_service is not None
+                        and not delivery_released
+                    ):
+                        self.delivery_service.mark_delivery_sent(claimed)
             elif turn_error is not None:
                 self.storage.set_message_status(queued_msg.id, "failed")
                 is_talk = (
@@ -518,7 +579,19 @@ class QueueProcessor:
         except Exception as error:
             logger.exception("Error processing message %s: %s", queued_msg.id, error)
             self.storage.set_message_status(queued_msg.id, "failed")
-            fail_text = f"❌ Не удалось обработать сообщение: {error}"
+            # Hand any claimed delivery back to the outbox: without this the
+            # row would hang in ``sending`` (blocking the conversation's
+            # queue) until the next process restart.
+            if claimed is not None and self.delivery_service is not None:
+                try:
+                    self.delivery_service.release_delivery(claimed)
+                except Exception as release_err:
+                    logger.warning(
+                        "Failed to release delivery claim after error: %s", release_err
+                    )
+            fail_text = with_conversation_footer(
+                f"❌ Не удалось обработать сообщение: {error}", conv_id
+            )
             if status_msg_id:
                 await self._safe_edit_text(chat_id, status_msg_id, fail_text)
             else:

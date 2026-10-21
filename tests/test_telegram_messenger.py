@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+import pathlib
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from aiogram.exceptions import TelegramBadRequest
 
@@ -11,6 +13,7 @@ from agent_manager.storage import ConversationRepository, Database, TaskReposito
 from agent_manager.storage.telegram_delivery import (
     DELIVERY_STATUS_PENDING,
     DELIVERY_STATUS_SENT,
+    INPUT_SOURCE_TELEGRAM,
     TelegramDeliveryRepository,
     reply_delivery_key,
 )
@@ -23,9 +26,12 @@ from agent_manager.telegram.messenger import (
     conversation_hashtag,
     format_verified_caller,
     render_foreign_context_plate,
+    send_markdown,
     split_for_telegram,
     with_conversation_footer,
 )
+from agent_manager.telegram.state import UserStateStorage
+from agent_manager.telegram.worker import QueueProcessor
 
 
 def _bot(message_id: int = 501) -> AsyncMock:
@@ -358,5 +364,281 @@ def test_worker_and_outbox_cannot_double_send_a_reply(migrated_db) -> None:
         assert row.telegram_message_ids == [444, 445]
         assert repo.get_message_link(33, 444).origin == "bot"
         assert repo.get_message_link(33, 445).origin == "bot"
+    finally:
+        database.dispose()
+
+
+def _worker_turn(migrated_db, *, reply_text: str, source: str = INPUT_SOURCE_TELEGRAM):
+    """A completed telegram-origin turn plus mocks for QueueProcessor."""
+    database = Database.from_path(migrated_db)
+    conversations = ConversationRepository(database)
+    conversation = conversations.create_conversation(metadata={"chat_id": 55})
+    question = conversations.append_message(
+        conversation_id=conversation.id,
+        role="user",
+        text="вопрос",
+        source=source,
+        metadata={"chat_id": 55, "telegram_message_id": 100},
+    )
+    processor = TurnProcessor(database)
+    processor.enqueue(
+        conversation_id=conversation.id, input_message_id=question.message.id
+    )
+    turn = processor.claim_next(conversation_id=conversation.id)
+    processor.complete(turn.id, turn.claim_token, text=reply_text)
+
+    client = MagicMock()
+    client.append_message = AsyncMock(return_value={"id": question.message.id})
+    client.create_turn = AsyncMock(return_value={"id": turn.id})
+    client.get_turn = AsyncMock(
+        return_value={"status": "completed", "reply_message_id": "rep-1"}
+    )
+    client.list_messages = AsyncMock(
+        return_value=[{"id": "rep-1", "text": reply_text}]
+    )
+    return database, conversation, turn, client
+
+
+def _queue_processor(bot, client, tmp_path, conversation_id, *, knowledge_base=None):
+    storage = UserStateStorage(tmp_path / "state.db")
+    queued = storage.enqueue_message(
+        user_id=1,
+        chat_id=55,
+        telegram_message_id=100,
+        context_mode="talk",
+        context_task_id=None,
+        context_conversation_id=conversation_id,
+        text="вопрос",
+    )
+    processor = QueueProcessor(
+        bot=bot,
+        backend_client=client,
+        storage=storage,
+        transcriber=MagicMock(),
+        knowledge_base=knowledge_base,
+        poll_interval_seconds=0.01,
+        turn_timeout_seconds=2.0,
+    )
+    return storage, queued, processor
+
+
+def test_worker_file_failure_releases_claim_and_outbox_resumes(
+    migrated_db, tmp_path
+) -> None:
+    """A failed file send must not close the delivery; the outbox finishes it."""
+    report = tmp_path / "report.md"
+    report.write_text("данные", encoding="utf-8")
+    reply_text = "Вот файл:\n[SEND_FILE: report]"
+    database, conversation, turn, client = _worker_turn(
+        migrated_db, reply_text=reply_text
+    )
+    try:
+        bot = AsyncMock()
+        bot.send_rich_message.return_value.message_id = 321
+        bot.send_document = AsyncMock(side_effect=RuntimeError("upload failed"))
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=901))
+        knowledge_base = MagicMock()
+        knowledge_base.resolve_file = MagicMock(return_value=report)
+
+        storage, queued, processor = _queue_processor(
+            bot, client, tmp_path, conversation.id, knowledge_base=knowledge_base
+        )
+        service = TelegramDeliveryService(
+            bot=bot, database=database, claim_grace_seconds=0.0
+        )
+        processor.delivery_service = service
+        asyncio.run(processor.process_message(queued))
+
+        repo = TelegramDeliveryRepository(database)
+        row = repo.get_delivery_by_idempotency_key(reply_delivery_key(turn.id))
+        # Not sent: the failed file released the claim for an outbox retry,
+        # and a retry notice went to the user instead of a generic error.
+        assert row.status == DELIVERY_STATUS_PENDING
+        assert row.parts_sent == 1  # the text part is durably accounted
+        rich_texts = [
+            call.kwargs["rich_message"].markdown
+            for call in bot.send_rich_message.await_args_list
+        ]
+        assert any("Вот файл" in text for text in rich_texts)
+        notices = [
+            call.kwargs.get("text", "")
+            for call in bot.send_message.await_args_list
+        ]
+        assert any("Не удалось отправить файл" in text for text in notices)
+        assert not any("Не удалось обработать" in text for text in notices)
+
+        # The outbox resumes from the shared part plan: only the file part is
+        # (re)sent, the delivered text is not duplicated.
+        retry_bot = AsyncMock()
+        retry_bot.send_rich_message.return_value.message_id = 950
+        retry_bot.send_document = AsyncMock(return_value=MagicMock(message_id=951))
+        retry_service = TelegramDeliveryService(
+            bot=retry_bot,
+            database=database,
+            knowledge_base=knowledge_base,
+            claim_grace_seconds=0.0,
+        )
+        assert asyncio.run(retry_service.deliver_pending()) == 1
+        retry_bot.send_rich_message.assert_not_awaited()
+        retry_bot.send_document.assert_awaited_once()
+        caption = retry_bot.send_document.await_args.kwargs["caption"]
+        assert caption.endswith(f"#{conversation.id}")
+        row = repo.get_delivery_by_idempotency_key(reply_delivery_key(turn.id))
+        assert row.status == DELIVERY_STATUS_SENT
+    finally:
+        database.dispose()
+
+
+def test_worker_unexpected_error_releases_claim(migrated_db, tmp_path) -> None:
+    """An exception after the claim must hand the delivery back, not hang it."""
+    database, conversation, turn, client = _worker_turn(
+        migrated_db, reply_text="Обычный ответ"
+    )
+    try:
+        bot = AsyncMock()
+        # No status bubble: the text path dies at the rich send and its
+        # document fallback, reaching the generic error handler.
+        bot.send_rich_message = AsyncMock(side_effect=RuntimeError("rich dead"))
+        bot.send_document = AsyncMock(side_effect=RuntimeError("upload dead"))
+
+        storage, queued, processor = _queue_processor(
+            bot, client, tmp_path, conversation.id
+        )
+        service = TelegramDeliveryService(
+            bot=bot, database=database, claim_grace_seconds=0.0
+        )
+        processor.delivery_service = service
+        asyncio.run(processor.process_message(queued))
+
+        repo = TelegramDeliveryRepository(database)
+        row = repo.get_delivery_by_idempotency_key(reply_delivery_key(turn.id))
+        assert row.status == DELIVERY_STATUS_PENDING
+        assert storage.get_queued_message(queued.id).status == "failed"
+        # The generic error notice carries the dialog UUID.
+        notices = [
+            call.kwargs.get("text", "")
+            for call in bot.send_message.await_args_list
+        ]
+        assert any(
+            "Не удалось обработать" in text and text.endswith(f"#{conversation.id}")
+            for text in notices
+        )
+    finally:
+        database.dispose()
+
+
+def test_record_part_progress_persists_progress_and_link_together(migrated_db) -> None:
+    """One call commits both the part progress and its Reply link."""
+    database = Database.from_path(migrated_db)
+    try:
+        conversations = ConversationRepository(database)
+        conversation = conversations.create_conversation(metadata={"chat_id": 66})
+        question = conversations.append_message(
+            conversation_id=conversation.id, role="user", text="Q"
+        )
+        repo = TelegramDeliveryRepository(database)
+        row = repo.get_delivery_by_idempotency_key(f"tg-q:{question.message.id}")
+        assert repo.claim_delivery(row.id) is True
+        repo.record_part_progress(
+            row.id,
+            part_index=0,
+            chat_id=66,
+            telegram_message_id=777,
+            conversation_id=conversation.id,
+            message_id=question.message.id,
+            origin="bot",
+        )
+        stored = repo.get_delivery_by_idempotency_key(row.idempotency_key)
+        assert stored.parts_sent == 1
+        assert stored.telegram_message_ids == [777]
+        link = repo.get_message_link(66, 777)
+        assert link is not None
+        assert link.conversation_id == conversation.id
+        assert link.message_id == question.message.id
+    finally:
+        database.dispose()
+
+
+def test_send_markdown_document_fallback_caption_carries_uuid() -> None:
+    bot = AsyncMock()
+    for method in (bot.send_rich_message, bot.send_message):
+        method.side_effect = RuntimeError("no text transport")
+    bot.send_document = AsyncMock(return_value=MagicMock(message_id=301))
+
+    assert (
+        asyncio.run(
+            send_markdown(bot, 42, "текст части", conversation_id="b" * 32)
+        )
+        == 301
+    )
+    caption = bot.send_document.await_args.kwargs["caption"]
+    assert caption == f"📄 Текст прикреплён файлом:\n\n#{'b' * 32}"
+
+
+def test_retry_reuses_frozen_plan_when_context_plate_changes(
+    migrated_db, tmp_path
+) -> None:
+    """The part plan must survive a context switch between attempts.
+
+    Regression: the plate was re-rendered on retry. After the user switched
+    into the dialog, the plate disappeared, the long text re-split into fewer
+    parts, and the saved parts_sent over-counted — the retry skipped the
+    undelivered file and marked the row sent.
+    """
+    from aiogram.types import FSInputFile
+
+    report = tmp_path / "report.md"
+    report.write_text("данные", encoding="utf-8")
+    body = "т" * 4050
+    reply_text = body + "\n[SEND_FILE: report]"
+    database, conversation, turn, client = _worker_turn(
+        migrated_db, reply_text=reply_text
+    )
+    try:
+        bot = AsyncMock()
+        bot.send_rich_message.return_value.message_id = 321
+        bot.send_document = AsyncMock(side_effect=RuntimeError("upload failed"))
+        bot.send_message = AsyncMock(return_value=MagicMock(message_id=901))
+        knowledge_base = MagicMock()
+        knowledge_base.resolve_file = MagicMock(return_value=report)
+
+        storage, queued, processor = _queue_processor(
+            bot, client, tmp_path, conversation.id, knowledge_base=knowledge_base
+        )
+        # The user's active context is elsewhere: the reply carries the
+        # "other dialog" plate, which pushes the text over the 4096 split
+        # into two parts.
+        storage.set_user_mode(1, "talk", conversation_id="other-conv")
+        service = TelegramDeliveryService(
+            bot=bot, database=database, claim_grace_seconds=0.0
+        )
+        processor.delivery_service = service
+        asyncio.run(processor.process_message(queued))
+
+        repo = TelegramDeliveryRepository(database)
+        row = repo.get_delivery_by_idempotency_key(reply_delivery_key(turn.id))
+        assert row.status == DELIVERY_STATUS_PENDING
+        assert row.parts_sent == 2  # both plate-rendered text parts accounted
+        assert row.meta["plate"] == "↩️ Другой диалог"
+
+        # Retry with no context probe at all: a re-rendered plate would be
+        # absent, the text would re-split into ONE part and the file would
+        # shift to index 1 — a recomputed plan would skip it entirely.
+        retry_bot = AsyncMock()
+        retry_bot.send_rich_message.return_value.message_id = 950
+        retry_bot.send_document = AsyncMock(return_value=MagicMock(message_id=951))
+        retry_service = TelegramDeliveryService(
+            bot=retry_bot,
+            database=database,
+            knowledge_base=knowledge_base,
+            claim_grace_seconds=0.0,
+        )
+        assert asyncio.run(retry_service.deliver_pending()) == 1
+        retry_bot.send_rich_message.assert_not_awaited()
+        retry_bot.send_document.assert_awaited_once()
+        sent_document = retry_bot.send_document.await_args.kwargs["document"]
+        assert isinstance(sent_document, FSInputFile)
+        row = repo.get_delivery_by_idempotency_key(reply_delivery_key(turn.id))
+        assert row.status == DELIVERY_STATUS_SENT
     finally:
         database.dispose()

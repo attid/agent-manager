@@ -354,6 +354,66 @@ class TelegramDeliveryRepository:
             row.parts_sent = part_index + 1
             row.updated_at = utcnow()
 
+    def record_part_progress(
+        self,
+        delivery_id: str,
+        *,
+        part_index: int,
+        chat_id: int,
+        telegram_message_id: int,
+        conversation_id: str,
+        message_id: str | None = None,
+        turn_id: str | None = None,
+        task_id: str | None = None,
+        origin: str = MESSAGE_ORIGIN_BOT,
+    ) -> None:
+        """Atomically persist part progress and its Telegram message link.
+
+        The delivery progress update and the ``telegram_message_links`` insert
+        commit in one transaction: a crash between them could otherwise mark a
+        part delivered while leaving the message unresolvable for Reply
+        routing (or vice versa).
+        """
+        with self._database.session() as session:
+            row = session.scalars(
+                select(TelegramDelivery).where(TelegramDelivery.id == delivery_id)
+            ).one_or_none()
+            if row is not None and row.status == DELIVERY_STATUS_SENDING:
+                ids = list(row.telegram_message_ids or [])
+                ids.append(telegram_message_id)
+                row.telegram_message_ids = ids
+                row.parts_sent = part_index + 1
+                row.updated_at = utcnow()
+            record_message_link_in_session(
+                session,
+                chat_id=chat_id,
+                telegram_message_id=telegram_message_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                turn_id=turn_id,
+                task_id=task_id,
+                origin=origin,
+            )
+
+    def freeze_delivery_plate(self, delivery_id: str, plate: str | None) -> None:
+        """Freeze the part-plan context plate on first use.
+
+        Retries reuse the stored plate so the plan (and the meaning of the
+        persisted ``parts_sent``) never changes between attempts, even if the
+        user's active context — and therefore a freshly rendered plate —
+        differs. A plate already stored is never overwritten.
+        """
+        with self._database.session() as session:
+            row = session.scalars(
+                select(TelegramDelivery).where(TelegramDelivery.id == delivery_id)
+            ).one_or_none()
+            if row is None or "plate" in (row.meta or {}):
+                return
+            meta = dict(row.meta or {})
+            meta["plate"] = plate
+            row.meta = meta
+            row.updated_at = utcnow()
+
     def release_claim(self, delivery_id: str) -> None:
         """Return a claimed row to ``pending`` without delivering it.
 
