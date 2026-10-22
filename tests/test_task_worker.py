@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import re
 from pathlib import Path
 import sys
 from typing import Any
@@ -1034,13 +1035,21 @@ def test_review_cycle_uses_reviewer_profile_engine(
     state_dir = exec_dir / "state"
     state_dir.mkdir()
 
-    review_proc = MagicMock(
-        returncode=0,
-        stdout='{"verdict": "approved", "findings": []}',
-        stderr="",
-    )
+    review_reply = '{"verdict": "approved", "findings": []}'
 
-    with patch("subprocess.run", return_value=review_proc) as run_mock:
+    def fake_review_run(cmd, **kwargs):
+        # codex delivers its report via the result file named in the prompt.
+        if len(cmd) > 1 and cmd[1] == "exec":
+            match = re.search(
+                r"Write the final JSON object to the file (\S+?) \(", cmd[-1]
+            )
+            if match:
+                result_file = Path(match.group(1))
+                result_file.parent.mkdir(parents=True, exist_ok=True)
+                result_file.write_text(review_reply, encoding="utf-8")
+        return MagicMock(returncode=0, stdout=review_reply, stderr="")
+
+    with patch("subprocess.run", side_effect=fake_review_run) as run_mock:
         result = worker._run_review_cycle(
             task=task,
             project_dir=tmp_path,
@@ -1055,9 +1064,10 @@ def test_review_cycle_uses_reviewer_profile_engine(
     assert result["needs_user_input"] is False
     cmd = run_mock.call_args.args[0]
     assert cmd[0] == "/fake/bin/codex"
-    # codex rejects PROMPT combined with --uncommitted; the prompt rides
-    # alone over the default uncommitted-diff scope.
-    assert cmd[1] == "review" and "--uncommitted" not in cmd
+    # File-based contract: codex exec with full access writes the JSON to an
+    # exact result file instead of printing it on stdout.
+    assert cmd[1] == "exec"
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     metrics = json.loads(
         (
             tmp_path

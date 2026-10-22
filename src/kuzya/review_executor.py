@@ -1190,7 +1190,18 @@ class PiReviewerBackend(_ReviewerBackend):
 
 
 class _ExternalReviewerBackend(_ReviewerBackend):
-    """Common contract for reviewer CLIs that print the report on stdout."""
+    """Common contract for reviewer CLIs that report their result.
+
+    The default transport is stdout; an engine whose CLI owns its output
+    format (codex) overrides :meth:`_read_report` to read a result file the
+    engine writes at an exact path instead.
+    """
+
+    def _read_report(
+        self, context: _ReviewerRunContext, stdout: str
+    ) -> str:
+        """Return the report text produced by one engine run."""
+        return stdout.strip()
 
     def _build_command(
         self,
@@ -1271,12 +1282,6 @@ class _ExternalReviewerBackend(_ReviewerBackend):
         (context.review_artifact_dir / "stderr.txt").write_text(
             stderr, encoding="utf-8"
         )
-        report_text = stdout.strip()
-        report_path = (
-            context.review_artifact_dir
-            / f"review_report_r{context.round_number}.md"
-        )
-        report_path.write_text(report_text, encoding="utf-8")
 
         if proc.returncode != 0:
             raise _ReviewerBackendFailure(
@@ -1287,6 +1292,15 @@ class _ExternalReviewerBackend(_ReviewerBackend):
                 stdout=stdout,
                 stderr=stderr,
             )
+
+        # Read after the exit check: a crashed engine reports its exit code,
+        # not a missing result file.
+        report_text = self._read_report(context, stdout)
+        report_path = (
+            context.review_artifact_dir
+            / f"review_report_r{context.round_number}.md"
+        )
+        report_path.write_text(report_text, encoding="utf-8")
 
         if not report_text:
             raise _ReviewerBackendFailure(
@@ -1374,15 +1388,34 @@ class AgyReviewerBackend(_ExternalReviewerBackend):
 
 
 class CodexReviewerBackend(_ExternalReviewerBackend):
-    """Run the native ``codex review`` reviewer.
+    """Run ``codex exec`` with a file-based result contract.
 
-    codex 0.163 rejects a custom ``PROMPT`` combined with any scope flag
-    (``--uncommitted``, ``--base``, ``--commit`` are mutually exclusive with
-    it), so the prompt rides alone: the prompt-less default scope already is
-    the uncommitted working tree, which is exactly what a task review needs.
+    ``codex review`` formats its own human-readable report and rejects a
+    custom prompt combined with scope flags, so the JSON contract cannot be
+    delivered over stdout there. Instead ``codex exec`` runs the review as a
+    plain agent turn: the prompt carries the rubric plus an exact result
+    file path, the engine writes the JSON there (full access is fine — the
+    reviewer runs on the host like the agy engine) and the platform reads
+    the file, ignoring stdout.
     """
 
     engine = "codex"
+
+    def _result_path(self, context: _ReviewerRunContext) -> Path:
+        return (
+            context.review_artifact_dir
+            / f"engine_result_r{context.round_number}.json"
+        )
+
+    def _read_report(self, context: _ReviewerRunContext, stdout: str) -> str:
+        path = self._result_path(context)
+        if not path.is_file():
+            raise _ReviewerBackendFailure(
+                "missing_report",
+                f"codex did not write the result file {path}",
+                stdout=stdout,
+            )
+        return path.read_text(encoding="utf-8").strip()
 
     def _build_command(
         self,
@@ -1390,4 +1423,18 @@ class CodexReviewerBackend(_ExternalReviewerBackend):
         prompt: str,
         context: _ReviewerRunContext,
     ) -> list[str]:
-        return [str(binary), "review", prompt]
+        # A stale file from an earlier format attempt must never be mistaken
+        # for this attempt's result.
+        result_path = self._result_path(context)
+        result_path.unlink(missing_ok=True)
+        directive = (
+            f"\n\nWrite the final JSON object to the file {result_path} "
+            "(create or overwrite it; the file must contain only that JSON, "
+            "no Markdown fences). Do not create or modify any other files."
+        )
+        return [
+            str(binary),
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            prompt + directive,
+        ]

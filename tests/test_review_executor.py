@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 
 import pytest
@@ -603,6 +604,14 @@ def _engine_request(
     )
 
 
+def _codex_result_file_from_prompt(prompt: str) -> Path | None:
+    """Extract the codex result-file path the backend embedded in the prompt."""
+    match = re.search(
+        r"Write the final JSON object to the file (\S+?) \(", prompt
+    )
+    return Path(match.group(1)) if match else None
+
+
 def _capturing_runner(
     stdout: str,
     *,
@@ -614,6 +623,12 @@ def _capturing_runner(
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
         captured["cmd"] = list(cmd)
         captured["kwargs"] = dict(kwargs)
+        # codex delivers its report via the result file named in the prompt.
+        if len(cmd) > 1 and cmd[1] == "exec":
+            result_file = _codex_result_file_from_prompt(cmd[-1])
+            if result_file is not None:
+                result_file.parent.mkdir(parents=True, exist_ok=True)
+                result_file.write_text(stdout, encoding="utf-8")
         return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
     return run, captured
@@ -723,30 +738,69 @@ def test_native_engines_omit_empty_reviewer_system_prompt(
     assert "<SYSTEM INSTRUCTIONS>" not in prompt
 
 
-def test_codex_backend_uses_review_uncommitted(
+def test_codex_backend_uses_file_result_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """codex exec writes the JSON to an exact file; stdout is ignored.
+
+    ``codex review`` owns its human-readable output format and cannot carry
+    the JSON contract, so the engine runs via ``exec`` with full access and
+    a result-file directive — mirroring the Pi summary-file contract.
+    """
     monkeypatch.setattr(
         "kuzya.review_executor.shutil.which",
         lambda name: f"/fake/bin/{name}",
     )
-    runner, captured = _capturing_runner(
-        '{"verdict": "changes_requested", "findings": [{"severity": "P1", "file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
+    payload = (
+        '{"verdict": "changes_requested", "findings": [{"severity": "P1", '
+        '"file": "src/app.py", "line": 9, "message": "src/app.py:9 — missing null check"}]}'
     )
+    captured: dict[str, object] = {}
+
+    def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        result_file = _codex_result_file_from_prompt(cmd[-1])
+        assert result_file is not None
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text(payload, encoding="utf-8")
+        return subprocess.CompletedProcess(
+            cmd, 0, "человекочитаемый ответ codex в stdout", ""
+        )
+
     request = _engine_request(tmp_path, "codex")
-    result = _executor(runner).execute(request)
+    result = _executor(run).execute(request)
 
     cmd = captured["cmd"]
     assert cmd[0] == "/fake/bin/codex"
-    assert cmd[1] == "review"
-    # No scope flag: codex rejects PROMPT combined with --uncommitted/--base,
-    # and the prompt-less default scope already is the uncommitted diff.
-    assert "# Code Review: Task #task-1" in cmd[2]
+    assert cmd[1] == "exec"
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    prompt = cmd[-1]
+    assert "# Code Review: Task #task-1" in prompt
+    assert "engine_result_r1.json" in prompt
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     assert result.verdict == VERDICT_CHANGES_REQUESTED
     assert result.findings[0].file == "src/app.py"
     assert result.findings[0].line == 9
     assert result.runtime["engine"] == "codex"
+
+
+def test_codex_backend_missing_result_file_fails_even_with_stale_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No result file written -> missing_report; a stale file never counts."""
+    monkeypatch.setattr(
+        "kuzya.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    # A stale file anywhere must never satisfy the contract: the engine in
+    # this test writes nothing, and each attempt gets a fresh directory.
+    def run(cmd, **kwargs):  # noqa: ANN001 - engine that forgets the file
+        return subprocess.CompletedProcess(cmd, 0, "забыл записать файл", "")
+
+    request = _engine_request(tmp_path, "codex")
+    with pytest.raises(ReviewExecutionError, match="did not write the result file"):
+        _executor(run).execute(request)
 
 
 def test_pi_backend_rejects_prose_with_ambiguous_markers(
@@ -877,6 +931,11 @@ def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, mo
             summary = tmp_path / f'summary-{len(prompts)}.json'
             summary.write_text(reply)
             reply = json.dumps({'status': 'completed', 'summary_path': str(summary)})
+        if engine == 'codex':
+            result_file = _codex_result_file_from_prompt(cmd[-1])
+            if result_file is not None:
+                result_file.parent.mkdir(parents=True, exist_ok=True)
+                result_file.write_text(reply, encoding='utf-8')
         return subprocess.CompletedProcess(cmd, 0, reply, '')
     result = _executor(run).execute(_engine_request(tmp_path, engine))
     assert result.approved
