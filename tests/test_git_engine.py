@@ -286,3 +286,52 @@ def test_commit_push_handler_marks_task_done_without_workflows(
         assert repository.get(task.id).status == "done"
     finally:
         database.dispose()
+
+
+def test_commit_local_skips_ignored_and_missing_paths(temp_git_repo: Path) -> None:
+    """Git's own verdict decides: ignored or nonexistent paths are skipped,
+    the rest commit; one junk entry must not abort the whole commit."""
+    (temp_git_repo / ".gitignore").write_text(".coverage\n", encoding="utf-8")
+    good = temp_git_repo / "src_file.py"
+    good.write_text("print('hi')\n", encoding="utf-8")
+
+    engine = GitEngine(default_workspace=temp_git_repo)
+    result = engine.commit_local(
+        workspace=temp_git_repo,
+        task_id="41",
+        title="junk-tolerant staging",
+        changed_files=[".coverage", "src_file.py", "missing_file.py"],
+    )
+    assert result.success, result.message
+    assert ".coverage" in result.message and "missing_file.py" in result.message
+    committed = subprocess.run(
+        ["git", "show", "--name-only", "--pretty=format:", "HEAD"],
+        cwd=temp_git_repo, check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert committed == ["src_file.py"]
+
+
+def test_commit_local_all_skipped_is_clear_failure_no_fallback(temp_git_repo: Path) -> None:
+    """When every explicitly listed path is git-refused, fail loudly —
+    never silently degrade into staging the whole porcelain status."""
+    (temp_git_repo / ".gitignore").write_text("junk.bin\n", encoding="utf-8")
+    (temp_git_repo / "junk.bin").write_text("x", encoding="utf-8")
+    untracked_other = temp_git_repo / "other.txt"
+    untracked_other.write_text("must not be committed\n", encoding="utf-8")
+
+    engine = GitEngine(default_workspace=temp_git_repo)
+    result = engine.commit_local(
+        workspace=temp_git_repo,
+        task_id="41",
+        title="all junk",
+        changed_files=["junk.bin", "nowhere.py"],
+    )
+    assert not result.success
+    assert "junk.bin" in result.message and "nowhere.py" in result.message
+    # The untracked fallback target stays untouched.
+    assert untracked_other.exists()
+    log = subprocess.run(
+        ["git", "log", "--oneline"], cwd=temp_git_repo,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()
+    assert len(log) == 1  # only the initial commit

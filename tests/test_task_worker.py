@@ -1208,3 +1208,59 @@ def test_task_without_mount_metadata_keeps_profile_policy(
     context = task.meta["execution_context"]
     assert context["project_read_only"] is True
     assert str(profile_ro) in context["readonly_paths"]
+
+
+def test_changed_files_union_survives_junk_round(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """Cross-execution union with gitignore verdict (repository replaces
+    the list per execution; a junk-only round must not wipe the changeset)."""
+    import subprocess
+
+    db, agent_id = setup_developer_agent
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / ".gitignore").write_text(".coverage\n", encoding="utf-8")
+    (repo / "README.md").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    task_repo = TaskRepository(db)
+    task_repo.create(
+        title="Union probe", status="in_progress", workspace="ws",
+        metadata={"requires_review": False},
+    )
+
+    def run_round(changed: list[str]) -> None:
+        task_repo.update(task_repo.list()[0].id, status="in_progress")
+        AgentProfileRepository(db).update(
+            agent_id=agent_id,
+            expected_revision=AgentProfileRepository(db).get_current(agent_id).revision,
+            runner_config={
+                "mode": "success",
+                "summary_text": "round done",
+                "changed_files": changed,
+                "project": str(repo),
+            },
+        )
+        worker = TaskExecutionWorker(
+            database=db,
+            artifact_root=tmp_path / "artifacts",
+            agent_id=agent_id,
+            runner_argv_prefix=fake_runner_argv,
+            workspace_map={"ws": str(repo)},
+        )
+        outcome = worker.step()
+        assert outcome is not None and outcome.status == "completed"
+
+    run_round(["web/db/database.py", "web/main.py"])
+    run_round([".coverage"])  # junk-only round, no real changes
+
+    stored = task_repo.list()[0].meta["changed_files"]
+    assert stored == ["web/db/database.py", "web/main.py"]

@@ -499,6 +499,31 @@ export default function policy(pi) {
   });
 
   // 13. Custom Tool: get_task_logs
+  // Universal API access: everything the REST surface can do, with the
+  // harness-injected backend credential. Covers what the dedicated tools
+  // do not (e.g. editing task metadata such as changed_files).
+  pi.registerTool({
+    name: "call_api",
+    label: "Call Platform API",
+    description: "Direct platform REST API call for anything the dedicated tools do not cover: editing task metadata (e.g. changed_files), deleting knowledge documents, conversations and turns, any endpoint. method is an HTTP verb, path starts with '/', body is the JSON payload for writes. Idempotency: a lost response on a write does not prove failure - read the state back before retrying.",
+    parameters: Type.Object({
+      method: Type.String({ description: "HTTP method: GET, POST, PATCH, PUT or DELETE" }),
+      path: Type.String({ description: "API path starting with '/', e.g. '/tasks/41'" }),
+      body: Type.Optional(Type.Any({ description: "JSON-serializable request body for writes" })),
+    }),
+    async execute(toolCallId, params) {
+      const method = String(params.method || "").trim().toUpperCase();
+      if (!["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method)) {
+        return toolResult({ status: "failed", error: `unsupported method: ${method}` });
+      }
+      const path = String(params.path || "").trim();
+      if (!path.startsWith("/")) {
+        return toolResult({ status: "failed", error: "path must start with '/'" });
+      }
+      return toolResult(await backendRequest(method, path, params.body));
+    }
+  });
+
   pi.registerTool({
     name: "get_task_logs",
     label: "Get Task Logs",

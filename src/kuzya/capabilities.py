@@ -262,6 +262,16 @@ _TOOL_CAPABILITIES: tuple[Capability, ...] = (
         result_statuses=("applied", "failed", "unknown"), deferred=True,
         doc="task-lifecycle.md", summary="subscribe the originating conversation to a task outcome or cancel before queuing",
     ) for name, method in (("subscribe_task", "POST"), ("unsubscribe_task", "DELETE"))),
+    _tool(
+        "call_api",
+        # The universal tool carries universal authority: its execution
+        # grant is admin-equivalent by design ("*", the same marker the
+        # permission model uses for unrestricted principals).
+        action="*",
+        result_statuses=("ok", "applied", "failed", "unknown"),
+        doc="tools-and-api.md",
+        summary="direct REST API call to any endpoint for cases the dedicated tools do not cover (task metadata, conversations, turns)",
+    ),
     # -- API-backed reads -------------------------------------------------
     _tool(
         "list_tasks",

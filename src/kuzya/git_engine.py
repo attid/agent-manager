@@ -112,6 +112,29 @@ class GitEngine:
                 message="Нет файлов для коммита в рабочей директории.",
             )
 
+        skipped: list[str] = []
+        if changed_files:
+            # An explicit list must never silently degrade into the porcelain
+            # fallback: paths git refuses (ignored or matching nothing) are
+            # skipped by git's own verdict, the rest are staged. One junk
+            # entry no longer aborts the whole commit.
+            files_to_stage, skipped = self._split_stageable(ws, files_to_stage)
+            if skipped:
+                logger.warning(
+                    "commit_local skipped paths by git verdict: %s", skipped
+                )
+            if not files_to_stage:
+                return GitEngineResult(
+                    success=False,
+                    action="commit_local",
+                    message=(
+                        "Ни один путь не годен для стейджинга "
+                        "(пропущено по вердикту git: "
+                        + ", ".join(skipped)
+                        + ")."
+                    ),
+                )
+
         # 1. Explicitly stage files (NEVER git add .)
         stage_args = ["git", "add", "--"] + files_to_stage
         stage_proc = self._run_cmd(stage_args, cwd=ws)
@@ -122,6 +145,11 @@ class GitEngine:
                 action="commit_local",
                 message=f"Ошибка добавления файлов в индекс: {stage_proc.stderr.strip()}",
             )
+        skipped_note = (
+            f" Пропущено по вердикту git (игнор/отсутствует): {', '.join(skipped)}."
+            if skipped
+            else ""
+        )
 
         # 2. Format commit message
         if custom_message:
@@ -154,10 +182,52 @@ class GitEngine:
         return GitEngineResult(
             success=True,
             action="commit_local",
-            message=f"Коммит {commit_hash[:8] if commit_hash else ''} успешно создан в ветке {branch}.",
+            message=(
+                f"Коммит {commit_hash[:8] if commit_hash else ''} успешно создан в ветке {branch}."
+                + skipped_note
+            ),
             commit_hash=commit_hash,
             branch=branch,
         )
+
+    def _split_stageable(
+        self, ws: Path, files: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """Split paths into stageable and skipped, by git's own verdict.
+
+        A path is skipped when the project's ``.gitignore`` ignores it or
+        when it matches nothing at all (not on disk and not tracked) —
+        exactly the two conditions under which ``git add`` aborts. Deleted
+        but tracked paths stay stageable: ``git add`` records the deletion.
+        Any git failure fails open (everything stageable) so a broken
+        helper never blocks a commit harder than today.
+        """
+        try:
+            check = subprocess.run(
+                ["git", "check-ignore", "--stdin"],
+                cwd=ws,
+                input="\n".join(files),
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            ignored = set(check.stdout.splitlines()) if check.returncode == 0 else set()
+        except Exception as exc:
+            logger.warning("check-ignore failed, staging without filter: %s", exc)
+            return list(files), []
+
+        tracked_proc = self._run_cmd(["git", "ls-files", "--", *files], cwd=ws)
+        tracked = set(tracked_proc.stdout.splitlines()) if tracked_proc.returncode == 0 else set()
+
+        stageable, skipped = [], []
+        for path in files:
+            if path in ignored:
+                skipped.append(path)
+            elif not (ws / path).exists() and path not in tracked:
+                skipped.append(path)
+            else:
+                stageable.append(path)
+        return stageable, skipped
 
     def rollback(
         self,

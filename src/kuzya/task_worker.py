@@ -1018,6 +1018,17 @@ class TaskExecutionWorker:
                     })
                 runner_result["artifacts"] = collected_artifacts
 
+                # Cross-execution union: a fresh execution result replaces
+                # the stored list wholesale (repository contract), which let
+                # a "no code changes" round wipe a previously accumulated
+                # changeset. Union with the stored list instead, filtered by
+                # the workspace's own .gitignore verdict so ignored entries
+                # (e.g. coverage caches) never enter the bookkeeping.
+                changed_files = self._merge_changed_files(
+                    previous=list((task.meta or {}).get("changed_files") or []),
+                    incoming=changed_files,
+                    project_dir=project_dir,
+                )
                 updated_task = self._repository.complete_execution(
                     task.id,
                     status=task_status,
@@ -1102,6 +1113,39 @@ class TaskExecutionWorker:
                 # service's stable authentication mode.
                 if execution_grant is not None and self.permissions is not None:
                     self.permissions.revoke(execution_grant.token)
+
+    @staticmethod
+    def _merge_changed_files(
+        previous: list[str], incoming: list[str], project_dir: Path
+    ) -> list[str]:
+        """Ordered union of stored and fresh changed files, gitignore-filtered.
+
+        The filter asks git itself (``check-ignore``) against the task
+        workspace; anything the project ignores never enters the list. On
+        any git failure the union is returned unfiltered — fail-open, the
+        staging step re-checks anyway.
+        """
+        merged = list(dict.fromkeys([*previous, *incoming]))
+        if not merged:
+            return []
+        try:
+            proc = subprocess.run(
+                ["git", "check-ignore", "--stdin"],
+                cwd=project_dir,
+                input="\n".join(merged),
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            if proc.returncode == 0:
+                ignored = set(proc.stdout.splitlines())
+                merged = [path for path in merged if path not in ignored]
+        except Exception as exc:
+            logger.warning(
+                "check-ignore failed for changed_files merge, keeping unfiltered: %s",
+                exc,
+            )
+        return merged
 
     def _run_review_cycle(
         self,

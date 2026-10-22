@@ -130,6 +130,10 @@ def owner_for_grant(grant: "ExecutionGrant | None") -> str:
 #: its tools actually perform. T01/T05 can add an action for a new
 #: HTTP-backed tool.
 ACTIONS_FOR_TOOLS: Mapping[str, str] = {
+    # The universal tool carries universal authority: an execution grant
+    # holding it is admin-equivalent, exactly what the "*" marker means
+    # everywhere else in this model.
+    "call_api": ADMIN_RESOURCE,
     "list_tasks": TASKS_READ,
     "get_task": TASKS_READ,
     "get_task_logs": TASKS_READ,
