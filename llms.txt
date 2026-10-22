@@ -39,6 +39,9 @@ registered Pi JS tools.
 ## Handbook
 
 - [Handbook index](docs/handbook/README.md): scope, discovery and verification.
+- [Centralized toolkits](docs/toolkits/README.md): how to provision
+  shared read-only tools (e.g. Playwright) for sandboxed agents without
+  platform code changes; deployed skill source lives there too.
 - [Objects and links](docs/handbook/objects.md): Task, Conversation, Message,
   Turn, AgentProfile, ConversationRuntime, Operation.
 - [Workspaces and routing](docs/handbook/workspaces-and-routing.md): workspace
