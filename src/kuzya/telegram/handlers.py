@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from .client import BackendClient
 from .config import TelegramConfig
+from .messenger import rich_edit_message
 from .keyboards import (
     mode_keyboard,
     task_display_number,
@@ -393,28 +394,38 @@ async def on_select_task(
     await _bind_task_conversation(task, callback, storage, client)
     meta = dict(task.get("metadata") or {})
 
-    clar_info = ""
     clar = meta.get("clarification") or dict(meta.get("provenance") or {}).get("clarification") or {}
-    if task.get("status") == "waiting_for_input" and clar:
-        clar_info = (
-            f"\n\n⚠️ <b>Вопрос от агента:</b>\n"
-            f"<b>{html.escape(clar.get('title') or '')}</b>\n"
-            f"{html.escape(clar.get('description') or '')}\n\n"
-            f"❓ <b>Вопрос:</b> {html.escape(clar.get('question') or '')}\n"
-        )
 
-    card_text = (
-        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
-        f"Название: <b>{html.escape(task['title'])}</b>\n"
-        f"Статус: <code>{html.escape(task['status'])}</code>\n"
-        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
-        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}"
-        f"{clar_info}\n\n"
-        "<i>Контекст задачи выбран. Сообщения направляются по этой задаче.</i>"
-    )
-    await callback.message.edit_text(
-        card_text,
-        parse_mode="HTML",
+    # Markdown card through the rich editor (~16k capacity) with a truncated
+    # plain-text fallback; long descriptions are capped so the whole card
+    # always fits the rich limit.
+    description = task.get("description") or ""
+    if len(description) > 14000:
+        description = description[:14000] + "\n\n… (описание сокращено)"
+    card_lines = [
+        f"📌 **Задача #{task_display_number(task)}**",
+        f"Название: **{task['title']}**",
+        f"Статус: `{task['status']}`",
+        f"Пространство: {task.get('workspace') or '—'}",
+        "",
+        f"Описание:\n{description or '_(без описания)'}",
+    ]
+    if task.get("status") == "waiting_for_input" and clar:
+        card_lines += [
+            "",
+            "⚠️ **Вопрос от агента:**",
+            f"**{clar.get('title') or ''}**",
+            str(clar.get("description") or ""),
+            "",
+            f"❓ **Вопрос:** {clar.get('question') or ''}",
+        ]
+    card_lines += [
+        "",
+        "_Контекст задачи выбран. Сообщения направляются по этой задаче._",
+    ]
+    await rich_edit_message(
+        callback.message,
+        "\n".join(card_lines),
         reply_markup=task_card_keyboard(task["id"], task["status"]),
     )
     await callback.answer("Контекст задачи выбран")
@@ -552,20 +563,23 @@ async def on_set_status(
     _, task_id, new_status = callback.data.split(":")
     task = await client.patch_task(task_id, status=new_status)
 
+    description = task.get("description") or ""
+    if len(description) > 14000:
+        description = description[:14000] + "\n\n… (описание сокращено)"
     card_text = (
-        f"📌 <b>Задача #{html.escape(task_display_number(task))}</b>\n"
-        f"Название: <b>{html.escape(task['title'])}</b>\n"
-        f"Статус: <code>{html.escape(task['status'])}</code>\n"
-        f"Пространство: {html.escape(task.get('workspace') or '—')}\n\n"
-        f"Описание:\n{html.escape(task.get('description') or '') or '<i>(без описания)</i>'}\n\n"
-        f"✅ <i>Статус обновлен на: {new_status}</i>"
+        f"📌 **Задача #{task_display_number(task)}**\n"
+        f"Название: **{task['title']}**\n"
+        f"Статус: `{task['status']}`\n"
+        f"Пространство: {task.get('workspace') or '—'}\n\n"
+        f"Описание:\n{description or '_(без описания)'}\n\n"
+        f"✅ _Статус обновлен на: {new_status}_"
     )
-    await callback.message.edit_text(
+    await rich_edit_message(
+        callback.message,
         card_text,
-        parse_mode="HTML",
         reply_markup=task_card_keyboard(task["id"], task["status"]),
     )
-    await callback.answer(f"Статус изменен на: {new_status}")
+    await callback.answer(f"Статус изменен на {new_status}")
 
 
 @router.callback_query(F.data.startswith("commit_local:"))

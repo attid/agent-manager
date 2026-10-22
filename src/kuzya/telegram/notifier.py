@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import logging
 import math
 from typing import Any
@@ -13,6 +12,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from kuzya.storage import Task
 from kuzya.task_worker import TaskOutcome
+
+from .messenger import send_rich_or_plain
 
 from .keyboards import task_display_number
 
@@ -97,12 +98,25 @@ def build_task_outcome_keyboard(
 
 
 def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
-    """Format an informative, safe HTML message for a task outcome."""
-    max_summary_length = 2000
-    max_error_length = 1500
+    """Format an informative Markdown message for a task outcome.
 
-    title_safe = html.escape(task.title)
+    Markdown is delivered through the rich sender (~16k capacity) with a
+    truncated plain-text fallback, so long summaries survive far more often
+    than in the old 4096 HTML bubbles.
+    """
+    max_summary_length = 12000
+    max_error_length = 12000
+
+    title = task.title
     duration_str = format_duration_ms(outcome.duration_ms)
+
+    def _files_part() -> str:
+        if not outcome.changed_files:
+            return ""
+        file_lines = [f"• `{f}`" for f in outcome.changed_files[:15]]
+        if len(outcome.changed_files) > 15:
+            file_lines.append(f"_...и еще {len(outcome.changed_files) - 15} файлов_")
+        return "\n\n**Изменённые файлы:**\n" + "\n".join(file_lines)
 
     if outcome.status == "waiting_for_input":
         meta = dict(getattr(task, "meta", None) or getattr(task, "metadata", None) or {})
@@ -113,67 +127,50 @@ def format_task_outcome_message(task: Task, outcome: TaskOutcome) -> str:
         clar_q = clar.get("question") or "Как поступить?"
 
         return (
-            f"⚠️ <b>Агенту требуется уточнение по задаче #{html.escape(task_display_number(task))}!</b>\n\n"
-            f"📌 <b>{html.escape(clar_title)}</b>\n\n"
-            f"{html.escape(clar_desc)}\n\n"
-            f"❓ <b>Вопрос:</b> {html.escape(clar_q)}\n\n"
-            f"<i>Ответьте на это сообщение текстом или голосом, чтобы агент продолжил выполнение.</i>"
+            f"⚠️ **Агенту требуется уточнение по задаче #{task_display_number(task)}!**\n\n"
+            f"📌 **{clar_title}**\n\n"
+            f"{clar_desc}\n\n"
+            f"❓ **Вопрос:** {clar_q}\n\n"
+            "_Ответьте на это сообщение текстом или голосом, чтобы агент продолжил выполнение._"
         )
     elif outcome.status == "ready_to_commit":
-        summary_raw = outcome.summary or "Изменения проверены и готовы к фиксации."
-        if len(summary_raw) > max_summary_length:
-            summary_raw = summary_raw[:max_summary_length] + "...\n<i>(текст обрезан)</i>"
-        summary_safe = html.escape(summary_raw)
-
-        files_part = ""
-        if outcome.changed_files:
-            file_lines = [f"• <code>{html.escape(f)}</code>" for f in outcome.changed_files[:15]]
-            if len(outcome.changed_files) > 15:
-                file_lines.append(f"<i>...и еще {len(outcome.changed_files) - 15} файлов</i>")
-            files_part = "\n\n<b>Изменённые файлы:</b>\n" + "\n".join(file_lines)
+        summary = outcome.summary or "Изменения проверены и готовы к фиксации."
+        if len(summary) > max_summary_length:
+            summary = summary[:max_summary_length] + "\n… (текст обрезан)"
 
         return (
-            f"🔍 <b>Задача #{html.escape(task_display_number(task))} ожидает подтверждения!</b>\n"
-            f"<b>Название:</b> {title_safe}\n"
-            f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
-            f"⏱ <b>Время:</b> {duration_str}\n\n"
-            f"<b>Результат:</b>\n{summary_safe}"
-            f"{files_part}\n\n"
-            f"<i>В рабочей директории есть изменения. Выберите действие ниже:</i>"
+            f"🔍 **Задача #{task_display_number(task)} ожидает подтверждения!**\n"
+            f"**Название:** {title}\n"
+            f"**Пространство:** {task.workspace or 'default'}\n"
+            f"⏱ **Время:** {duration_str}\n\n"
+            f"**Результат:**\n{summary}"
+            f"{_files_part()}\n\n"
+            "_В рабочей директории есть изменения. Выберите действие ниже:_"
         )
     elif outcome.status == "completed":
-        summary_raw = outcome.summary or "Задача успешно выполнена."
-        if len(summary_raw) > max_summary_length:
-            summary_raw = summary_raw[:max_summary_length] + "...\n<i>(текст обрезан)</i>"
-        summary_safe = html.escape(summary_raw)
-
-        files_part = ""
-        if outcome.changed_files:
-            file_lines = [f"• <code>{html.escape(f)}</code>" for f in outcome.changed_files[:15]]
-            if len(outcome.changed_files) > 15:
-                file_lines.append(f"<i>...и еще {len(outcome.changed_files) - 15} файлов</i>")
-            files_part = "\n\n<b>Изменённые файлы:</b>\n" + "\n".join(file_lines)
+        summary = outcome.summary or "Задача успешно выполнена."
+        if len(summary) > max_summary_length:
+            summary = summary[:max_summary_length] + "\n… (текст обрезан)"
 
         return (
-            f"✅ <b>Задача #{html.escape(task_display_number(task))} завершена!</b>\n"
-            f"<b>Название:</b> {title_safe}\n"
-            f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
-            f"⏱ <b>Время:</b> {duration_str}\n\n"
-            f"<b>Результат:</b>\n{summary_safe}"
-            f"{files_part}"
+            f"✅ **Задача #{task_display_number(task)} завершена!**\n"
+            f"**Название:** {title}\n"
+            f"**Пространство:** {task.workspace or 'default'}\n"
+            f"⏱ **Время:** {duration_str}\n\n"
+            f"**Результат:**\n{summary}"
+            f"{_files_part()}"
         )
     else:
-        error_raw = outcome.error or "Неизвестная ошибка выполнения."
-        if len(error_raw) > max_error_length:
-            error_raw = error_raw[:max_error_length] + "...\n<i>(текст обрезан)</i>"
-        error_safe = html.escape(error_raw)
+        error = outcome.error or "Неизвестная ошибка выполнения."
+        if len(error) > max_error_length:
+            error = error[:max_error_length] + "\n… (текст обрезан)"
 
         return (
-            f"❌ <b>Задача #{html.escape(task_display_number(task))} завершилась с ошибкой!</b>\n"
-            f"<b>Название:</b> {title_safe}\n"
-            f"<b>Пространство:</b> {html.escape(task.workspace or 'default')}\n"
-            f"⏱ <b>Время:</b> {duration_str}\n\n"
-            f"<b>Ошибка:</b>\n<pre>{error_safe}</pre>"
+            f"❌ **Задача #{task_display_number(task)} завершилась с ошибкой!**\n"
+            f"**Название:** {title}\n"
+            f"**Пространство:** {task.workspace or 'default'}\n"
+            f"⏱ **Время:** {duration_str}\n\n"
+            f"**Ошибка:**\n```\n{error}\n```"
         )
 
 
@@ -220,11 +217,8 @@ class TelegramNotifier:
         keyboard = build_task_outcome_keyboard(task.id, outcome.status)
 
         try:
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="HTML",
-                reply_markup=keyboard,
+            await send_rich_or_plain(
+                self.bot, chat_id, text, reply_markup=keyboard
             )
             logger.info(
                 "Task outcome notification sent to chat_id=%s for task %s (status=%s)",

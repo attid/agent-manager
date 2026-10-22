@@ -396,7 +396,7 @@ def test_format_task_outcome_message_uses_human_duration(
     )
 
     msg = format_task_outcome_message(task, outcome)
-    assert "⏱ <b>Время:</b> 3 мин 30 сек" in msg
+    assert "⏱ **Время:** 3 мин 30 сек" in msg
     assert "209.8" not in msg
 
 
@@ -419,10 +419,12 @@ def test_format_task_outcome_message_success(migrated_db: Path) -> None:
     assert "✅" in msg
     assert f"Задача #{task.number} завершена!" in msg
     assert task.id not in msg
-    assert "&lt;sanitized&gt;" in msg
-    assert "&lt;b&gt;sanitized&lt;/b&gt;" in msg
-    assert "<code>src/app.py</code>" in msg
-    assert "⏱ <b>Время:</b> 5 сек" in msg
+    # Markdown transport: content passes verbatim; no HTML entities appear.
+    assert "Add <sanitized> HTML support" in msg
+    assert "&lt;" not in msg
+    assert "<b>sanitized</b>" in msg
+    assert "`src/app.py`" in msg
+    assert "⏱ **Время:** 5 сек" in msg
 
     kb = build_task_outcome_keyboard(task.id)
     assert kb.inline_keyboard[0][0].callback_data == f"select_task:{task.id}"
@@ -446,8 +448,9 @@ def test_format_task_outcome_message_failure(migrated_db: Path) -> None:
     assert "❌" in msg
     assert f"Задача #{task.number} завершилась с ошибкой!" in msg
     assert task.id not in msg
-    assert "&lt;8080&gt;" in msg
-    assert "pre>" in msg
+    assert "Port <8080> unreachable" in msg
+    assert "&lt;" not in msg
+    assert "```" in msg
 
 
 @sync_test
@@ -469,11 +472,12 @@ async def test_telegram_notifier_async_send(migrated_db: Path) -> None:
 
     await notifier.notify_async(task, outcome)
 
-    bot_mock.send_message.assert_awaited_once()
-    kwargs = bot_mock.send_message.await_args.kwargs
+    # Notifications now go through the rich sender first.
+    bot_mock.send_rich_message.assert_awaited_once()
+    assert bot_mock.send_rich_message.await_args.kwargs["chat_id"] == 12345678
+    kwargs = bot_mock.send_rich_message.await_args.kwargs
     assert kwargs["chat_id"] == 12345678
-    assert "✅" in kwargs["text"]
-    assert kwargs["parse_mode"] == "HTML"
+    assert "✅" in kwargs["rich_message"].markdown
 
 
 @sync_test
@@ -495,8 +499,10 @@ async def test_telegram_notifier_fallback_to_default_chat_id(migrated_db: Path) 
 
     await notifier.notify_async(task, outcome)
 
-    bot_mock.send_message.assert_awaited_once()
-    assert bot_mock.send_message.await_args.kwargs["chat_id"] == 999888
+    bot_mock.send_rich_message.assert_awaited_once()
+    kwargs = bot_mock.send_rich_message.await_args.kwargs
+    assert kwargs["chat_id"] == 999888
+    assert "❌" in kwargs["rich_message"].markdown
 
 
 @sync_test
@@ -510,11 +516,14 @@ async def test_telegram_notifier_suppresses_bot_errors(migrated_db: Path) -> Non
     outcome = TaskOutcome(task_id=task.id, status="completed")
 
     bot_mock = AsyncMock()
+    # Both transports fail: rich sender and its plain fallback.
+    bot_mock.send_rich_message.side_effect = RuntimeError("Telegram Network Timeout")
     bot_mock.send_message.side_effect = RuntimeError("Telegram Network Timeout")
 
     notifier = TelegramNotifier(bot=bot_mock)
     # Should not raise exception
     await notifier.notify_async(task, outcome)
+    bot_mock.send_rich_message.assert_awaited_once()
     bot_mock.send_message.assert_awaited_once()
 
 
@@ -625,9 +634,9 @@ def test_format_task_outcome_message_ready_to_commit(migrated_db: Path) -> None:
     msg = format_task_outcome_message(task, outcome)
     assert "🔍" in msg
     assert f"Задача #{task.number} ожидает подтверждения!" in msg
-    assert "<code>src/main.py</code>" in msg
-    assert "<code>src/utils.py</code>" in msg
-    assert "⏱ <b>Время:</b> 4 сек" in msg
+    assert "`src/main.py`" in msg
+    assert "`src/utils.py`" in msg
+    assert "⏱ **Время:** 4 сек" in msg
     assert "Выберите действие ниже:" in msg
 
     kb = build_task_outcome_keyboard(task.id, status="ready_to_commit")

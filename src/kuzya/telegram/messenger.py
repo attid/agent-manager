@@ -259,6 +259,74 @@ def build_delivery_parts(
     return parts, file_targets
 
 
+#: Rich-message edits carry up to ~16k characters; the plain-text fallback
+#: is capped under Telegram's 4096 transport limit with an explicit marker.
+RICH_TEXT_LIMIT = 16384
+PLAIN_TEXT_FALLBACK_LIMIT = 4000
+
+
+def plain_text_fallback(text: str, *, limit: int = PLAIN_TEXT_FALLBACK_LIMIT) -> str:
+    """Truncate text for the plain-text transport with an explicit marker."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n\n… (текст сокращён для отправки)"
+
+
+async def rich_edit_message(
+    message: Any, text: str, *, reply_markup: Any = None
+) -> bool:
+    """Edit a bot message: rich Markdown first (up to ~16k), plain second.
+
+    Returns ``True`` when some variant reached Telegram. The plain fallback
+    is truncated to the classic 4096 transport limit.
+    """
+    bot = message.bot
+    chat_id = message.chat.id
+    message_id = message.message_id
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            rich_message=InputRichMessage(markdown=text),
+            reply_markup=reply_markup,
+        )
+        return True
+    except Exception as rich_error:
+        logger.debug("rich edit failed, falling back to plain: %s", rich_error)
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=plain_text_fallback(text),
+            reply_markup=reply_markup,
+        )
+        return True
+    except Exception as plain_error:
+        logger.warning("plain edit failed too: %s", plain_error)
+        return False
+
+
+async def send_rich_or_plain(
+    bot: Bot, chat_id: int, text: str, *, reply_markup: Any = None
+) -> None:
+    """Send a message: rich Markdown first, truncated plain text second."""
+    try:
+        await bot.send_rich_message(
+            chat_id=chat_id,
+            rich_message=InputRichMessage(markdown=text),
+            reply_markup=reply_markup,
+        )
+        return
+    except Exception as rich_error:
+        logger.debug("rich send failed, falling back to plain: %s", rich_error)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=plain_text_fallback(text),
+        reply_markup=reply_markup,
+    )
+
+
 def find_task_for_conversation(database: Database, conversation_id: str) -> Task | None:
     """Return the most recently updated task bound to a conversation."""
     with database.session() as session:

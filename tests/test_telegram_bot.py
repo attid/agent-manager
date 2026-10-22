@@ -339,10 +339,15 @@ async def test_task_selection_and_status_patch(
     )
     task_id = created["id"]
 
-    # Select task callback
+    # Select task callback; the card now renders through the rich editor
+    # (bot.edit_message_text with rich_message), not the old message.edit_text.
     cb_select = _make_callback_query(f"select_task:{task_id}", user=user)
     await on_select_task(cb_select, storage=user_storage, client=test_backend_client)
-    cb_select.message.edit_text.assert_awaited_once()
+    cb_select.message.bot.edit_message_text.assert_awaited_once()
+    select_markdown = (
+        cb_select.message.bot.edit_message_text.await_args.kwargs["rich_message"].markdown
+    )
+    assert "Задача для переключения статуса" in select_markdown
 
     state = user_storage.get_user_state(user.id)
     assert state.mode == "task"
@@ -352,7 +357,11 @@ async def test_task_selection_and_status_patch(
     # Patch status to in_progress
     cb_status = _make_callback_query(f"set_status:{task_id}:in_progress", user=user)
     await on_set_status(cb_status, client=test_backend_client)
-    cb_status.message.edit_text.assert_awaited_once()
+    cb_status.message.bot.edit_message_text.assert_awaited_once()
+    status_markdown = (
+        cb_status.message.bot.edit_message_text.await_args.kwargs["rich_message"].markdown
+    )
+    assert "Статус обновлен на: in_progress" in status_markdown
 
     updated = await test_backend_client.get_task(task_id)
     assert updated["status"] == "in_progress"
@@ -445,12 +454,10 @@ async def test_task_list_tabs_show_live_status_counts(
 
 
 @sync_test
-async def test_task_card_escapes_html_from_task_content(
+async def test_task_card_markdown_carries_task_content_verbatim(
     user_storage: UserStateStorage,
     test_backend_client: BackendClient,
 ) -> None:
-    from html.parser import HTMLParser
-
     created = await test_backend_client.create_task(
         title="Research <name> & <script>example</script>",
         description="Inspect /tmp/<name> && compare a < b.",
@@ -458,23 +465,20 @@ async def test_task_card_escapes_html_from_task_content(
     )
     callback = _make_callback_query(f"select_task:{created['id']}")
     await on_select_task(callback, storage=user_storage, client=test_backend_client)
-    text = callback.message.edit_text.call_args.args[0]
-    assert "Research &lt;name&gt; &amp; &lt;script&gt;example&lt;/script&gt;" in text
-    assert "Inspect /tmp/&lt;name&gt; &amp;&amp; compare a &lt; b." in text
+    # Markdown cards pass content verbatim to the rich editor: no HTML
+    # parsing happens on Telegram's side, so angle brackets are inert by
+    # construction instead of being escaped.
+    markdown = (
+        callback.message.bot.edit_message_text.await_args.kwargs["rich_message"].markdown
+    )
+    assert "Research <name> & <script>example</script>" in markdown
+    assert "Inspect /tmp/<name> && compare a < b." in markdown
+    assert "<b>" not in markdown  # the card itself is markdown, not HTML
 
-    class CardParser(HTMLParser):
-        def handle_starttag(self, tag, attrs):
-            assert tag in {"b", "code", "i"}
-
-    CardParser().feed(text)
     callback.answer.assert_awaited_once()
     state = user_storage.get_user_state(callback.from_user.id)
     assert state.active_task_id == created["id"]
     assert state.active_conversation_id is not None
-
-    talk = _make_callback_query(f"talk_task:{created['id']}")
-    await on_talk_task(talk, storage=user_storage, client=test_backend_client)
-    CardParser().feed(talk.message.answer.call_args.args[0])
 
 
 @sync_test
