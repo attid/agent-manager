@@ -103,8 +103,16 @@ age as `last_activity_sec`. Missing event files degrade to elapsed-only
 entries with `session_available=false`; they are not errors. The route uses
 `tasks.read` with no resource, so a task-scoped execution credential cannot
 enumerate other work. The Telegram `/live` command and the
-`⚡ Исполнители` category button render the same payload and redraw the
-message in place on refresh.
+`⚡ Исполнители` category button render the same payload. `/live` sends it
+through the unified rich sender (`send_rich_or_plain`), and refresh edits the
+existing message in place (`rich_edit_message`); both fall back to truncated
+plain text if the rich transport is rejected. The rendered text has a hard
+budget of the rich transport capacity: the first 15 entries keep full session
+counters, later entries collapse to identity/agent/elapsed lines, long titles,
+agent ids and tool names are clipped with an ellipsis, and rows that still do
+not fit are replaced by an explicit remaining count. The queue footer is
+always kept, so a long list can never hide who is working or how much work is
+queued.
 
 ## MCP transport adapter
 

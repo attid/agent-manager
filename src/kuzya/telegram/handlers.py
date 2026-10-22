@@ -19,7 +19,11 @@ from aiogram.types import (
 
 from .client import BackendClient
 from .config import TelegramConfig
-from .messenger import rich_edit_message
+from .messenger import (
+    RICH_TEXT_LIMIT,
+    rich_edit_message,
+    send_rich_or_plain,
+)
 from .keyboards import (
     category_list_filters,
     execution_monitor_keyboard,
@@ -198,63 +202,172 @@ def _format_tokens(tokens: Any) -> str | None:
     return f"{int(total)} токенов"
 
 
+#: Above this many running entries the monitor collapses session details.
+#: The first entries keep the full picture; the rest stay one compact line
+#: each so the owner can still see who is working.
+MONITOR_FULL_DETAIL_LIMIT = 15
+
+#: Per-field caps for the monitor. Titles, agent ids and tool names come from
+#: task data and can be arbitrarily long; clipping them keeps one row bounded
+#: while preserving the worker identity (number and agent prefix).
+MONITOR_LABEL_LIMIT = 120
+MONITOR_AGENT_LIMIT = 40
+MONITOR_TOOL_LIMIT = 60
+
+
+def _clip_monitor_text(value: Any, limit: int) -> str:
+    """Clip one field to ``limit`` characters with an explicit ellipsis."""
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
+def _monitor_entry_parts(item: dict[str, Any]) -> list[str]:
+    """Identity, agent and elapsed time of one running entry.
+
+    These facts are always rendered, including for collapsed rows: the
+    monitor must never hide *who* is working, only optional live counters.
+    """
+    is_operation = item.get("entry_type") == "operation" or bool(
+        item.get("operation_id")
+    )
+    number = item.get("target_number") if is_operation else item.get("number")
+    if is_operation:
+        label = item.get("kind_label") or item.get("operation_kind") or "операция"
+    else:
+        label = item.get("title") or "задача"
+    parts = [
+        f"#{number}" if number is not None else "?",
+        _clip_monitor_text(label, MONITOR_LABEL_LIMIT),
+    ]
+    agent = item.get("agent_id")
+    if agent:
+        parts.append(f"агент {_clip_monitor_text(agent, MONITOR_AGENT_LIMIT)}")
+    parts.append(_format_duration(item.get("elapsed")))
+    return parts
+
+
+def _format_monitor_entry(item: dict[str, Any], *, detailed: bool) -> str:
+    """Render one entry as a full or collapsed monitor line."""
+    parts = _monitor_entry_parts(item)
+    if detailed and item.get("session_available"):
+        tools = item.get("tools_used")
+        if tools is not None:
+            parts.append(
+                f"{tools} {_plural_ru(int(tools), 'инструмент', 'инструмента', 'инструментов')}"
+            )
+        tokens_text = _format_tokens(item.get("tokens"))
+        if tokens_text:
+            cost = item.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                tokens_text += f" (${cost:.2f})"
+            parts.append(tokens_text)
+        activity = item.get("last_activity_sec")
+        if activity is not None:
+            parts.append(f"активность {activity}с назад")
+        current = item.get("current_tool")
+        if current:
+            parts.append(
+                f"сейчас: {_clip_monitor_text(current, MONITOR_TOOL_LIMIT)}"
+            )
+    return " · ".join(parts)
+
+
+def _monitor_remaining_line(remaining: int, total: int) -> str:
+    """Explicit summary for entries that did not fit the transport budget."""
+    noun = _plural_ru(remaining, "исполнитель", "исполнителя", "исполнителей")
+    return f"…и ещё {remaining} {noun} (всего {total})"
+
+
+def _render_monitor(
+    prefix: list[str],
+    suffix: list[str],
+    rows: list[str],
+    summary: str | None,
+) -> str:
+    """Assemble the monitor with an optional collapse summary."""
+    lines = list(prefix)
+    lines.extend(rows)
+    if summary is not None:
+        if rows:
+            lines.append("")
+        lines.append(summary)
+    lines.extend(suffix)
+    return "\n".join(lines)
+
+
 def format_execution_monitor(payload: dict[str, Any]) -> str:
     """Render the monitor payload as a compact Telegram message.
 
     The session age is labelled as activity, never as a stall verdict: a
     model can think without emitting an event for a long time.
+
+    The message has a hard character budget: the rich transport capacity
+    (``RICH_TEXT_LIMIT``). The first ``MONITOR_FULL_DETAIL_LIMIT`` entries
+    carry full session counters, later entries collapse to identity/agent/
+    elapsed, long fields are clipped, and rows that still do not fit are
+    replaced by an explicit remaining count. The queue footer is always
+    rendered; it is never sacrificed to an unbounded worker list.
     """
     running = payload.get("running") or []
-    lines = ["⚡ Исполнители", ""]
-    if not running:
-        lines.append("Сейчас никто не выполняется.")
-    for item in running:
-        is_operation = item.get("entry_type") == "operation" or bool(
-            item.get("operation_id")
-        )
-        number = item.get("target_number") if is_operation else item.get("number")
-        if is_operation:
-            label = item.get("kind_label") or item.get("operation_kind") or "операция"
-        else:
-            label = item.get("title") or "задача"
-        parts = [f"#{number}" if number is not None else "?", str(label)]
-        agent = item.get("agent_id")
-        if agent:
-            parts.append(f"агент {agent}")
-        parts.append(_format_duration(item.get("elapsed")))
-        if item.get("session_available"):
-            tools = item.get("tools_used")
-            if tools is not None:
-                parts.append(
-                    f"{tools} {_plural_ru(int(tools), 'инструмент', 'инструмента', 'инструментов')}"
-                )
-            tokens_text = _format_tokens(item.get("tokens"))
-            if tokens_text:
-                cost = item.get("cost")
-                if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-                    tokens_text += f" (${cost:.2f})"
-                parts.append(tokens_text)
-            activity = item.get("last_activity_sec")
-            if activity is not None:
-                parts.append(f"активность {activity}с назад")
-            current = item.get("current_tool")
-            if current:
-                parts.append(f"сейчас: {current}")
-        lines.append(" · ".join(parts))
+    prefix = ["⚡ Исполнители", ""]
 
     queues = payload.get("queues") or {}
-    lines.append("")
-    lines.append(
+    suffix = [
+        "",
         "⏳ В очереди: "
         f"ходы {int(queues.get('turns', 0))} · "
         f"операции {int(queues.get('operations', 0))} · "
         f"подписки {int(queues.get('subscriptions', 0))} · "
-        f"задачи без клейма {int(queues.get('tasks', 0))}"
-    )
+        f"задачи без клейма {int(queues.get('tasks', 0))}",
+    ]
     generated = payload.get("generated_at")
     if isinstance(generated, str) and len(generated) >= 19:
-        lines.append(f"Обновлено: {generated[11:19]} UTC")
-    return "\n".join(lines)
+        suffix.append(f"Обновлено: {generated[11:19]} UTC")
+
+    if not running:
+        return _render_monitor(
+            prefix, suffix, ["Сейчас никто не выполняется."], None
+        )
+
+    rows: list[str] = []
+    summary: str | None = None
+    for index, item in enumerate(running):
+        preferred = _format_monitor_entry(
+            item, detailed=index < MONITOR_FULL_DETAIL_LIMIT
+        )
+        candidates = [preferred]
+        if index < MONITOR_FULL_DETAIL_LIMIT:
+            compact = _format_monitor_entry(item, detailed=False)
+            if compact != preferred:
+                candidates.append(compact)
+
+        chosen: str | None = None
+        for candidate in candidates:
+            remaining = len(running) - (index + 1)
+            candidate_summary = (
+                _monitor_remaining_line(remaining, len(running))
+                if remaining > 0
+                else None
+            )
+            rendered = _render_monitor(
+                prefix, suffix, [*rows, candidate], candidate_summary
+            )
+            if len(rendered) <= RICH_TEXT_LIMIT:
+                chosen = candidate
+                summary = candidate_summary
+                break
+        if chosen is None:
+            # Preserve the remaining count even when not a single extra row
+            # fits: the owner still learns that more workers are running.
+            summary = _monitor_remaining_line(
+                len(running) - len(rows), len(running)
+            )
+            break
+        rows.append(chosen)
+
+    return _render_monitor(prefix, suffix, rows, summary)
 
 
 @router.message(Command("live"))
@@ -268,7 +381,9 @@ async def cmd_live(
     except Exception as error:
         await message.answer(f"❌ Не удалось получить состояние исполнителей: {error}")
         return
-    await message.answer(
+    await send_rich_or_plain(
+        message.bot,
+        message.chat.id,
         format_execution_monitor(payload),
         reply_markup=execution_monitor_keyboard(),
     )
