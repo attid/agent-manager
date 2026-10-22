@@ -19,7 +19,12 @@ from kuzya.storage import (
     TaskRepository,
 )
 from kuzya.runtime_defaults import RuntimeDefaultsResolver
-from kuzya.task_worker import TaskExecutionWorker, TaskOutcome
+from kuzya.task_worker import (
+    READONLY_TEST_ENV_DIR,
+    TaskExecutionWorker,
+    TaskOutcome,
+    _resolve_python_interpreter,
+)
 from kuzya.telegram.notifier import (
     TelegramNotifier,
     build_task_outcome_keyboard,
@@ -1269,3 +1274,161 @@ def test_changed_files_union_survives_junk_round(
 
     stored = task_repo.list()[0].meta["changed_files"]
     assert stored == ["web/db/database.py", "web/main.py"]
+
+
+def _read_workspace_note(tmp_path: Path) -> str:
+    notes = list((tmp_path / "artifacts").rglob("workspace.md"))
+    assert notes, "workspace.md not written"
+    return notes[-1].read_text(encoding="utf-8")
+
+
+def _write_executable(path: Path, content: str = "#!/bin/sh\nexit 0\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_workspace_note_has_testing_recipe_with_canonical_interpreter(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """The Testing section names the interpreter from the role runtime_paths.
+
+    The runtime directory is mounted read-only at the same absolute path in
+    every sandbox, so the recipe stays valid across sandboxes and HOMEs. The
+    versioned binary is preferred over the ``python3`` alias in the same dir.
+    """
+    db, agent_id = setup_developer_agent
+    runtime_dir = tmp_path / "uv-python"
+    _write_executable(runtime_dir / "bin" / "python3")
+    canonical = _write_executable(runtime_dir / "bin" / "python3.14")
+    AgentProfileRepository(db).update(
+        agent_id=agent_id,
+        expected_revision=1,
+        runner_config={
+            "mode": "success",
+            "summary_text": "ok",
+            "runtime_paths": [str(runtime_dir)],
+        },
+    )
+
+    _run_one_task_with_worker(tmp_path, fake_runner_argv, db, agent_id)
+    note = _read_workspace_note(tmp_path)
+
+    assert "## Testing" in note
+    assert f"absolute path: {canonical}" in note
+    # The recipe recreates the environment with the canonical interpreter and
+    # then runs pytest with PYTHONPATH=src.
+    assert f"{canonical} -m venv .venv" in note
+    assert f"UV_PYTHON={canonical} uv sync --no-install-project" in note
+    assert "PYTHONPATH=src .venv/bin/python -m pytest" in note
+    assert ".venv/bin/python -V" in note
+    assert "Do not commit `.venv`" in note
+
+
+def test_workspace_note_read_only_recipe_builds_env_under_tmp(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """A read-only project cannot lose its broken .venv, so build it in /tmp.
+
+    The Runner mounts the project with ``--ro-bind`` when ``project_read_only``
+    is set, so ``rm -rf .venv`` fails and the ``&&`` chain stops before an
+    environment exists; the next reader keeps the same broken ``.venv``. The
+    recipe must therefore build the environment in the writable ``/tmp`` tmpfs
+    and run pytest through that environment instead of the project one.
+    """
+    db, agent_id = setup_developer_agent
+    runtime_dir = tmp_path / "uv-python"
+    canonical = _write_executable(runtime_dir / "bin" / "python3.14")
+    AgentProfileRepository(db).update(
+        agent_id=agent_id,
+        expected_revision=1,
+        runner_config={
+            "mode": "success",
+            "summary_text": "ok",
+            "runtime_paths": [str(runtime_dir)],
+        },
+    )
+
+    # A repository .venv that points at a HOME of a previous sandbox.
+    workspace_dir = tmp_path / "workspace"
+    broken_bin = workspace_dir / ".venv" / "bin"
+    broken_bin.mkdir(parents=True)
+    (broken_bin / "python").symlink_to(
+        Path("/home/runner/nonexistent/bin/python3.14")
+    )
+
+    _run_one_task_with_worker(
+        tmp_path,
+        fake_runner_argv,
+        db,
+        agent_id,
+        task_metadata={"project_read_only": True},
+    )
+    note = _read_workspace_note(tmp_path)
+
+    assert "Project read-only: True" in note
+    assert "## Testing" in note
+    assert f"absolute path: {canonical}" in note
+    # uv gets a writable environment directory and must not rewrite the lock.
+    assert f"UV_PROJECT_ENVIRONMENT={READONLY_TEST_ENV_DIR}" in note
+    assert f"UV_PYTHON={canonical}" in note
+    assert "uv sync --frozen --no-install-project" in note
+    # The non-uv fallback and the pytest run use the same /tmp environment.
+    assert f"{canonical} -m venv {READONLY_TEST_ENV_DIR}" in note
+    assert (
+        f"PYTHONPATH=src {READONLY_TEST_ENV_DIR}/bin/python -m pytest" in note
+    )
+    # Never suggest a command that fails on a --ro-bind mount.
+    assert "rm -rf .venv" not in note
+    assert "PYTHONPATH=src .venv/bin/python -m pytest" not in note
+    # The stale project environment is still flagged, just not used.
+    assert ".venv/bin/python -V" in note
+
+
+def test_workspace_note_omits_testing_section_without_python_runtime(
+    tmp_path: Path,
+    fake_runner_argv: list[str],
+    setup_developer_agent: tuple[Database, str],
+) -> None:
+    """No CPython in runtime_paths: the note must not advertise a wrong path."""
+    db, agent_id = setup_developer_agent
+    non_python = _write_executable(tmp_path / "runtime" / "node")
+    AgentProfileRepository(db).update(
+        agent_id=agent_id,
+        expected_revision=1,
+        runner_config={
+            "mode": "success",
+            "summary_text": "ok",
+            "runtime_paths": [str(non_python)],
+        },
+    )
+
+    _run_one_task_with_worker(tmp_path, fake_runner_argv, db, agent_id)
+    note = _read_workspace_note(tmp_path)
+
+    assert "## Testing" not in note
+    assert "Canonical Python interpreter" not in note
+
+
+def test_resolve_python_interpreter_skips_broken_and_non_python_entries(
+    tmp_path: Path,
+) -> None:
+    """Broken symlinks and non-CPython executables never become the recipe path."""
+    runtime_dir = tmp_path / "uv-python"
+    broken = runtime_dir / "bin" / "python3.14"
+    broken.parent.mkdir(parents=True)
+    broken.symlink_to(tmp_path / "missing-python")
+    _write_executable(runtime_dir / "bin" / "node")
+
+    assert _resolve_python_interpreter([str(runtime_dir)]) is None
+    assert _resolve_python_interpreter([str(tmp_path / "absent")]) is None
+    assert _resolve_python_interpreter(None) is None
+    assert _resolve_python_interpreter("not-a-list") is None
+
+    explicit = _write_executable(tmp_path / "python3.14")
+    assert _resolve_python_interpreter([str(explicit)]) == str(explicit)

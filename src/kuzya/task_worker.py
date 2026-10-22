@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +47,113 @@ logger = logging.getLogger(__name__)
 #: Upper bound for the task worker pool. Each worker is an OS thread and may
 #: launch a sandboxed child process, so unbounded values are rejected early.
 MAX_TASK_CONCURRENCY = 32
+
+#: Interpreter file names accepted when locating CPython among the role's
+#: ``runtime_paths`` (``python``, ``python3``, ``python3.14``, ...).
+_PYTHON_EXE_RE = re.compile(r"^python(?:(\d+(?:\.\d+)*))?$")
+
+#: Sandbox-writable location for a test environment when the project itself is
+#: mounted read-only. The Runner mounts a writable tmpfs at ``/tmp``, so the
+#: environment can be built there while the project stays untouched.
+READONLY_TEST_ENV_DIR = "/tmp/kuzya-venv"
+
+
+def _python_executable_rank(name: str) -> tuple[int, int]:
+    """Rank interpreter names so a versioned binary wins over bare aliases."""
+    match = _PYTHON_EXE_RE.match(name)
+    version = (match.group(1) if match else None) or ""
+    return (version.count("."), len(version))
+
+
+def _resolve_python_interpreter(runtime_paths: Any) -> str | None:
+    """Return the canonical CPython executable mounted for the sandbox.
+
+    ``runner_config.runtime_paths`` entries are bind-mounted read-only at the
+    same absolute path in every sandbox, so an interpreter taken from there
+    remains valid across executions and sandboxes regardless of HOME. Each
+    entry may be the interpreter itself or a directory holding ``bin/python*``.
+    Only existing executables are returned; missing or broken entries are
+    skipped so the caller never advertises a path that cannot be executed.
+    """
+    if not isinstance(runtime_paths, (list, tuple)):
+        return None
+    for raw in runtime_paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        entry = Path(raw)
+        if entry.is_file():
+            candidates = [entry]
+        elif entry.is_dir():
+            bin_dir = entry / "bin"
+            if not bin_dir.is_dir():
+                continue
+            candidates = list(bin_dir.iterdir())
+        else:
+            continue
+        usable = [
+            candidate
+            for candidate in candidates
+            if _PYTHON_EXE_RE.match(candidate.name)
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ]
+        if usable:
+            usable.sort(key=lambda item: _python_executable_rank(item.name), reverse=True)
+            return str(usable[0])
+    return None
+
+
+def _testing_section_lines(
+    interpreter: str | None, *, project_read_only: bool
+) -> list[str]:
+    """Render the canonical test-running recipe for ``workspace.md``.
+
+    An empty list means the role exposes no CPython runtime, so no recipe is
+    advertised: a missing interpreter must not turn into a stale or wrong path.
+
+    When the project is mounted read-only, ``rm -rf .venv`` cannot work and
+    would abort the whole recipe at the first ``&&``. The read-only branch
+    therefore builds the environment in the writable sandbox ``/tmp`` and runs
+    pytest through that environment's interpreter instead.
+    """
+    if interpreter is None:
+        return []
+    lines = [
+        "## Testing",
+        "- Canonical Python interpreter, mounted read-only in every sandbox at this"
+        f" absolute path: {interpreter}",
+        "- A repository `.venv` may have been created in another sandbox and link to"
+        " a HOME that does not exist here (for example `/home/runner/...`). If"
+        " `.venv/bin/python -V` fails, do not spend time diagnosing it.",
+    ]
+    if project_read_only:
+        lines += [
+            "- This workspace is mounted read-only, so a stale project `.venv` cannot"
+            " be removed or recreated. Create the test environment in the writable"
+            f" `/tmp` directory instead: `UV_PROJECT_ENVIRONMENT={READONLY_TEST_ENV_DIR}"
+            f" UV_PYTHON={interpreter} uv sync --frozen --no-install-project`."
+            " `--frozen` keeps uv from rewriting the lock file in the read-only"
+            " workspace.",
+            "- Without uv, create that environment directly:"
+            f" `{interpreter} -m venv {READONLY_TEST_ENV_DIR}` and install the test"
+            f" dependencies into it (`{READONLY_TEST_ENV_DIR}/bin/python -m pip install"
+            " pytest`, plus any dependency pytest reports as missing). The project"
+            " itself is imported through `PYTHONPATH=src` and needs no install.",
+            "- Run the tests as"
+            f" `PYTHONPATH=src {READONLY_TEST_ENV_DIR}/bin/python -m pytest`.",
+        ]
+    else:
+        lines += [
+            "- In that case recreate the environment with the canonical interpreter:"
+            f" `rm -rf .venv && UV_PYTHON={interpreter} uv sync --no-install-project`,"
+            f" or without uv: `rm -rf .venv && {interpreter} -m venv .venv &&"
+            " .venv/bin/python -m pip install -e . pytest`.",
+            "- Run the tests as `PYTHONPATH=src .venv/bin/python -m pytest`.",
+        ]
+    lines.append(
+        "- Do not commit `.venv`; the project `.gitignore` normally already excludes it."
+    )
+    return lines
 
 
 def _metadata_text(value: Any) -> str:
@@ -760,6 +868,14 @@ class TaskExecutionWorker:
                 if ro_paths:
                     runner_config["readonly_paths"] = ro_paths
 
+                # Resolve role defaults (pi_command/runtime_paths) before
+                # rendering workspace.md so the testing recipe names the
+                # interpreter the child sandbox actually mounts.
+                runner_config["instructions"] = instructions
+                runner_config = _build_role_config(
+                    runner_config, agent_id=selected_agent_id, prompt_path=prompt_file
+                )
+
                 workspace_file = exec_dir / "workspace.md"
                 workspace_lines = [
                     "# Execution workspace",
@@ -781,9 +897,15 @@ class TaskExecutionWorker:
                     "Inbox: /inbox (read-only input attachments)",
                     "Use the sandbox paths above. A directory named Project is not automatically added below /workspace.",
                 ]
+                testing_lines = _testing_section_lines(
+                    _resolve_python_interpreter(runner_config.get("runtime_paths")),
+                    project_read_only=bool(
+                        runner_config.get("project_read_only", False)
+                    ),
+                )
+                if testing_lines:
+                    workspace_lines += [""] + testing_lines
                 workspace_file.write_text("\n".join(workspace_lines) + "\n", encoding="utf-8")
-                runner_config["instructions"] = instructions
-                runner_config = _build_role_config(runner_config, agent_id=selected_agent_id, prompt_path=prompt_file)
                 runner_config["instructions"].append(str(workspace_file))
                 runtime_selection = self.runtime_defaults.resolve(runner_config)
                 runner_config = runtime_selection.role_config

@@ -114,6 +114,33 @@ effective context in `task.metadata.execution_context`. Operators should read
 `agent_id`, `workspace` and this metadata from the task rather than assume
 what was requested.
 
+## Generated workspace.md
+
+Each execution writes `workspace.md` next to `task.md` in its artifact
+directory and injects it as the last instruction. Besides the sandbox paths,
+mounts, network and allowed hosts, the document explains how to run tests
+when the role's effective `runtime_paths` expose a CPython executable
+(`python`, `python3`, `python3.14`, or a directory containing `bin/python*`).
+The generated `## Testing` section names that interpreter by its absolute
+path: `runtime_paths` are mounted read-only at the same paths in every
+sandbox, so the path survives a different sandbox and HOME. The recipe tells
+the agent to recreate a stale repository `.venv` with that interpreter (or
+`UV_PYTHON=<path> uv sync --no-install-project`) and then run
+`PYTHONPATH=src .venv/bin/python -m pytest`.
+
+When `project_read_only` is true, `/workspace` is mounted with `--ro-bind`,
+so the recipe never suggests deleting or recreating the project `.venv`:
+`rm -rf .venv` would fail and stop the `&&` chain, leaving the next reader
+with the same broken environment. The read-only recipe instead builds the
+environment in the writable sandbox `/tmp` (`UV_PROJECT_ENVIRONMENT=/tmp/kuzya-venv`
+with `uv sync --frozen --no-install-project`, or `<interpreter> -m venv
+/tmp/kuzya-venv`) and runs
+`PYTHONPATH=src /tmp/kuzya-venv/bin/python -m pytest`. `--frozen` stops uv
+from rewriting the lock file in the read-only workspace.
+
+The section is omitted when no CPython runtime is configured, so the note
+never advertises an interpreter that the sandbox cannot execute.
+
 ## Instance isolation and operation scoping
 
 - Explicit per-instance paths and backend settings are a first-class typed
