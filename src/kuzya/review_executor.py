@@ -1374,7 +1374,13 @@ class AgyReviewerBackend(_ExternalReviewerBackend):
 
 
 class CodexReviewerBackend(_ExternalReviewerBackend):
-    """Run the native ``codex review --uncommitted`` reviewer."""
+    """Run the native ``codex review`` reviewer.
+
+    codex 0.163 rejects a custom ``PROMPT`` combined with any scope flag
+    (``--uncommitted``, ``--base``, ``--commit`` are mutually exclusive with
+    it), so the prompt rides alone: the prompt-less default scope already is
+    the uncommitted working tree, which is exactly what a task review needs.
+    """
 
     engine = "codex"
 
@@ -1384,4 +1390,4 @@ class CodexReviewerBackend(_ExternalReviewerBackend):
         prompt: str,
         context: _ReviewerRunContext,
     ) -> list[str]:
-        return [str(binary), "review", "--uncommitted", prompt]
+        return [str(binary), "review", prompt]

@@ -739,8 +739,9 @@ def test_codex_backend_uses_review_uncommitted(
     cmd = captured["cmd"]
     assert cmd[0] == "/fake/bin/codex"
     assert cmd[1] == "review"
-    assert cmd[2] == "--uncommitted"
-    assert "# Code Review: Task #task-1" in cmd[3]
+    # No scope flag: codex rejects PROMPT combined with --uncommitted/--base,
+    # and the prompt-less default scope already is the uncommitted diff.
+    assert "# Code Review: Task #task-1" in cmd[2]
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     assert result.verdict == VERDICT_CHANGES_REQUESTED
     assert result.findings[0].file == "src/app.py"

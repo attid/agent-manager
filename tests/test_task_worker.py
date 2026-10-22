@@ -1055,7 +1055,9 @@ def test_review_cycle_uses_reviewer_profile_engine(
     assert result["needs_user_input"] is False
     cmd = run_mock.call_args.args[0]
     assert cmd[0] == "/fake/bin/codex"
-    assert cmd[1:3] == ["review", "--uncommitted"]
+    # codex rejects PROMPT combined with --uncommitted; the prompt rides
+    # alone over the default uncommitted-diff scope.
+    assert cmd[1] == "review" and "--uncommitted" not in cmd
     metrics = json.loads(
         (
             tmp_path
