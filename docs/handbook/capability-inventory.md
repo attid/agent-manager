@@ -84,8 +84,9 @@ Executors run outside any database transaction. Registration seam:
 
 Source: `src/kuzya/api/app.py`. Groups: health;
 workspaces/resolve; tasks (create/read/list/patch/import, status counts via
-`GET /tasks/counts`, attachment upload via
-`POST /tasks/{task_id}/attachments`, artifacts and per-task analysis);
+`GET /tasks/counts`, status exclusions via `GET /tasks?status_not_in=...`,
+attachment upload via `POST /tasks/{task_id}/attachments`, artifacts and
+per-task analysis);
 live execution monitoring via `GET /monitor/executions` (running tasks and
 operations with bounded `events.jsonl` session stats and queue counts);
 conversations and messages; turns; operations (submit/list/read);

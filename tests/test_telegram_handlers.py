@@ -10,11 +10,13 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 
 from kuzya.telegram.config import TelegramConfig
 from kuzya.telegram.handlers import (
+    on_category_switch,
     on_switch_conversation,
     on_switch_task,
     on_talk_task,
     on_user_message,
 )
+from kuzya.telegram.keyboards import OTHER_EXCLUDED_STATUSES
 from kuzya.telegram.state import UserStateStorage
 from kuzya.telegram.worker import QueueProcessor
 
@@ -47,6 +49,44 @@ def _callback(data: str, *, user: User) -> CallbackQuery:
     callback.message = _message(text="", user=user)
     callback.answer = AsyncMock()
     return callback
+
+
+def test_category_switch_other_uses_status_exclusion() -> None:
+    """The Other tab asks the API for everything outside the other tabs."""
+    user = _user()
+    callback = _callback("cat:other:1", user=user)
+    callback.message.edit_reply_markup = AsyncMock()
+    client = MagicMock()
+    client.list_tasks = AsyncMock(return_value=[])
+    client.get_task_counts = AsyncMock(return_value={"paused": 1})
+
+    asyncio.run(on_category_switch(callback, client=client))
+
+    client.list_tasks.assert_awaited_once()
+    kwargs = client.list_tasks.await_args.kwargs
+    assert "status" not in kwargs
+    assert set(kwargs["status_not_in"]) == set(OTHER_EXCLUDED_STATUSES)
+    markup = callback.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+    other_tab = next(
+        button.text
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data == "cat:other:1"
+    )
+    assert other_tab == "• 🗂 Прочее 1 •"
+
+
+def test_category_switch_regular_tab_still_filters_one_status() -> None:
+    user = _user()
+    callback = _callback("cat:incoming:2", user=user)
+    callback.message.edit_reply_markup = AsyncMock()
+    client = MagicMock()
+    client.list_tasks = AsyncMock(return_value=[])
+    client.get_task_counts = AsyncMock(return_value={})
+
+    asyncio.run(on_category_switch(callback, client=client))
+
+    client.list_tasks.assert_awaited_once_with(status="incoming")
 
 
 def test_talk_task_binds_the_existing_task_conversation(

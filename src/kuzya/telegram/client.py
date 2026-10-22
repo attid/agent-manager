@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 import httpx
 
@@ -119,6 +120,7 @@ class BackendClient:
         self,
         *,
         status: str | None = None,
+        status_not_in: Sequence[str] | None = None,
         workspace: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -126,6 +128,8 @@ class BackendClient:
         params: dict[str, Any] = {"offset": offset}
         if status is not None:
             params["status"] = status
+        if status_not_in is not None:
+            params["status_not_in"] = ",".join(status_not_in)
         if workspace is not None:
             params["workspace"] = workspace
         if limit is not None:

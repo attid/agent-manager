@@ -1067,13 +1067,30 @@ def create_app(
     @app.get("/tasks", response_model=list[TaskRead])
     def list_tasks(
         status_filter: str | None = Query(default=None, alias="status"),
+        status_not_in: str | None = Query(
+            default=None,
+            description=(
+                "Comma-separated statuses to exclude; empty values are "
+                "ignored"
+            ),
+        ),
         workspace: str | None = Query(default=None),
         limit: int | None = Query(default=None),
         offset: int = Query(default=0),
         repository: TaskRepository = Depends(get_repository),
     ) -> list[TaskRead]:
+        excluded_statuses = (
+            tuple(
+                value.strip()
+                for value in status_not_in.split(",")
+                if value.strip()
+            )
+            if status_not_in
+            else None
+        )
         tasks = repository.list(
             status=status_filter,
+            status_not_in=excluded_statuses,
             workspace=workspace,
             limit=limit,
             offset=offset,

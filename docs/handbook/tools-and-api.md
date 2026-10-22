@@ -33,7 +33,7 @@ greedy path parameters (`:path`).
 | `GET` | `/health` | `200` | public | Liveness; the only unauthenticated route (with `OPTIONS`). |
 | `GET` | `/workspaces/resolve` | `200`, `404`, `409`, `422` | `workspaces.read` | Read-only execution preflight. |
 | `POST` | `/tasks` | `201`, `409`, `422` | `tasks.write` | Create a task. |
-| `GET` | `/tasks` | `200` | `tasks.read` | List tasks; filters `status`, `workspace`, `limit`, `offset`. |
+| `GET` | `/tasks` | `200` | `tasks.read` | List tasks; filters `status`, `status_not_in` (comma-separated exclusions), `workspace`, `limit`, `offset`. |
 | `GET` | `/tasks/counts` | `200` | `tasks.read` | One grouped count per stored status, including `archived`. |
 | `GET` | `/monitor/executions` | `200` | `tasks.read` | Running tasks/operations, bounded live session stats and queue counts. |
 | `GET` | `/tasks/{task_id}` | `200`, `404` | `tasks.read` | Read one task. |
@@ -220,8 +220,13 @@ Read-only preflight; never writes.
 #### `GET /tasks`
 
 - Auth: `tasks.read`; collection route.
-- Query: `status` (exact match on the free-form value), `workspace`, `limit`,
-  `offset` (default `0`).
+- Query: `status` (exact match on the free-form value), `status_not_in`
+  (comma-separated statuses to exclude; empty elements are ignored),
+  `workspace`, `limit`, `offset` (default `0`). The two status filters compose
+  as an intersection. `status_not_in` is an exclusion filter so a caller can
+  ask for "everything not shown elsewhere" without enumerating future status
+  values; the Telegram "Other" category uses
+  `status_not_in=incoming,in_progress,failed,done,archived`.
 - `200` array of `TaskRead`, oldest first (`created_at`, then `id`).
 
 #### `GET /tasks/counts`

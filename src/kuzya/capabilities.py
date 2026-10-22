@@ -313,7 +313,7 @@ _TOOL_CAPABILITIES: tuple[Capability, ...] = (
         action="tasks.read",
         result_statuses=("ok", "failed"),
         doc="task-lifecycle.md",
-        summary="read tasks with status/workspace filters",
+        summary="read tasks with status/workspace filters and status_not_in exclusions",
     ),
     _tool(
         "get_task",

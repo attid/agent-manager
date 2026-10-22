@@ -60,6 +60,53 @@ def test_create_get_and_list(migrated_db: pathlib.Path) -> None:
         database.dispose()
 
 
+def test_list_can_exclude_statuses_for_an_other_category(
+    migrated_db: pathlib.Path,
+) -> None:
+    """Exclusion keeps unknown and future statuses visible without enumeration."""
+    database = Database.from_path(migrated_db)
+    try:
+        repository = TaskRepository(database)
+        statuses = [
+            "incoming",
+            "in_progress",
+            "failed",
+            "done",
+            "archived",
+            "waiting_for_input",
+            "ready_to_commit",
+            "paused",
+        ]
+        for status in statuses:
+            repository.create(title=status, status=status)
+
+        excluded = (
+            "incoming",
+            "in_progress",
+            "failed",
+            "done",
+            "archived",
+        )
+        listed = repository.list(status_not_in=excluded)
+
+        assert [task.status for task in listed] == [
+            "waiting_for_input",
+            "ready_to_commit",
+            "paused",
+        ]
+        # The filters compose instead of replacing each other.
+        assert [
+            task.status for task in repository.list(
+                status="paused", status_not_in=excluded
+            )
+        ] == ["paused"]
+        assert repository.list(status_not_in=statuses) == []
+        # An empty exclusion list is not a filter that hides every row.
+        assert len(repository.list(status_not_in=[])) == len(statuses)
+    finally:
+        database.dispose()
+
+
 def test_metadata_json_round_trips(migrated_db: pathlib.Path) -> None:
     database = Database.from_path(migrated_db)
     try:

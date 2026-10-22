@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardMarkup
 
-from kuzya.telegram.keyboards import task_categories_keyboard
+from kuzya.telegram.keyboards import (
+    OTHER_EXCLUDED_STATUSES,
+    task_categories_keyboard,
+)
 
 
 def _tabs(keyboard: InlineKeyboardMarkup) -> dict[str, str]:
@@ -33,7 +36,7 @@ def test_category_tabs_show_counts_except_archive() -> None:
         "incoming": "• 📥 Новые 3 •",
         "in_progress": "⚙️ Работа 1",
         "failed": "❌ Ошибки 0",
-        "waiting_for_input": "⚠️ Вопросы 2",
+        "other": "🗂 Прочее 2",
         "done": "✅ Готово 5",
         "archived": "📦 Архив",
     }
@@ -46,7 +49,7 @@ def test_category_counts_default_missing_statuses_to_zero() -> None:
         "incoming": "📥 Новые 0",
         "in_progress": "⚙️ Работа 0",
         "failed": "❌ Ошибки 0",
-        "waiting_for_input": "⚠️ Вопросы 0",
+        "other": "🗂 Прочее 0",
         "done": "• ✅ Готово 0 •",
         "archived": "📦 Архив",
     }
@@ -102,7 +105,7 @@ def test_callback_data_is_not_changed_by_counts() -> None:
         "cat:incoming:1",
         "cat:in_progress:1",
         "cat:failed:1",
-        "cat:waiting_for_input:1",
+        "cat:other:1",
         "cat:done:1",
         "cat:archived:1",
     }
@@ -114,3 +117,56 @@ def test_without_counts_labels_keep_legacy_plain_text() -> None:
     assert _tabs(keyboard)["incoming"] == "• 📥 Новые •"
     assert _tabs(keyboard)["failed"] == "❌ Ошибки"
     assert _tabs(keyboard)["archived"] == "📦 Архив"
+
+
+def test_other_counter_uses_exclusion_and_ignores_archive() -> None:
+    """The Other badge counts exactly the statuses its list shows."""
+    keyboard = task_categories_keyboard(
+        counts={
+            "incoming": 1,
+            "in_progress": 2,
+            "failed": 3,
+            "done": 4,
+            "waiting_for_input": 5,
+            "ready_to_commit": 6,
+            "paused": 7,
+            "archived": 8,
+        }
+    )
+
+    tabs = _tabs(keyboard)
+    assert tabs["other"] == "🗂 Прочее 18"
+    assert tabs["archived"] == "📦 Архив"
+
+
+def test_other_category_is_active_and_marks_special_statuses() -> None:
+    tasks = [
+        {"id": "task-wait", "number": 1, "title": "Wait", "status": "waiting_for_input"},
+        {"id": "task-ready", "number": 2, "title": "Ready", "status": "ready_to_commit"},
+        {"id": "task-paused", "number": 3, "title": "Paused", "status": "paused"},
+    ]
+
+    keyboard = task_categories_keyboard(
+        active_category="other", tasks=tasks, counts={}
+    )
+
+    assert _tabs(keyboard)["other"] == "• 🗂 Прочее 0 •"
+    rows = {
+        button.callback_data: button.text
+        for row in keyboard.inline_keyboard
+        for button in row
+        if button.callback_data and button.callback_data.startswith("select_task:")
+    }
+    assert rows["select_task:task-wait"].startswith("⚠️ #1 ")
+    assert rows["select_task:task-ready"].startswith("⏳ #2 ")
+    assert rows["select_task:task-paused"].startswith("📌 #3 ")
+
+
+def test_other_exclusion_covers_the_same_categories_as_the_regular_tabs() -> None:
+    assert set(OTHER_EXCLUDED_STATUSES) == {
+        "incoming",
+        "in_progress",
+        "failed",
+        "done",
+        "archived",
+    }

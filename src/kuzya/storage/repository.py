@@ -318,6 +318,7 @@ class TaskRepository:
         self,
         *,
         status: str | None = None,
+        status_not_in: Sequence[str] | None = None,
         workspace: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -326,6 +327,9 @@ class TaskRepository:
 
         Args:
             status: When given, only tasks with this exact status.
+            status_not_in: When given, exclude tasks whose status is in this
+                sequence. This is how a caller expresses "everything not shown
+                by the other categories" without enumerating known statuses.
             workspace: When given, only tasks in this workspace.
             limit: Maximum number of rows to return.
             offset: Number of leading rows to skip.
@@ -333,6 +337,8 @@ class TaskRepository:
         statement = select(Task).order_by(Task.created_at, Task.id)
         if status is not None:
             statement = statement.where(Task.status == status)
+        if status_not_in:
+            statement = statement.where(Task.status.not_in(list(status_not_in)))
         if workspace is not None:
             statement = statement.where(Task.workspace == workspace)
         if offset:

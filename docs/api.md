@@ -7,6 +7,9 @@ REST API сервиса Agent Manager предоставляет полный и
 - **OpenAPI Schema**: `http://127.0.0.1:18767/openapi.json`
 - **Интерактивная документация (Swagger UI)**: `http://127.0.0.1:18767/docs`
 
+Полный справочник по всем маршрутам, параметрам, телам запросов и кодам
+ответов с привязкой к исходникам: `docs/handbook/tools-and-api.md`.
+
 ---
 
 ## 1. Общие принципы и заголовки
@@ -31,7 +34,7 @@ REST API сервиса Agent Manager предоставляет полный и
 Статусы задач:
 - `incoming` — новая задача, ожидает анализа или назначения.
 - `in_progress` — задача взята в работу `TaskExecutionWorker`.
-- `waiting_user_input` — разработчик запросил уточнение (через `ask_clarification`), требуется ответ человека.
+- `waiting_for_input` — разработчик запросил уточнение (через `ask_clarification`), требуется ответ человека.
 - `ready_to_commit` — код написан, тесты прошли, Code Review пройден успешно. Задача ожидает явного подтверждения человека (Commit Local / Commit & Push / Rollback).
 - `done` — задача успешно закоммичена, задеплоена или подтверждена.
 - `failed` — ошибка рантайма, упавшие тесты или необработанное исключение.
@@ -85,6 +88,7 @@ curl -X POST http://127.0.0.1:18767/tasks \
 
 **Параметры query:**
 - `status` (string, опционально): фильтр по статусу (`incoming`, `in_progress`, `ready_to_commit`, `done`, `failed`).
+- `status_not_in` (string, опционально): список статусов через запятую для исключения (например `incoming,in_progress,failed,done,archived`). Используется Telegram-категорией «Прочее», чтобы показывать все прочие статусы, включая новые, без их перечисления. Пустые элементы игнорируются; фильтр можно комбинировать с `status`.
 - `workspace` (string, опционально): фильтр по воркспейсу (например `agent-manager`).
 - `limit` (int, опционально): ограничение количества записей.
 - `offset` (int, по умолчанию 0): смещение выборки.
@@ -132,7 +136,8 @@ curl "http://127.0.0.1:18767/conversations?limit=20&offset=0"
 ```
 
 ### 4.3. Добавление сообщения в диалог: `POST /conversations/{id}/messages`
-Идемпотентное добавление сообщения с опциональным `idempotency_key`.
+Идемпотентное добавление сообщения по ключу `(conversation_id, source,
+external_id)`.
 
 ```bash
 curl -X POST http://127.0.0.1:18767/conversations/{id}/messages \
@@ -140,10 +145,14 @@ curl -X POST http://127.0.0.1:18767/conversations/{id}/messages \
   -d '{
     "role": "user",
     "text": "Как запустить сервис в production?",
-    "idempotency_key": "msg-unique-key-100",
+    "external_id": "msg-unique-key-100",
     "metadata": {"media_type": "text"}
   }'
 ```
+
+`201 Created` — строка создана; `200 OK` (с `"replayed": true`) — точный
+повтор вернул существующее сообщение; `409 Conflict` — ключ повторно
+использован с другим телом; `404` — диалога нет; `422` — ошибка валидации.
 
 ### 4.4. Получение сообщений диалога: `GET /conversations/{id}/messages`
 ```bash
@@ -156,8 +165,10 @@ curl "http://127.0.0.1:18767/conversations/{id}/messages?limit=50"
 
 Используются Telegram-ботом и диспетчером для строгой пошаговой обработки (один активный ход на диалог).
 
-- `POST /conversations/{id}/turns` — постановка сообщения в очередь ходов.
-- `GET /conversations/{id}/turns/active` — получение текущего активного хода.
+- `POST /conversations/{id}/turns` — постановка существующего входящего сообщения в очередь ходов. Тело: `input_message_id` (обязательно, уникально), `metadata`. Ответ `201` с ходом в статусе `pending`; ошибки: `404` — сообщение не найдено, `400` — сообщение из другого диалога или не входящее пользовательское, `422` — валидация. Точный повтор возвращает исходный ход.
+- `GET /turns/{turn_id}` — статус хода и ссылка на ответ (`200`) или `404`. Статусы хода: `pending`, `running`, `completed`, `failed`. Отдельного маршрута «активный ход» нет.
+
+Полное описание полей `TurnRead` и жизненного цикла — в `docs/handbook/tools-and-api.md` и `docs/handbook/objects.md`.
 
 ---
 

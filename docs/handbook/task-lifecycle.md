@@ -42,15 +42,47 @@ ones the worker and API use.
 |---|---|---|
 | `incoming` | `POST /tasks`, `create_task` | Draft. Saved, not executed. |
 | `in_progress` | `update_task` / `PATCH /tasks` | Authorizes execution; the worker claims it. |
-| `waiting_user_input` | worker | The agent invoked `ask_clarification`; a human answer is required. |
+| `waiting_for_input` | worker | The agent invoked `ask_clarification`; a human answer is required. This is the exact status spelling used by `TaskExecutionWorker` and `TaskRepository`. |
 | `ready_to_commit` | worker | Code and review completed; waits for an explicit commit/rollback decision. |
 | `done` | worker or Git commit operation | Finished/committed. |
 | `failed` | worker | Runtime error, failed tests or an unhandled exception. |
 | `cancelled` | Git rollback operation | Cancelled or reverted. |
+| `archived` | `update_task` / `PATCH /tasks/{task_id}` (caller-chosen value) | Terminal operator state. Kept in storage and counted by `GET /tasks/counts`; hidden from active work by convention. The human `number` never changes, and the worker never claims it because the claim predicate requires `in_progress`. Unrelated to an archived agent profile (`runner_config.archived`). |
 
 `incoming` does not run anything and does not schedule a future check. The
 secretary must use `status="in_progress"` (or `update_task(..., status=
 "in_progress")`) when the user explicitly asks to execute.
+
+`status` is a free-form column, not an enum: `TaskPatch.status` is
+`str | None` and `TaskRepository.update` stores `str(status)`. The table lists
+the conventional values the worker and API actually use, not the only legal
+ones. An unknown value is stored and counted; it simply matches no worker
+transition. Source of truth: `src/kuzya/storage/repository.py` (`update`,
+`claim_in_progress`, `get_status_counts`) and `src/kuzya/api/app.py`
+(`PATCH /tasks/{task_id}`, `GET /tasks/counts`). See
+[Tools and API](tools-and-api.md#deferred-operations-and-git-outcomes) for the
+`done` outcome of a commit operation with no changes.
+
+## Telegram category tabs
+
+The `/list` keyboard is a view over statuses, not a separate state machine.
+Regular tabs keep their exact-status filters; the "Other" tab is defined by
+exclusion so a status added later cannot become invisible.
+
+| Tab | `GET /tasks` filter |
+|---|---|
+| Новые | `status=incoming` |
+| Работа | `status=in_progress` |
+| Ошибки | `status=failed` |
+| Прочее | `status_not_in=incoming,in_progress,failed,done,archived` |
+| Готово | `status=done` |
+| Архив | `status=archived` |
+
+The "Other" counter uses the same exclusion: it sums every stored status
+outside the four regular counted tabs and the archive, so the badge always
+matches the list (archive remains an unlabelled tab). Rows keep the `⚠️`
+marker for `waiting_for_input` and use `⏳` for `ready_to_commit`; other
+statuses use the neutral `📌`.
 
 ## Creating and editing
 
@@ -110,8 +142,9 @@ When the task has `changed_files` and review is required (coding tasks by
 default; a profile/metadata flag can disable it), the worker runs up to three
 review rounds with `system-code-reviewer` before marking the task. The
 reviewer runs read-only against the project and writes reports to task
-artifacts (`review_round_<n>.md`). The verdict strings recognized are
-`ВЕРДИКТ: ОДОБРЕНО` and `ВЕРДИКТ: ТРЕБУЮТСЯ ИСПРАВЛЕНИЯ`. Fix rounds accumulate
+artifacts (`review_round_<n>.md`). The executor records the JSON verdict
+`approved` or `changes_requested` (`src/kuzya/review_executor.py`); older text
+markers such as `ВЕРДИКТ: ОДОБРЕНО` are **not** parsed. Fix rounds accumulate
 `changed_files` across rounds (ordered union) instead of replacing the
 previous round's list. See
 [Review](review.md) for the separation between this in-worker cycle and the
@@ -135,6 +168,27 @@ current worker still owns the execution and must not be raced by a second
 claim. The worker renders `task.md` from the original description, every
 `additional_instructions` entry with its timestamp, and the current
 `review_feedback`.
+
+Resume is allowed for terminal statuses and is an execution authorization:
+
+- The tool's only refusal is an API read failure, not a task status. It first
+  calls `GET /tasks/{task_id}` through `backendRequest`, whose envelope is
+  `{status: "ok"|"failed", data}` and whose `status` describes the HTTP read
+  (`src/pi_runner/policy.mjs:66-85`). It returns early only when
+  `current.status == "failed"`. The task status lives in
+  `current.data.status` and is never inspected; the subsequent `PATCH` runs
+  unconditionally (`policy.mjs:564-573`). The server route does not check the
+  previous task status either.
+- Resume from `failed` is therefore allowed and requeues execution exactly
+  like `done`/`archived`. There is no `failed` guard and no status filter: the
+  `PATCH` sets `status="in_progress"` plus the new instructions.
+- Setting `in_progress` starts a **new execution cycle** through the normal
+  claim predicate; it is not merely a note appended to the instructions.
+  When the executor and workspace are unchanged the worker resumes the prior
+  native Runner session, so its attempt counter continues (a `done` task was
+  observed resuming at `attempt 7`).
+- Treat it as an explicit request to execute again and confirm intent before
+  resuming a `done`, `archived` or `failed` task.
 
 ## Turns (secretary lifecycle)
 

@@ -21,6 +21,7 @@ from .client import BackendClient
 from .config import TelegramConfig
 from .messenger import rich_edit_message
 from .keyboards import (
+    category_list_filters,
     execution_monitor_keyboard,
     mode_keyboard,
     task_display_number,
@@ -490,7 +491,7 @@ async def on_category_switch(
     parts = callback.data.split(":")
     category = parts[1]
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
-    tasks = await client.list_tasks(status=category)
+    tasks = await client.list_tasks(**category_list_filters(category))
     counts = await client.get_task_counts()
     await callback.message.edit_reply_markup(
         reply_markup=task_categories_keyboard(

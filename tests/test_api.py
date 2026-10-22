@@ -102,6 +102,40 @@ def test_list_tasks(migrated_db: pathlib.Path) -> None:
     assert [task["title"] for task in filtered.json()] == ["two"]
 
 
+def test_list_tasks_excludes_statuses(migrated_db: pathlib.Path) -> None:
+    """GET /tasks?status_not_in=... powers the Telegram "Other" category."""
+    statuses = [
+        "incoming",
+        "in_progress",
+        "failed",
+        "done",
+        "archived",
+        "waiting_for_input",
+        "ready_to_commit",
+        "paused",
+    ]
+    with TestClient(_app(migrated_db)) as client:
+        for status in statuses:
+            response = client.post(
+                "/tasks", json={"title": status, "status": status}
+            )
+            assert response.status_code == 201
+        listed = client.get(
+            "/tasks",
+            params={
+                "status_not_in": (
+                    "incoming, in_progress,failed,done,archived"
+                )
+            },
+        )
+    assert listed.status_code == 200
+    assert [task["status"] for task in listed.json()] == [
+        "waiting_for_input",
+        "ready_to_commit",
+        "paused",
+    ]
+
+
 def test_metadata_roundtrip_and_free_form_values(
     migrated_db: pathlib.Path,
 ) -> None:

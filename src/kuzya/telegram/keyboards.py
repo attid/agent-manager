@@ -151,6 +151,48 @@ def execution_monitor_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+#: Category tab whose contents are every status not shown by another tab.
+OTHER_CATEGORY = "other"
+
+#: Statuses owned by the regular category tabs. ``archived`` is deliberately
+#: absent: the archive tab never contributes to the "Other" list or count.
+CATEGORY_STATUSES = ("incoming", "in_progress", "failed", "done")
+OTHER_EXCLUDED_STATUSES = (*CATEGORY_STATUSES, "archived")
+
+#: Distinguishable row markers for statuses that need operator attention.
+TASK_STATUS_ICONS = {
+    "waiting_for_input": "⚠️",
+    "ready_to_commit": "⏳",
+}
+
+
+def category_list_filters(category: str) -> dict[str, Any]:
+    """Return ``list_tasks`` keyword filters for a category tab.
+
+    Regular tabs filter one exact status. The "Other" tab is defined by
+    exclusion, so a status added later automatically appears there without
+    changing this module or the handlers.
+    """
+    if category == OTHER_CATEGORY:
+        return {"status_not_in": list(OTHER_EXCLUDED_STATUSES)}
+    return {"status": category}
+
+
+def category_task_count(category: str, counts: dict[str, int]) -> int:
+    """Return a tab counter derived by the same rules as its task list.
+
+    The "Other" counter sums every stored status outside the regular tabs and
+    the archive, so it matches the list even when a new status appears.
+    """
+    if category != OTHER_CATEGORY:
+        return counts.get(category, 0)
+    return sum(
+        count
+        for status, count in counts.items()
+        if status not in OTHER_EXCLUDED_STATUSES
+    )
+
+
 def task_categories_keyboard(
     active_category: str = "incoming",
     tasks: list[dict[str, Any]] | None = None,
@@ -169,7 +211,7 @@ def task_categories_keyboard(
         ("incoming", "📥 Новые"),
         ("in_progress", "⚙️ Работа"),
         ("failed", "❌ Ошибки"),
-        ("waiting_for_input", "⚠️ Вопросы"),
+        (OTHER_CATEGORY, "🗂 Прочее"),
         ("done", "✅ Готово"),
         ("archived", "📦 Архив"),
     ]
@@ -177,7 +219,7 @@ def task_categories_keyboard(
     def category_label(category: str, label: str) -> str:
         if counts is None or category == "archived":
             return label
-        return f"{label} {counts.get(category, 0)}"
+        return f"{label} {category_task_count(category, counts)}"
 
     # Category tabs
     cat_buttons = []
@@ -208,7 +250,7 @@ def task_categories_keyboard(
             title = t.get("title") or t["id"]
             if len(title) > 30:
                 title = title[:27] + "..."
-            icon = "⚠️" if t.get("status") == "waiting_for_input" else "📌"
+            icon = TASK_STATUS_ICONS.get(t.get("status"), "📌")
             keyboard.append(
                 [
                     InlineKeyboardButton(
