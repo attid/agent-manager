@@ -17,3 +17,11 @@ Build only the single task supplied for this run. The system specification is co
 - Sandbox root is /workspace. Host source directory paths are not available. Use PYTHONPATH=src when invoking project modules and tests.
 - uv and Python runtime paths are supplied in the task. uv cache must be under /tmp or the role HOME. Use uv sync --no-install-project and .venv/bin/python -m pytest with PYTHONPATH=src; do not rely on a host editable-install path.
 - Do not expand into future tasks. Stop and report when current acceptance criteria pass or an external blocker prevents progress.
+
+## API and tool contract changes
+
+- Any addition, change or removal of an HTTP route, a Pi JS tool (`src/pi_runner/policy.mjs`), a status/state, or a request/response field MUST update all three in the same change: `docs/handbook/tools-and-api.md` (method and path, path/query parameters, request body, response, error codes, idempotency), `src/kuzya/capabilities.py` (capability record with `action`/resource and `doc`) and `docs/handbook/capability-inventory.md`.
+- A contract change without the matching documentation and inventory updates is a blocking defect, not deferred debt.
+- Before completing a task, reconcile every METHOD+path registered in `src/kuzya/api/app.py` against `docs/handbook/tools-and-api.md` and `src/kuzya/capabilities.py`; each route must appear in all three. Run `PYTHONPATH=src .venv/bin/python -m pytest tests/test_capabilities.py -q`. If the environment cannot run it, state the exact reason in the report.
+- For a new transport or adapter that proxies an existing REST surface 1:1 (for example MCP), do not duplicate every route. Add one adapter record in `docs/handbook/capability-inventory.md` stating that permissions are inherited and where that inheritance is enforced in code.
+- Updating the handbook and inventory is part of the definition of done, not a separate task.

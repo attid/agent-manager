@@ -170,8 +170,10 @@ from .storage import (
     AgentProfileRepository,
     ConversationRepository,
     ConversationRuntimeRepository,
+    ConversationTalkNotFoundError,
     Database,
     OperationRepository,
+    WorkspaceTalkRepository,
 )
 
 logger = logging.getLogger(__name__)
@@ -473,6 +475,7 @@ class PersistentConversationHandler:
             )
         self._repository = ConversationRuntimeRepository(database)
         self._conversations = ConversationRepository(database)
+        self._workspace_talks = WorkspaceTalkRepository(database)
         self._last_execution: PiRunProvenance | Mapping[str, Any] | None = None
 
     @property
@@ -502,11 +505,21 @@ class PersistentConversationHandler:
             except Exception:
                 pass
 
+        agent_id = self._agent_id_for_turn(turn_input)
+        # A direct-agent turn may run only after it owns the agent workspace.
+        # A busy workspace raises before any reservation or child launch and
+        # the dispatcher returns the turn to ``pending``.
+        try:
+            self._workspace_talks.acquire_for_turn(
+                turn_input.conversation_id
+            )
+        except ConversationTalkNotFoundError:
+            pass
         reservation = self._repository.reserve_call(
             conversation_id=turn_input.conversation_id,
             turn_id=turn_input.turn_id,
             attempt_count=turn_input.attempt_count,
-            agent_id=self._agent_id,
+            agent_id=agent_id,
         )
         if reservation.cached:
             # A stored successful result returns before any new defaults
@@ -523,7 +536,10 @@ class PersistentConversationHandler:
         # configuration failures.
         try:
             context = self._prepare_context(
-                turn_input, reservation.binding, ownership_token
+                turn_input,
+                reservation.binding,
+                ownership_token,
+                agent_id,
             )
         except BaseException as error:
             self._block_failed_reservation(
@@ -535,7 +551,9 @@ class PersistentConversationHandler:
         # so the reservation is released for an explicit retry instead of
         # permanently blocking the conversation.
         try:
-            prepared = self._prepare_execution(context, turn_input)
+            prepared = self._prepare_execution(
+                context, turn_input, agent_id
+            )
         except BaseException as error:
             self._release_prelaunch(turn_input, ownership_token, error)
             raise
@@ -590,11 +608,34 @@ class PersistentConversationHandler:
 
     # -- reserved --------------------------------------------------------
 
+    def _agent_id_for_turn(self, turn_input: TurnInput) -> str:
+        """Resolve the profile identity for this conversation.
+
+        An existing runtime binding is authoritative: its native session was
+        created from that pinned profile. Before the first binding, a
+        conversation created by the Telegram direct-talk flow may request a
+        ``metadata.talkable_agent``; that agent replaces the handler's default
+        secretary identity for the fresh export and reservation.
+        """
+        binding = self._repository.get_binding(turn_input.conversation_id)
+        if binding is not None:
+            return binding.agent_id
+        conversation = self._conversations.get_conversation(
+            turn_input.conversation_id
+        )
+        if conversation is not None:
+            metadata = conversation.meta or {}
+            requested = metadata.get("talkable_agent")
+            if isinstance(requested, str) and requested.strip():
+                return requested.strip()
+        return self._agent_id
+
     def _prepare_context(
         self,
         turn_input: TurnInput,
         binding: Any,
         ownership_token: str,
+        agent_id: str,
     ) -> _ExecutionContext:
         """Pin, export or reconstruct the paths used by this call.
 
@@ -605,7 +646,9 @@ class PersistentConversationHandler:
         run. A binding with a native session resumes it.
         """
         if self._is_unprepared(binding):
-            return self._prepare_fresh(turn_input, binding, ownership_token)
+            return self._prepare_fresh(
+                turn_input, binding, ownership_token, agent_id
+            )
         self._require_complete_binding(binding)
         if binding.runner_session_id is None:
             # A prepared binding that never stored a result is a first run
@@ -647,6 +690,7 @@ class PersistentConversationHandler:
         turn_input: TurnInput,
         binding: Any,
         ownership_token: str,
+        agent_id: str,
     ) -> _ExecutionContext:
         """Freeze the pinned revision and persist the unresolved base context.
 
@@ -657,7 +701,7 @@ class PersistentConversationHandler:
         """
         frozen = freeze_profile_handler(
             database=self._database,
-            agent_id=self._agent_id,
+            agent_id=agent_id,
             revision=binding.profile_revision,
             runner_argv_prefix=self._runner_argv_prefix,
             artifact_root=self._artifact_root,
@@ -721,7 +765,10 @@ class PersistentConversationHandler:
     # -- per-call runtime selection --------------------------------------
 
     def _prepare_execution(
-        self, context: _ExecutionContext, turn_input: TurnInput
+        self,
+        context: _ExecutionContext,
+        turn_input: TurnInput,
+        agent_id: str,
     ) -> _PreparedExecution:
         """Resolve defaults, stage attachments and build the child adapter.
 
@@ -770,7 +817,7 @@ class PersistentConversationHandler:
                     resolved_role.get("tools") or []
                 )
                 grant = self._permissions.issue(
-                    agent_id=self._agent_id,
+                    agent_id=agent_id,
                     actions=exec_actions,
                     resources=resources_for_execution(exec_actions),
                     label=f"conversation:{context.binding.conversation_id}",
@@ -850,6 +897,8 @@ class PersistentConversationHandler:
             for key in ("task_id", "task_number", "task_title"):
                 if key not in metadata and key in conversation_metadata:
                     metadata[key] = conversation_metadata[key]
+            if conversation_metadata.get("talkable_agent"):
+                metadata.setdefault("mode", "conversation")
         if prepared.attachment_context is not None:
             metadata["attachment_context"] = prepared.attachment_context
             if prepared.attachment_manifest is not None:
@@ -1130,7 +1179,7 @@ class PersistentConversationHandler:
                             "conversation_id": turn_input.conversation_id,
                         },
                         owner=execution_owner(
-                            self._agent_id,
+                            context.binding.agent_id,
                             f"conversation:{turn_input.conversation_id}",
                         ),
                     )

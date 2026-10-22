@@ -259,3 +259,69 @@ def test_startup_rejects_database_only_migrated_to_0001(
     assert "tasks" in tables
     assert "conversations" not in tables
     assert "messages" not in tables
+
+
+def test_patch_conversation_shallow_merges_metadata(
+    migrated_db: pathlib.Path,
+) -> None:
+    with TestClient(_app(migrated_db)) as client:
+        created = client.post(
+            "/conversations",
+            json={
+                "title": "Talk",
+                "metadata": {"origin": "telegram_agent_talk", "talk_active": True},
+            },
+        ).json()
+        patched = client.patch(
+            f"/conversations/{created['id']}",
+            json={"metadata": {"talk_active": False}},
+        )
+        unknown = client.patch(
+            f"/conversations/{created['id']}",
+            json={"unexpected": 1},
+        )
+        missing = client.patch(
+            "/conversations/absent", json={"metadata": {"x": 1}}
+        )
+
+    assert patched.status_code == 200
+    body = patched.json()
+    assert body["title"] == "Talk"
+    assert body["metadata"]["origin"] == "telegram_agent_talk"
+    assert body["metadata"]["talk_active"] is False
+    assert unknown.status_code == 422
+    assert missing.status_code == 404
+
+
+def test_talk_lifecycle_endpoint_acquires_and_releases_lock(
+    migrated_db: pathlib.Path,
+) -> None:
+    with TestClient(_app(migrated_db)) as client:
+        created = client.post(
+            "/conversations",
+            json={
+                "metadata": {
+                    "talkable_agent": "devops-docker3",
+                    "talk_workspace": "ws-devops",
+                }
+            },
+        ).json()
+        url = f"/conversations/{created['id']}/talk"
+        started = client.post(url, json={"action": "start"})
+        closing = client.post(url, json={"action": "request_end"})
+        finalized = client.post(url, json={"action": "finalize"})
+        unknown = client.post(url, json={"action": "invented"})
+        missing = client.post(
+            "/conversations/absent/talk", json={"action": "start"}
+        )
+
+    assert started.status_code == 200
+    assert started.json()["metadata"]["talk_active"] is True
+    assert closing.status_code == 200
+    assert closing.json()["metadata"]["talk_active"] is True
+    assert closing.json()["metadata"]["talk_closing"] is True
+    assert finalized.status_code == 200
+    assert finalized.json()["metadata"]["talk_active"] is False
+    assert finalized.json()["metadata"]["talk_closed"] is True
+    assert unknown.status_code == 400
+    assert missing.status_code == 404

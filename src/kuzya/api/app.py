@@ -53,6 +53,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import bind_log_context
 from ..monitor import build_execution_monitor
+from ..agent_sessions import list_agent_sessions
+from ..review_history import list_review_rounds
 from ..analysis import (
     AnalysisError,
     RecommendationConflictError,
@@ -67,6 +69,7 @@ from ..permissions import (
 )
 from ..workspaces import resolve_workspace
 from ..secretary import (
+    TurnConversationClosedError,
     TurnConversationMismatchError,
     TurnInputMessageNotFoundError,
     TurnInputRoleError,
@@ -89,20 +92,25 @@ from ..storage import (
     OperationRepository,
     RecommendationNotFoundError,
     RecommendationStateError,
+    ConversationTalkNotFoundError,
     TaskAlreadyRunningError,
     TaskNotFoundError,
     TaskRepository,
+    WorkspaceTalkRepository,
 )
 from ..storage.telegram_delivery import TelegramDeliveryRepository
 from .schemas import (
     AgentCreate,
     AgentPatch,
     AgentRead,
+    AgentSessionRead,
     AnalysisReportRead,
     AskRequest,
     AskResponse,
     ConversationCreate,
+    ConversationPatch,
     ConversationRead,
+    ConversationTalkRequest,
     KnowledgeDocumentDeleted,
     KnowledgeDocumentRead,
     KnowledgeDocumentWrite,
@@ -114,6 +122,7 @@ from .schemas import (
     OperationSubmit,
     RecommendationPreviewRead,
     RecommendationRead,
+    ReviewRoundRead,
     TaskArtifactListResponse,
     TaskArtifactRead,
     TaskCreate,
@@ -830,6 +839,11 @@ def create_app(
     ) -> ConversationRepository:
         return request.app.state.conversation_repository
 
+    def get_workspace_talk_repository(
+        request: Request,
+    ) -> WorkspaceTalkRepository:
+        return WorkspaceTalkRepository(request.app.state.database)
+
     def get_agent_repository(request: Request) -> AgentProfileRepository:
         return request.app.state.agent_repository
 
@@ -1105,11 +1119,19 @@ def create_app(
         return repository.get_status_counts()
 
     @app.get("/monitor/executions")
-    def get_execution_monitor(request: Request) -> dict[str, Any]:
-        """Return running tasks/operations with live session counters."""
+    def get_execution_monitor(
+        request: Request,
+        verbose: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        """Return running tasks/operations with live session counters.
+
+        ``verbose=true`` adds each operation's input payload and each task's
+        changed-file names for operational investigation.
+        """
         return build_execution_monitor(
             request.app.state.database,
             getattr(request.app.state, "artifact_root", None),
+            verbose=verbose,
         )
 
     @app.get("/tasks/{task_id}", response_model=TaskRead)
@@ -1448,14 +1470,21 @@ def create_app(
 
     @app.get("/conversations", response_model=list[ConversationRead])
     def list_conversations(
+        agent_id: str | None = Query(default=None),
         limit: int | None = Query(default=None),
         offset: int = Query(default=0),
         repository: ConversationRepository = Depends(
             get_conversation_repository
         ),
     ) -> list[ConversationRead]:
+        """List conversations, optionally scoped to one agent.
+
+        ``agent_id`` matches the durable ConversationRuntime binding or the
+        ``metadata.talkable_agent`` hint, so a caller can find both prepared
+        native sessions and direct-agent conversations.
+        """
         conversations = repository.list_conversations(
-            limit=limit, offset=offset
+            agent_id=agent_id, limit=limit, offset=offset
         )
         return [conversation_to_read(item) for item in conversations]
 
@@ -1474,6 +1503,83 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="conversation not found",
+            )
+        return conversation_to_read(conversation)
+
+    @app.patch(
+        "/conversations/{conversation_id}",
+        response_model=ConversationRead,
+    )
+    def patch_conversation(
+        conversation_id: str,
+        payload: ConversationPatch,
+        repository: ConversationRepository = Depends(
+            get_conversation_repository
+        ),
+    ) -> ConversationRead:
+        """Shallow-merge conversation metadata and optionally replace title.
+
+        Used by the Telegram direct-agent flow to release an active workspace
+        lock without deleting the conversation or its native Runner session.
+        """
+        updates = payload.model_dump(exclude_unset=True)
+        try:
+            conversation = repository.update_conversation(
+                conversation_id, **updates
+            )
+        except ConversationNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"conversation not found: {error.conversation_id}",
+            ) from error
+        return conversation_to_read(conversation)
+
+    @app.post(
+        "/conversations/{conversation_id}/talk",
+        response_model=ConversationRead,
+    )
+    def change_conversation_talk(
+        conversation_id: str,
+        payload: ConversationTalkRequest,
+        talks: WorkspaceTalkRepository = Depends(
+            get_workspace_talk_repository
+        ),
+        conversations: ConversationRepository = Depends(
+            get_conversation_repository
+        ),
+    ) -> ConversationRead:
+        """Start, close or finalize the direct-agent workspace lock.
+
+        ``start`` activates the talk when the workspace is free, otherwise
+        marks it pending so the first turn waits. ``request_end`` sets
+        ``talk_closing`` and refuses new turns while the current/queued work
+        drains. ``finalize`` releases ``talk_active`` only when no pending or
+        running turn remains. The conversation and native Runner session are
+        never deleted.
+        """
+        action = payload.action.strip().lower()
+        try:
+            if action == "start":
+                talks.start(conversation_id)
+            elif action == "request_end":
+                talks.request_end(conversation_id)
+            elif action == "finalize":
+                talks.finalize_if_idle(conversation_id)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="action must be start, request_end or finalize",
+                )
+        except ConversationTalkNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"talkable conversation not found: {error.conversation_id}",
+            ) from error
+        conversation = conversations.get_conversation(conversation_id)
+        if conversation is None:  # pragma: no cover - created above
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"conversation not found: {conversation_id}",
             )
         return conversation_to_read(conversation)
 
@@ -1613,6 +1719,11 @@ def create_app(
         except TurnInputRoleError as error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(error),
+            ) from error
+        except TurnConversationClosedError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
                 detail=str(error),
             ) from error
         return turn_to_read(result.turn)
@@ -1762,6 +1873,34 @@ def create_app(
                 detail=f"analysis report not found: {report_id}",
             )
         return analysis_report_to_read(report)
+
+    @app.get(
+        "/tasks/{task_id}/review",
+        response_model=list[ReviewRoundRead],
+    )
+    def list_task_review_rounds(
+        task_id: str,
+        request: Request,
+        repository: TaskRepository = Depends(get_repository),
+    ) -> list[ReviewRoundRead]:
+        """Return persisted review rounds for one task, oldest round first.
+
+        Rounds are read from the task's ``review/round_<n>.json`` artifacts,
+        never from the database. An unknown task is ``404``; a task with no
+        review artifacts returns an empty list. ``report`` is the matching
+        ``round_<n>.md`` text or an empty string when that file is missing.
+        """
+        task = repository.get(task_id)
+        if task is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="task not found",
+            )
+        artifact_root = getattr(request.app.state, "artifact_root", None)
+        return [
+            ReviewRoundRead(**item)
+            for item in list_review_rounds(artifact_root, str(task.id))
+        ]
 
     @app.get(
         "/analysis/{report_id}/recommendations",
@@ -1941,6 +2080,38 @@ def create_app(
                 detail="agent profile not found",
             )
         return agent_to_read(profile)
+
+    @app.get(
+        "/agents/{agent_id}/sessions",
+        response_model=list[AgentSessionRead],
+    )
+    def list_agent_runner_sessions(
+        agent_id: str,
+        repository: AgentProfileRepository = Depends(get_agent_repository),
+    ) -> list[AgentSessionRead]:
+        """Return metadata about the agent's native Runner sessions.
+
+        Only session ids, attempt counts and attempt-directory times are
+        exposed. Session contents (``events.jsonl``, prompts and replies)
+        are never read. An unknown profile is ``404``; a profile without a
+        usable ``runner_config.state_dir`` returns an empty list.
+        """
+        profile = repository.get_current(agent_id)
+        if profile is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="agent profile not found",
+            )
+        runner_config = profile.runner_config or {}
+        state_dir = (
+            runner_config.get("state_dir")
+            if isinstance(runner_config, dict)
+            else None
+        )
+        return [
+            AgentSessionRead(**item)
+            for item in list_agent_sessions(state_dir or "")
+        ]
 
     @app.get(
         "/agents/{agent_id}/revisions",

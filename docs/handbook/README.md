@@ -99,7 +99,8 @@ Operation protocol statuses (`accepted`/`pending`, `running`,
 | [workspaces-and-routing.md](workspaces-and-routing.md) | Workspace resolution, `agent_id`, sandbox paths. |
 | [profiles-runtime-skills.md](profiles-runtime-skills.md) | Immutable profiles, runtime defaults, frozen execution, skills. |
 | [task-lifecycle.md](task-lifecycle.md) | Task statuses, execution worker, turns, resume, recovery. |
-| [tools-and-api.md](tools-and-api.md) | REST endpoints, JS tools, auth, idempotency, discovery. |
+| [tools-and-api.md](tools-and-api.md) | Complete REST endpoint reference (parameters, bodies, responses, errors, states), JS tools, auth, idempotency, discovery. |
+| [mcp.md](mcp.md) | MCP transport adapter: OpenAPI-to-tool mapping, inherited authentication and permissions, differences from direct HTTP, verification. |
 | [review.md](review.md) | Independent review executor and its verdict contract. |
 | [analysis-and-recommendations.md](analysis-and-recommendations.md) | Analyzer evidence package, recommendation lifecycle, approval/apply. |
 | [approvals-and-revisions.md](approvals-and-revisions.md) | Revision checks and explicit approval rules. |

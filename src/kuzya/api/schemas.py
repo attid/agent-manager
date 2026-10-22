@@ -240,6 +240,33 @@ class ConversationCreate(BaseModel):
     id: str | None = None
 
 
+class ConversationPatch(BaseModel):
+    """Payload accepted by ``PATCH /conversations/{conversation_id}``.
+
+    Only supplied fields change; ``metadata`` is shallow-merged into the
+    stored object. Unknown fields are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ConversationTalkRequest(BaseModel):
+    """Action for the direct-agent talk lifecycle.
+
+    ``action`` is a free-form string validated by the route:
+    ``start`` acquires the workspace when free, ``request_end`` stops
+    accepting turns while keeping the lock, and ``finalize`` releases the
+    lock when no pending/running turn remains.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+
+
 class ConversationRead(BaseModel):
     """Conversation representation returned by the API."""
 
@@ -590,6 +617,22 @@ def analysis_report_to_read(report: AnalysisReport) -> AnalysisReportRead:
     )
 
 
+class ReviewRoundRead(BaseModel):
+    """One persisted review round read from task artifacts.
+
+    ``verdict`` is the domain verdict (``approved`` or
+    ``changes_requested``), not the executor's upper-case mirror.
+    ``report`` is the Markdown report text; an absent report file is an
+    empty string rather than a fabricated summary.
+    """
+
+    round: int
+    verdict: str
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    report: str = ""
+    created_at: dt.datetime
+
+
 class RecommendationRead(BaseModel):
     """An evidence-linked recommendation and its workflow status.
 
@@ -716,3 +759,12 @@ class TaskArtifactRead(BaseModel):
 class TaskArtifactListResponse(BaseModel):
     task_id: str
     artifacts: list[TaskArtifactRead]
+
+
+class AgentSessionRead(BaseModel):
+    """Metadata about one native Runner session; never its contents."""
+
+    session_id: str
+    created_at: dt.datetime
+    last_activity: dt.datetime
+    attempts_count: int = 0

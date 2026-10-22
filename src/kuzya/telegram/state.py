@@ -17,10 +17,13 @@ def utcnow_str() -> str:
 @dataclasses.dataclass(frozen=True)
 class UserState:
     user_id: int
-    mode: str = "idle"  # "idle", "new_task", "talk", "task"
+    # ``agent_talk`` is the active context of a direct conversation with a
+    # talkable task agent. ``talk`` remains the secretary dialog.
+    mode: str = "idle"  # "idle", "new_task", "talk", "agent_talk", "task"
     active_task_id: str | None = None
     active_conversation_id: str | None = None
     talk_conversation_id: str | None = None
+    talk_agent_conversation_id: str | None = None
     updated_at: str = dataclasses.field(default_factory=utcnow_str)
 
 
@@ -67,10 +70,24 @@ class UserStateStorage:
                     active_task_id TEXT,
                     active_conversation_id TEXT,
                     talk_conversation_id TEXT,
+                    talk_agent_conversation_id TEXT,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            # Existing Telegram state databases predate direct agent talks.
+            # Add the column in place instead of dropping user state.
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(user_states)"
+                ).fetchall()
+            }
+            if "talk_agent_conversation_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE user_states "
+                    "ADD COLUMN talk_agent_conversation_id TEXT"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS message_queue (
@@ -119,6 +136,9 @@ class UserStateStorage:
                 active_task_id=row["active_task_id"],
                 active_conversation_id=row["active_conversation_id"],
                 talk_conversation_id=row["talk_conversation_id"],
+                talk_agent_conversation_id=row[
+                    "talk_agent_conversation_id"
+                ],
                 updated_at=row["updated_at"],
             )
 
@@ -134,12 +154,20 @@ class UserStateStorage:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO user_states (user_id, mode, active_task_id, active_conversation_id, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO user_states (
+                    user_id, mode, active_task_id, active_conversation_id,
+                    talk_agent_conversation_id, updated_at
+                )
+                VALUES (?, ?, ?, ?, NULL, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     active_task_id = excluded.active_task_id,
                     active_conversation_id = excluded.active_conversation_id,
+                    talk_agent_conversation_id = CASE
+                        WHEN excluded.mode = 'agent_talk'
+                        THEN user_states.talk_agent_conversation_id
+                        ELSE NULL
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (user_id, mode, task_id, conversation_id, now),
@@ -157,9 +185,33 @@ class UserStateStorage:
                 VALUES (?, 'talk', ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     talk_conversation_id = excluded.talk_conversation_id,
+                    talk_agent_conversation_id = NULL,
                     updated_at = excluded.updated_at
                 """,
                 (user_id, conversation_id, now),
+            )
+
+    def set_talk_agent_conversation(
+        self, user_id: int, conversation_id: str
+    ) -> None:
+        """Make ``conversation_id`` the active direct-agent dialog."""
+        now = utcnow_str()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_states (
+                    user_id, mode, active_task_id, active_conversation_id,
+                    talk_agent_conversation_id, updated_at
+                )
+                VALUES (?, 'agent_talk', NULL, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    mode = 'agent_talk',
+                    active_task_id = NULL,
+                    active_conversation_id = excluded.active_conversation_id,
+                    talk_agent_conversation_id = excluded.talk_agent_conversation_id,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, conversation_id, conversation_id, now),
             )
 
     # -- Queue --
@@ -248,6 +300,22 @@ class UserStateStorage:
                 (now, queue_id),
             )
             return cur.rowcount == 1
+
+    def cancel_pending_for_conversation(
+        self, conversation_id: str
+    ) -> int:
+        """Cancel every still-pending message of one conversation."""
+        now = utcnow_str()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'cancelled', updated_at = ?
+                WHERE context_conversation_id = ? AND status = 'pending'
+                """,
+                (now, conversation_id),
+            )
+            return cur.rowcount
 
     def get_queued_message(self, queue_id: str) -> QueuedMessage | None:
         with self._connect() as conn:

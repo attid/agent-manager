@@ -19,6 +19,7 @@ PYTHONPATH=src .venv/bin/python -m pytest \
   tests/test_review_executor.py \
   tests/test_review_operation.py \
   tests/test_analysis.py \
+  tests/test_operational_api.py \
   tests/test_session_trace.py \
   tests/test_knowledge.py \
   tests/test_api.py \
@@ -45,6 +46,9 @@ Interpretation:
   verdicts, failure diagnostics and the durable review handler.
 - `test_analysis.py` — evidence package, report/recommendation persistence,
   approval and stale-apply conflict.
+- `test_operational_api.py` — filtered operations listing, review-round
+  artifact projection, conversation agent filter, metadata-only Runner
+  session listing and verbose execution monitor.
 - `test_session_trace.py` — target-task session/event trace, missing artifacts,
   path isolation, secret redaction and content-argument omission.
 - `test_api.py` / `test_api_auth.py` — REST contract and stable Bearer auth.
@@ -81,6 +85,49 @@ grep -n 'worker.register' src/kuzya/operation_handlers.py
 grep -n 'Критического дефицита документации' src/kuzya/telegram/handlers.py
 ```
 
+## Git state inspection (read-only)
+
+To check what a Git operation or an agent actually changed, read the
+repository instead of trusting a tool message or retrying the write. All of
+these commands are read-only:
+
+```bash
+git status --porcelain=v1 -uall
+git diff --cached --name-status
+git diff --name-status
+git show --stat --name-status HEAD
+git log --oneline -5
+git ls-tree -r --name-only HEAD | grep <expected-path>
+git cat-file -e HEAD:<path>
+git ls-files -- <path>
+git stash list
+```
+
+How to read them:
+
+- `git status --porcelain=v1 -uall` shows staged, unstaged and untracked
+  entries, including files inside untracked directories. Empty output means
+  the working tree matches the index and `HEAD`.
+- `git diff --cached --name-status` is the staged set that the next commit
+  would contain; `git diff --name-status` is the unstaged set.
+- `git show --stat --name-status HEAD` is what is actually committed in
+  `HEAD`; `git log --oneline -5` gives the recent commit chain.
+- `git ls-tree -r --name-only HEAD | grep <expected-path>` and
+  `git cat-file -e HEAD:<path>` prove that a path is present in the commit
+  (a missing object is reported by the non-zero exit code).
+- `git ls-files -- <path>` shows the index entry, and `git stash list`
+  shows stashes that may hold uncommitted work.
+
+In the sandbox, `.git` is commonly mounted read-only. That is expected:
+read commands above work, while `git add`, `git commit` or anything that
+creates `.git/index.lock` fails with `Read-only file system`. Do not treat
+that error as a repository defect or try to repair `.git`; use the read
+commands to establish state.
+
+For the meaning of `metadata.changed_files` versus
+`metadata.provenance.changed_files`, see
+[Objects and links](objects.md#task).
+
 ## Runtime checks (isolated instance only)
 
 Never use production endpoints, databases or Telegram.
@@ -103,7 +150,7 @@ registered executor produced a validated result.
 - [x] Every registered JS tool is represented in the capability inventory and
       checked by `tests/test_capabilities.py`.
 - [x] Every advertised operation kind has a registered executor.
-- [x] OpenAPI, inventory and tool schemas agree.
+- [x] OpenAPI, inventory, mounted adapter routes and tool schemas agree.
 - [x] A short platform operating prompt is injected on every run/resume and
       customized identity prompts are preserved.
 - [x] Parity tests enumerate the real registered tools (Node) and the live

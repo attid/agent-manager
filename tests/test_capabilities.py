@@ -18,6 +18,7 @@ import pytest
 
 from kuzya.api import create_app
 from kuzya.capabilities import (
+    ADAPTER_CAPABILITIES,
     CAPABILITIES,
     ENDPOINT_CAPABILITIES,
     HANDBOOK,
@@ -31,7 +32,7 @@ from kuzya.capabilities import (
     write_handbook_discovery,
 )
 from kuzya.knowledge import KnowledgeBase
-from kuzya.permissions import actions_for_tools
+from kuzya.permissions import actions_for_tools, resolve_requirement
 from kuzya.storage import AgentProfileRepository, Database
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,23 +87,73 @@ def _registered_tool_names(tmp_path: Path) -> list[str] | None:
     return json.loads(result.stdout)
 
 
-def _openapi_paths(migrated_db: Path) -> dict:
-    app = create_app(f"sqlite:///{migrated_db}")
-    return app.openapi()["paths"]
+def _app(migrated_db: Path):
+    return create_app(f"sqlite:///{migrated_db}")
+
+
+def _mounted_route_paths(app) -> set[str]:
+    return {
+        route.path
+        for route in app.router.routes
+        if getattr(route, "path", None)
+    }
 
 
 def test_inventory_parity_with_openapi_and_registered_tools(
     tmp_path: Path, migrated_db: Path
 ) -> None:
-    paths = _openapi_paths(migrated_db)
+    app = _app(migrated_db)
+    paths = app.openapi()["paths"]
     tool_names = _registered_tool_names(tmp_path)
     audit = audit_capabilities(
         openapi_paths=paths,
         registered_tool_names=tool_names,
+        mounted_route_paths=_mounted_route_paths(app),
     )
     assert audit.ok, "\n".join(
         f"{finding.code}: {finding.message}" for finding in audit.findings
     )
+
+
+def test_mcp_adapter_is_inventory_covered_and_stays_outside_permissions(
+    migrated_db: Path,
+) -> None:
+    # The transport is explicit method/path records, not 43 duplicated tools.
+    assert {
+        (cap.method, cap.path) for cap in ADAPTER_CAPABILITIES
+    } == {
+        ("GET", "/mcp"),
+        ("POST", "/mcp"),
+        ("GET", "/mcp/"),
+        ("POST", "/mcp/"),
+    }
+    assert all(cap.kind == "adapter" for cap in ADAPTER_CAPABILITIES)
+    assert all(cap.action == "*" for cap in ADAPTER_CAPABILITIES)
+    assert all(cap.resource == "*" for cap in ADAPTER_CAPABILITIES)
+    assert all(cap.doc == "mcp.md" for cap in ADAPTER_CAPABILITIES)
+
+    app = _app(migrated_db)
+    paths = app.openapi()["paths"]
+    assert "/mcp" not in paths
+    # The adapter must not acquire a permission route rule: execution tokens
+    # are denied at the transport and keep using REST directly.
+    for method, path in (("GET", "/mcp"), ("POST", "/mcp/")):
+        assert resolve_requirement(method, path) is None
+
+    audit = audit_capabilities(
+        openapi_paths=paths,
+        mounted_route_paths=_mounted_route_paths(app),
+    )
+    assert audit.ok, [
+        (finding.code, finding.message) for finding in audit.findings
+    ]
+
+    # If the mounted route disappears while the inventory still declares it,
+    # the audit must report a concrete finding rather than silently pass.
+    missing = audit_capabilities(openapi_paths=paths, mounted_route_paths=set())
+    codes = {finding.code for finding in missing.findings}
+    assert "missing-adapter-route" in codes
+    assert not missing.ok
 
 
 def test_inventory_declares_every_tool_once_and_documents_count() -> None:

@@ -19,8 +19,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from .database import Database
-from .models import Conversation, Message, Task, utcnow
+from .models import Conversation, ConversationRuntime, Message, Task, utcnow
 from .telegram_delivery import note_appended_message
+from .workspace_talks import (
+    active_talk_locks,
+    resolve_effective_execution,
+    task_waits_for_talk,
+)
 
 #: Sentinel distinguishing "field omitted" from "field supplied as None".
 _UNSET: Any = object()
@@ -479,6 +484,7 @@ class TaskRepository:
         *,
         worker_id: str,
         workspace: str | None = None,
+        default_agent_id: str | None = None,
     ) -> Task | None:
         """Atomically claim the next eligible in_progress task.
 
@@ -491,6 +497,13 @@ class TaskRepository:
         their own group: they resolve to the same default/project directory at
         execution time, so they are serialized as one workspace.
 
+        An active direct conversation with a talkable agent also occupies that
+        agent's workspace. Such conversations are separate entities and never
+        become tasks, but the same serialization applies: a task for the agent
+        (or for its project workspace) waits until the conversation is ended.
+        ``default_agent_id`` lets a task without an explicit ``agent_id`` be
+        attributed to the worker's default profile.
+
         The claim starts an immediate SQLite write transaction before reading
         candidates. Concurrent worker threads and processes therefore observe
         each other's committed claims; two workers cannot claim tasks from the
@@ -502,6 +515,7 @@ class TaskRepository:
                 # could otherwise keep a stale snapshot and either claim a
                 # task twice or fail to upgrade its read transaction.
                 session.execute(text("BEGIN IMMEDIATE"))
+                talk_agents, talk_workspaces = active_talk_locks(session)
                 statement = (
                     select(Task)
                     .where(Task.status == "in_progress")
@@ -511,6 +525,14 @@ class TaskRepository:
                     statement = statement.where(Task.workspace == workspace)
                 candidates = list(session.scalars(statement))
                 for candidate in candidates:
+                    if task_waits_for_talk(
+                        session,
+                        candidate,
+                        talk_agents=talk_agents,
+                        talk_workspaces=talk_workspaces,
+                        default_agent_id=default_agent_id,
+                    ):
+                        continue
                     meta = dict(candidate.meta or {})
                     # Never re-claim an execution that already has an owner.
                     # The same predicate also skips terminal completed tasks.
@@ -556,9 +578,22 @@ class TaskRepository:
                     if is_ws_busy:
                         continue
 
+                    effective_agent, effective_workspace = (
+                        resolve_effective_execution(
+                            session,
+                            agent_id=candidate.agent_id,
+                            workspace=candidate.workspace,
+                            default_agent_id=default_agent_id,
+                        )
+                    )
                     meta["execution_status"] = "running"
                     meta["execution_worker_id"] = worker_id
                     meta["execution_claimed_at"] = utcnow().isoformat()
+                    # Persist the actual agent/project the worker will use,
+                    # so a running task without explicit fields still blocks
+                    # a direct talk in the same workspace.
+                    meta["execution_agent_id"] = effective_agent
+                    meta["execution_workspace"] = effective_workspace
                     candidate.meta = meta
                     candidate.updated_at = utcnow()
                     session.flush()
@@ -655,18 +690,74 @@ class ConversationRepository:
             return session.get(Conversation, conversation_id)
 
     def list_conversations(
-        self, *, limit: int | None = None, offset: int = 0
+        self,
+        *,
+        agent_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[Conversation]:
-        """Return conversations ordered by creation time, oldest first."""
+        """Return conversations ordered by creation time, oldest first.
+
+        ``agent_id`` matches either the durable ConversationRuntime binding
+        (the authoritative record for a prepared native session) or the
+        ``metadata.talkable_agent`` hint used by the direct-agent flow. A
+        conversation that matches both is returned once.
+        """
         statement = select(Conversation).order_by(
             Conversation.created_at, Conversation.id
         )
+        if agent_id is not None:
+            runtime_binding = (
+                select(ConversationRuntime.conversation_id)
+                .where(
+                    ConversationRuntime.conversation_id == Conversation.id,
+                    ConversationRuntime.agent_id == agent_id,
+                )
+                .exists()
+            )
+            talkable_agent = Conversation.meta[
+                "talkable_agent"
+            ].as_string()
+            statement = statement.where(
+                runtime_binding | (talkable_agent == agent_id)
+            )
         if offset:
             statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
         with self._database.session() as session:
             return list(session.scalars(statement))
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = _UNSET,
+        metadata: Mapping[str, Any] | None = _UNSET,
+    ) -> Conversation:
+        """Partially update one conversation.
+
+        ``metadata`` is shallow-merged into the stored object, so a caller can
+        flip one key (for example a direct-talk lock) without losing the
+        conversation identity or its origin. An absent conversation raises
+        :class:`ConversationNotFoundError`.
+        """
+        with self._database.session() as session:
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError(conversation_id)
+            if title is not _UNSET:
+                conversation.title = (
+                    str(title) if title is not None else None
+                )
+            if metadata is not _UNSET:
+                merged = dict(conversation.meta or {})
+                merged.update(dict(metadata or {}))
+                conversation.meta = merged
+            conversation.updated_at = utcnow()
+            session.flush()
+            session.refresh(conversation)
+            return conversation
 
     def append_message(
         self,

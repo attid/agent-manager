@@ -32,6 +32,11 @@ registered Pi JS tools.
 - Live executions: `GET /monitor/executions` reports running tasks and
   operations with bounded `events.jsonl` tool/token/activity counters and
   queue counts; Telegram exposes the same snapshot via `/live`.
+- Operational reads: `GET /operations` filters the durable queue by
+  status/kind/target, `GET /tasks/{id}/review` projects persisted review
+  rounds, `GET /agents/{id}/sessions` lists native session metadata (never
+  contents), and `GET /conversations?agent_id=` filters conversations. These
+  remove the need for direct SQLite reads during investigation.
 - Capability inventory: `src/kuzya/capabilities.py` is the
   machine-readable tool/API/permission/doc map, and
   `audit_capabilities` compares it with the live surface.

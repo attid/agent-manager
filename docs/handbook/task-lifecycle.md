@@ -84,6 +84,55 @@ matches the list (archive remains an unlabelled tab). Rows keep the `⚠️`
 marker for `waiting_for_input` and use `⏳` for `ready_to_commit`; other
 statuses use the neutral `📌`.
 
+## Direct conversations with task agents
+
+A task agent can also be used as an interactive counterpart without creating a
+task per message. Eligibility is the explicit `runner_config.talkable: true`
+flag on the agent's current profile. There is one profile per agent; no
+`-talk` profile copy exists.
+
+Telegram flow:
+
+1. `/talk` shows the secretary controls plus «👥 Выбрать агента».
+2. The agent list contains only `talkable` profiles, up to ten per page.
+3. Selecting an agent creates, or resumes, one conversation with
+   `metadata.talkable_agent` and calls `POST /conversations/{id}/talk`
+   (`start`). The Telegram user state switches to mode `agent_talk`. If the
+   workspace is free the talk becomes active immediately; if a task or
+   another talk owns it, the talk is marked `talk_pending` and the first turn
+   waits in the dispatcher.
+4. Every reply from that conversation carries «🏁 Закончить» and
+   «💬 С секретарём».
+5. The task-category keyboard shows «🗣 Разговоры: N». The list behind it
+   names each agent, its start time and an end button.
+6. «🏁 Закончить» calls `request_end` and immediately moves the user back to
+   the secretary context. New turns are refused (`409` on
+   `POST .../turns`), pending Telegram-queue messages are cancelled, and the
+   workspace lock is released by `finalize` only after the current turn and
+   every already-enqueued turn have finished. The conversation and its
+   native Runner session are kept, so selecting the same agent later resumes
+   the same context.
+
+The direct conversation uses the same frozen profile, sandbox policy,
+workspace and Runner session mechanics as the secretary. Starting and ending
+a talk and claiming a task all take the SQLite write lock before reading
+(`BEGIN IMMEDIATE`), so they share one atomic workspace decision:
+`start`/`acquire_for_turn` refuse to run beside a task or another talk, and
+`TaskRepository.claim_in_progress` refuses to run beside an active talk. A
+busy turn is returned to `pending` by the dispatcher instead of failing and
+records `metadata.workspace_deferred_until`; candidate selection skips it
+until that retry deadline, so the busy conversation cannot starve independent
+dialogues or make the dispatcher spin. Turn order inside the conversation is
+preserved. No task, review, commit or platform summary is created for an agent
+talk; the agent reports in its reply and the Runner trace remains the
+execution record.
+
+An active talk is not a task and never appears in a task category. It does
+occupy the agent's workspace: `TaskRepository.claim_in_progress` skips a task
+for the same agent, and a task whose resolved project directory is
+`talk_workspace`, until `talk_active` is false. Queued tasks proceed after
+the closing talk has drained and been finalized.
+
 ## Creating and editing
 
 - `POST /tasks` with `id` optional; duplicate caller ids return `409`. Accepts optional `attachments` list.

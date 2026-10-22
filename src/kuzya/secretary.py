@@ -71,12 +71,13 @@ Operations
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import logging
 import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased
 
@@ -91,6 +92,7 @@ from .storage import (
 )
 from .storage.models import utcnow
 from .storage.repository import ConversationRepository
+from .storage.workspace_talks import talk_metadata_is_closing
 from .storage.telegram_delivery import note_completed_turn, note_failed_turn
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,16 @@ class TurnInputRoleError(TurnError):
         )
         self.message_id = message_id
         self.role = role
+
+
+class TurnConversationClosedError(TurnError):
+    """Raised when a direct-agent conversation is closing or ended."""
+
+    def __init__(self, conversation_id: str) -> None:
+        super().__init__(
+            f"conversation {conversation_id} is not accepting agent turns"
+        )
+        self.conversation_id = conversation_id
 
 
 class StaleClaimError(TurnError):
@@ -277,6 +289,14 @@ class TurnProcessor:
         duplicate enqueues safe.
         """
         with self._database.session() as session:
+            # Share the write lock with request_end/finalize: the closing
+            # decision and the turn insert are one serialized transaction.
+            session.execute(text("BEGIN IMMEDIATE"))
+            conversation = session.get(Conversation, conversation_id)
+            if conversation is not None and talk_metadata_is_closing(
+                conversation.meta
+            ):
+                raise TurnConversationClosedError(conversation_id)
             message = session.scalars(
                 select(Message).where(Message.id == input_message_id)
             ).one_or_none()
@@ -343,9 +363,20 @@ class TurnProcessor:
                     earlier.status.in_(("pending", "running")),
                 )
                 claim_token = uuid.uuid4().hex
+                deferred = func.json_extract(
+                    Turn.meta, "$.workspace_deferred_until"
+                )
+                ready = or_(
+                    deferred.is_(None), deferred <= utcnow().isoformat()
+                )
                 result = session.execute(
                     update(Turn)
-                    .where(Turn.id == candidate.id, Turn.status == "pending", ~blocked)
+                    .where(
+                        Turn.id == candidate.id,
+                        Turn.status == "pending",
+                        ~blocked,
+                        ready,
+                    )
                     .values(
                         status="running",
                         claim_token=claim_token,
@@ -373,15 +404,62 @@ class TurnProcessor:
             earlier.sequence < Turn.sequence,
             earlier.status.in_(("pending", "running")),
         )
+        deferred = func.json_extract(
+            Turn.meta, "$.workspace_deferred_until"
+        )
+        ready = or_(
+            deferred.is_(None), deferred <= utcnow().isoformat()
+        )
         statement = (
             select(Turn)
-            .where(Turn.status == "pending", ~blocked)
+            .where(Turn.status == "pending", ~blocked, ready)
             .order_by(Turn.sequence)
             .limit(1)
         )
         if conversation_id is not None:
             statement = statement.where(Turn.conversation_id == conversation_id)
         return session.scalars(statement).first()
+
+    def defer_claim(
+        self,
+        turn_id: str,
+        claim_token: str,
+        *,
+        retry_after_seconds: float = 2.0,
+    ) -> Turn:
+        """Return a claimed turn to ``pending`` when its workspace is busy.
+
+        The turn keeps its queue position and attempt count but records a
+        temporary ``workspace_deferred_until`` timestamp. Candidate selection
+        skips it until that instant, so an occupied conversation cannot starve
+        independent conversations or make the dispatcher spin on the same
+        claim. No reply is fabricated.
+        """
+        with self._database.session() as session:
+            turn = session.scalars(
+                select(Turn).where(Turn.id == turn_id)
+            ).one_or_none()
+            if (
+                turn is None
+                or turn.status != "running"
+                or turn.claim_token != claim_token
+            ):
+                raise StaleClaimError(turn_id)
+            metadata = dict(turn.meta or {})
+            retry_at = utcnow() + dt.timedelta(
+                seconds=max(0.0, retry_after_seconds)
+            )
+            metadata["workspace_deferred_until"] = retry_at.isoformat()
+            metadata["workspace_defer_count"] = int(
+                metadata.get("workspace_defer_count") or 0
+            ) + 1
+            turn.status = "pending"
+            turn.claim_token = None
+            turn.claimed_at = None
+            turn.meta = metadata
+            turn.updated_at = utcnow()
+            session.flush()
+            return turn
 
     # -- complete / fail -------------------------------------------------
 

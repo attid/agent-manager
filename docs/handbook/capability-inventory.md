@@ -85,14 +85,35 @@ Executors run outside any database transaction. Registration seam:
 Source: `src/kuzya/api/app.py`. Groups: health;
 workspaces/resolve; tasks (create/read/list/patch/import, status counts via
 `GET /tasks/counts`, status exclusions via `GET /tasks?status_not_in=...`,
-attachment upload via `POST /tasks/{task_id}/attachments`, artifacts and
-per-task analysis);
+attachment upload via `POST /tasks/{task_id}/attachments`, artifacts,
+per-task analysis and persisted review rounds via
+`GET /tasks/{task_id}/review`);
 live execution monitoring via `GET /monitor/executions` (running tasks and
-operations with bounded `events.jsonl` session stats and queue counts);
-conversations and messages; turns; operations (submit/list/read);
-analysis reports; recommendations (list/preview/approve/apply); agents
-(create/read/list/patch/archive/history); knowledge (list/read/write/delete).
+operations with bounded `events.jsonl` session stats and queue counts, plus
+opt-in `verbose=true` operation input and changed-file names);
+conversations (create/read/list with `agent_id` filter, direct-talk
+lifecycle) and messages; turns; operations (submit/list/read with
+`status`/`kind`/`target_id` filters); analysis reports; recommendations
+(list/preview/approve/apply); agents (create/read/list/patch/archive/history
+and metadata-only native session listing via
+`GET /agents/{agent_id}/sessions`); knowledge (list/read/write/delete).
 See [Tools and API discovery](tools-and-api.md#rest-endpoints).
+
+## Operational read endpoints
+
+Three read-only projections exist for investigation without direct SQLite
+access:
+
+| Endpoint | Reads | Exposes | Never exposes |
+|---|---|---|---|
+| `GET /operations` | `operations` rows | filtered queue with status/result/error/input | no write; scoped callers get `403` |
+| `GET /tasks/{task_id}/review` | `review/round_<n>.json`/`.md` artifacts | round, domain verdict, findings, report text, timestamp | no raw database verdict; no arbitrary path from inside an artifact; prefixed `task_<id>` directories require a matching recorded `task_id` |
+| `GET /agents/{agent_id}/sessions` | `<state_dir>/sessions/` directory metadata | session id, attempt count, first/last attempt mtimes | `events.jsonl`, prompts, replies and any other session content |
+
+The task-scoped review endpoint uses `tasks.read` on `task:<id>`; the
+agent-session endpoint uses `agents.read` on `agent:<id>`. `GET /tasks/{task_id}/analysis`
+and `GET /operations` already covered the analysis and queue cases and are
+not duplicated.
 
 ## Execution monitor
 
@@ -100,7 +121,9 @@ See [Tools and API discovery](tools-and-api.md#rest-endpoints).
 `events.jsonl` tail for each running execution. It reports elapsed time and,
 when available, tool count, current tool, last usage tokens/cost and the file
 age as `last_activity_sec`. Missing event files degrade to elapsed-only
-entries with `session_available=false`; they are not errors. The route uses
+entries with `session_available=false`; they are not errors. `verbose=true`
+adds each operation's exact `input` object and each task's `changed_files`
+names plus count; the default response is unchanged. The route uses
 `tasks.read` with no resource, so a task-scoped execution credential cannot
 enumerate other work. The Telegram `/live` command and the
 `⚡ Исполнители` category button render the same payload. `/live` sends it
@@ -116,18 +139,18 @@ queued.
 
 ## MCP transport adapter
 
-MCP is one derived adapter, not 46 more endpoints. Its registry is generated
+MCP is one derived adapter, not 50 more endpoints. Its registry is generated
 from the live OpenAPI document at application construction; duplicating the
 operation list here would create exactly the drift the parity audit exists to
 prevent.
 
 | Adapter | Listens on | Upstream | Adds permissions? | Source |
 |---|---|---|---|---|
-| `mcp_streamable_http` | `POST /mcp`, `GET /mcp` and `/mcp/` | Every JSON business operation generated from `app.openapi()` (44 tools for 46 REST operations; `GET /health` is excluded as a service route and the multipart attachment upload has no JSON tool) | No. `/mcp` is not an OpenAPI operation and has no entry in the permission route rules; administrative Bearer tokens are accepted, execution tokens receive `403`. Every tool call forwards the caller's token into the real REST route, which re-applies the action/resource rule. | `src/kuzya/api/mcp/endpoint.py`, `registry.py`, `executor.py`; [MCP transport](mcp.md) |
+| `mcp_streamable_http` | `POST /mcp`, `GET /mcp` and `/mcp/` | Every JSON business operation generated from `app.openapi()` (48 tools for 50 REST operations; `GET /health` is excluded as a service route and the multipart attachment upload has no JSON tool) | No. `/mcp` is not an OpenAPI operation and has no entry in the permission route rules; administrative Bearer tokens are accepted, execution tokens receive `403`. Every tool call forwards the caller's token into the real REST route, which re-applies the action/resource rule. | `src/kuzya/api/mcp/endpoint.py`, `registry.py`, `executor.py`; [MCP transport](mcp.md) |
 
 In `src/kuzya/capabilities.py` the transport is four explicit records
 (`GET`/`POST` × `/mcp`/`/mcp/`) with `kind="adapter"`, `action="*"`,
-`resource="*"` and `doc="mcp.md"`. They do not repeat the 44 generated MCP
+`resource="*"` and `doc="mcp.md"`. They do not repeat the 48 generated MCP
 tools. `audit_capabilities` removes endpoint-kind records from the OpenAPI
 comparison, so the adapter is neither falsely `unsupported` nor
 `undocumented`; it also checks each adapter path against the mounted

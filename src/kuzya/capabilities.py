@@ -668,7 +668,10 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         "/monitor/executions",
         action="tasks.read",
         doc="tools-and-api.md",
-        summary="list running tasks and operations with live session counters",
+        summary=(
+            "list running tasks and operations with live session counters; "
+            "verbose=true adds operation input and changed-file names"
+        ),
     ),
     _endpoint(
         "GET",
@@ -762,7 +765,7 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         response_schema="ConversationRead",
         response_many=True,
         doc="objects.md",
-        summary="list conversations",
+        summary="list conversations with optional agent_id filter",
     ),
     _endpoint(
         "GET",
@@ -771,6 +774,24 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         response_schema="ConversationRead",
         doc="objects.md",
         summary="read one conversation",
+    ),
+    _endpoint(
+        "PATCH",
+        "/conversations/{conversation_id}",
+        action="conversations.write",
+        request_schema="ConversationPatch",
+        response_schema="ConversationRead",
+        doc="objects.md",
+        summary="patch conversation title or shallow-merged metadata",
+    ),
+    _endpoint(
+        "POST",
+        "/conversations/{conversation_id}/talk",
+        action="conversations.write",
+        request_schema="ConversationTalkRequest",
+        response_schema="ConversationRead",
+        doc="task-lifecycle.md",
+        summary="start, close or finalize a direct-agent workspace talk",
     ),
     _endpoint(
         "POST",
@@ -825,6 +846,15 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         response_many=True,
         doc="analysis-and-recommendations.md",
         summary="list a task's analysis reports",
+    ),
+    _endpoint(
+        "GET",
+        "/tasks/{task_id}/review",
+        action="tasks.read",
+        response_schema="ReviewRoundRead",
+        response_many=True,
+        doc="review.md",
+        summary="list persisted review rounds and findings for a task",
     ),
     _endpoint(
         "GET",
@@ -892,7 +922,10 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         response_schema="OperationRead",
         response_many=True,
         doc="tools-and-api.md",
-        summary="list operations (administrative only for scoped callers)",
+        summary=(
+            "list operations with status/kind/target_id filters "
+            "(administrative only for scoped callers)"
+        ),
         deferred=True,
     ),
     _endpoint(
@@ -929,6 +962,18 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
         response_schema="AgentRead",
         doc="profiles-runtime-skills.md",
         summary="read the current profile snapshot",
+    ),
+    _endpoint(
+        "GET",
+        "/agents/{agent_id}/sessions",
+        action="agents.read",
+        response_schema="AgentSessionRead",
+        response_many=True,
+        doc="profiles-runtime-skills.md",
+        summary=(
+            "list native Runner session ids, attempt counts and timestamps "
+            "without reading session contents"
+        ),
     ),
     _endpoint(
         "GET",
@@ -1000,7 +1045,7 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
 )
 
 #: MCP is one transport adapter, represented by its supported method/path
-#: pairs. It deliberately does not repeat the 43 generated MCP tools: those
+#: pairs. It deliberately does not repeat the 45 generated MCP tools: those
 #: are derived from the REST endpoints at application construction.
 _ADAPTER_CAPABILITIES: tuple[Capability, ...] = tuple(
     _adapter(

@@ -13,6 +13,7 @@ from aiogram.types import BufferedInputFile, FSInputFile, InputRichMessage
 from kuzya.knowledge import KnowledgeBase, SEND_FILE_PATTERN
 from .client import BackendClient
 from .keyboards import (
+    agent_conversation_keyboard,
     cancel_queue_keyboard,
     dialog_switch_keyboard,
     talk_keyboard,
@@ -173,6 +174,7 @@ class QueueProcessor:
         chat_id = queued_msg.chat_id
         conv_id = queued_msg.context_conversation_id
         text = queued_msg.text
+        agent_talk_id = await self._agent_talk_agent_id(queued_msg, conv_id)
         # The durable delivery row claimed for this turn's reply, if any. It
         # lives outside the try so an unexpected error below can hand the
         # delivery back to the outbox instead of leaving it stuck in sending.
@@ -286,10 +288,14 @@ class QueueProcessor:
                 elif not clean_reply_text:
                     clean_reply_text = "Ответ получен."
 
-                switch_keyboard = dialog_switch_keyboard(
-                    conversation_id=conv_id,
-                    task_id=task_metadata.get("task_id"),
-                    task_number=task_metadata.get("task_number"),
+                switch_keyboard = (
+                    agent_conversation_keyboard(agent_talk_id, conv_id)
+                    if agent_talk_id
+                    else dialog_switch_keyboard(
+                        conversation_id=conv_id,
+                        task_id=task_metadata.get("task_id"),
+                        task_number=task_metadata.get("task_number"),
+                    )
                 )
 
                 if outbox_owned:
@@ -525,13 +531,19 @@ class QueueProcessor:
                     ),
                     conv_id,
                 )
-                markup = talk_keyboard() if is_talk else dialog_switch_keyboard(
-                    conversation_id=conv_id,
-                    task_id=(
-                        queued_msg.context_task_id
-                        if queued_msg.context_mode == "task"
-                        else None
-                    ),
+                markup = (
+                    agent_conversation_keyboard(agent_talk_id, conv_id)
+                    if agent_talk_id
+                    else talk_keyboard()
+                    if is_talk
+                    else dialog_switch_keyboard(
+                        conversation_id=conv_id,
+                        task_id=(
+                            queued_msg.context_task_id
+                            if queued_msg.context_mode == "task"
+                            else None
+                        ),
+                    )
                 )
                 if status_msg_id:
                     await self._safe_edit_text(chat_id, status_msg_id, err_msg, reply_markup=markup)
@@ -560,13 +572,19 @@ class QueueProcessor:
                     ),
                     conv_id,
                 )
-                markup = talk_keyboard() if is_talk else dialog_switch_keyboard(
-                    conversation_id=conv_id,
-                    task_id=(
-                        queued_msg.context_task_id
-                        if queued_msg.context_mode == "task"
-                        else None
-                    ),
+                markup = (
+                    agent_conversation_keyboard(agent_talk_id, conv_id)
+                    if agent_talk_id
+                    else talk_keyboard()
+                    if is_talk
+                    else dialog_switch_keyboard(
+                        conversation_id=conv_id,
+                        task_id=(
+                            queued_msg.context_task_id
+                            if queued_msg.context_mode == "task"
+                            else None
+                        ),
+                    )
                 )
                 if status_msg_id:
                     await self._safe_edit_text(
@@ -621,6 +639,60 @@ class QueueProcessor:
                         reply_markup=None,
                     )
                 asyncio.create_task(self.process_message(next_msg))
+            elif agent_talk_id:
+                # A closing direct talk releases its workspace only after
+                # the local queue is empty; the backend re-checks pending
+                # and running turns in the same transaction.
+                await self._finalize_closing_talk(conv_id)
+
+    async def _finalize_closing_talk(self, conversation_id: str) -> None:
+        """Ask the backend to release a closing talk if it is idle."""
+        try:
+            conversation = await self.client.get_conversation(
+                conversation_id
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to read closing talk %s: %s", conversation_id, error
+            )
+            return
+        metadata = conversation.get("metadata") or {}
+        if metadata.get("talk_closing") is not True:
+            return
+        try:
+            await self.client.finalize_talk(conversation_id)
+        except Exception as error:
+            logger.warning(
+                "Failed to finalize closing talk %s: %s",
+                conversation_id,
+                error,
+            )
+
+    async def _agent_talk_agent_id(
+        self, queued_msg: QueuedMessage, conversation_id: str
+    ) -> str | None:
+        """Return the direct-talk agent for this conversation, if any.
+
+        Only a conversation created by the agent-selection flow carries
+        ``metadata.talkable_agent``; a failed lookup never blocks the message
+        and falls back to the ordinary dialog keyboard.
+        """
+        if queued_msg.context_mode != "agent_talk":
+            return None
+        try:
+            conversation = await self.client.get_conversation(
+                conversation_id
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to read agent talk conversation %s: %s",
+                conversation_id,
+                error,
+            )
+            return None
+        metadata = conversation.get("metadata") or {}
+        agent_id = metadata.get("talkable_agent")
+        return str(agent_id) if agent_id else None
 
     async def _task_context_for_message(
         self, queued_msg: QueuedMessage, text: str

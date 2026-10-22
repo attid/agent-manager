@@ -27,7 +27,7 @@ Source: `src/kuzya/api/mcp/endpoint.py` (mounting and MCP server),
 - `/mcp` is not an OpenAPI operation and therefore is not in
   `app.openapi()`. It is declared in `src/kuzya/capabilities.py` as explicit
   adapter method/path records (`GET`/`POST` × `/mcp`/`/mcp/`,
-  `kind="adapter"`), not as OpenAPI endpoints and not as 44 duplicated MCP
+  `kind="adapter"`), not as OpenAPI endpoints and not as 48 duplicated MCP
   tools. `audit_capabilities` excludes adapter records from the OpenAPI route
   comparison, checks their paths against the mounted application router and
   confirms `resolve_requirement` still returns `None` for them. The
@@ -36,8 +36,8 @@ Source: `src/kuzya/api/mcp/endpoint.py` (mounting and MCP server),
 
 ### MCP tools versus REST routes
 
-In the current tree the OpenAPI document contains 46 method+path operations.
-The registry contains 44 tools. The mapping is derived, not hand-written:
+In the current tree the OpenAPI document contains 50 method+path operations.
+The registry contains 48 tools. The mapping is derived, not hand-written:
 
 | REST operation | MCP tool | Mapping |
 |---|---|---|
@@ -212,7 +212,7 @@ print("/mcp in OpenAPI:", "/mcp" in spec["paths"])
 PY
 ```
 
-Expected in the current tree: `46` REST operations, `44` MCP tools,
+Expected in the current tree: `50` REST operations, `48` MCP tools,
 `REST without MCP` containing `GET /health` and
 `POST /tasks/{task_id}/attachments`, and `/mcp in OpenAPI: False`. The
 inventory check also mounts the application and verifies the four adapter

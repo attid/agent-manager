@@ -45,7 +45,7 @@ from ..storage.telegram_delivery import (
     TelegramDeliveryRepository,
     reply_delivery_key,
 )
-from .keyboards import dialog_switch_keyboard
+from .keyboards import agent_conversation_keyboard, dialog_switch_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +327,29 @@ async def send_rich_or_plain(
     )
 
 
+def conversation_delivery_keyboard(
+    database: Database, conversation_id: str
+) -> Any:
+    """Return the reply keyboard for one conversation.
+
+    The outbox and the synchronous worker must agree: a direct-agent talk
+    always carries «🏁 Закончить»/«💬 С секретарём», while task and ordinary
+    dialogs keep the existing switch button.
+    """
+    task = find_task_for_conversation(database, conversation_id)
+    with database.session() as session:
+        conversation = session.get(Conversation, conversation_id)
+        metadata = dict(conversation.meta or {}) if conversation is not None else {}
+    agent_id = metadata.get("talkable_agent")
+    if isinstance(agent_id, str) and agent_id:
+        return agent_conversation_keyboard(agent_id, conversation_id)
+    return dialog_switch_keyboard(
+        conversation_id=conversation_id,
+        task_id=task.id if task is not None else None,
+        task_number=task.number if task is not None else None,
+    )
+
+
 def find_task_for_conversation(database: Database, conversation_id: str) -> Task | None:
     """Return the most recently updated task bound to a conversation."""
     with database.session() as session:
@@ -489,11 +512,8 @@ class TelegramDeliveryService:
         )
         parts += [("file", target) for target in file_targets]
 
-        task = find_task_for_conversation(self.database, row.conversation_id)
-        keyboard = dialog_switch_keyboard(
-            conversation_id=row.conversation_id,
-            task_id=task.id if task is not None else None,
-            task_number=task.number if task is not None else None,
+        keyboard = conversation_delivery_keyboard(
+            self.database, row.conversation_id
         )
 
         try:

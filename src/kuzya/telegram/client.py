@@ -189,6 +189,51 @@ class BackendClient:
     async def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/conversations/{conversation_id}")
 
+    async def patch_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if title is not None:
+            payload["title"] = title
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return await self._request(
+            "PATCH", f"/conversations/{conversation_id}", json=payload
+        )
+
+    async def _conversation_talk_action(
+        self, conversation_id: str, action: str
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            f"/conversations/{conversation_id}/talk",
+            json={"action": action},
+        )
+
+    async def start_talk(self, conversation_id: str) -> dict[str, Any]:
+        """Activate a direct-agent talk or mark it pending if busy."""
+        return await self._conversation_talk_action(
+            conversation_id, "start"
+        )
+
+    async def request_end_talk(
+        self, conversation_id: str
+    ) -> dict[str, Any]:
+        """Stop accepting new turns while keeping the workspace lock."""
+        return await self._conversation_talk_action(
+            conversation_id, "request_end"
+        )
+
+    async def finalize_talk(self, conversation_id: str) -> dict[str, Any]:
+        """Release the lock only when no pending/running turn remains."""
+        return await self._conversation_talk_action(
+            conversation_id, "finalize"
+        )
+
     async def get_telegram_link(
         self, chat_id: int, telegram_message_id: int
     ) -> dict[str, Any] | None:
@@ -213,6 +258,20 @@ class BackendClient:
         if limit is not None:
             params["limit"] = limit
         return await self._request("GET", "/conversations", params=params)
+
+    # -- Agents --
+
+    async def list_agents(
+        self, *, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
+        return await self._request(
+            "GET",
+            "/agents",
+            params={"include_archived": str(include_archived).lower()},
+        )
+
+    async def get_agent(self, agent_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/agents/{agent_id}")
 
     # -- Messages --
 

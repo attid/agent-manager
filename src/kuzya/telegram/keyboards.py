@@ -37,9 +37,132 @@ def talk_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🔄 Новый диалог", callback_data="action:reset_talk"),
                 InlineKeyboardButton(text="📋 Список задач", callback_data="action:list_tasks"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👥 Выбрать агента", callback_data="talk_agent:1"
+                ),
+            ],
+        ]
+    )
+
+
+def talk_agent_keyboard(
+    agents: list[dict[str, Any]],
+    page: int = 1,
+    page_size: int = 10,
+) -> InlineKeyboardMarkup:
+    """Paginated list of agents that allow direct conversations.
+
+    ``agents`` is the already filtered ``talkable`` profile list. Each row
+    selects one agent by its stable id; the handler verifies the flag again
+    before creating or resuming a conversation.
+    """
+    total_pages = max(1, (len(agents) + page_size - 1) // page_size)
+    current_page = max(1, min(page, total_pages))
+    start = (current_page - 1) * page_size
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    for agent in agents[start : start + page_size]:
+        agent_id = str(agent.get("agent_id") or "")
+        if not agent_id:
+            continue
+        name = str(agent.get("name") or agent_id)
+        if len(name) > 40:
+            name = name[:37] + "..."
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"👤 {name} ({agent_id})",
+                    callback_data=f"select_talk_agent:{agent_id}",
+                )
+            ]
+        )
+    if not keyboard:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text="— Нет доступных агентов —", callback_data="noop"
+                )
+            ]
+        )
+
+    if total_pages > 1:
+        prev_btn = (
+            InlineKeyboardButton(
+                text="⬅️", callback_data=f"talk_agent:{current_page - 1}"
+            )
+            if current_page > 1
+            else InlineKeyboardButton(text="⏹", callback_data="noop")
+        )
+        page_btn = InlineKeyboardButton(
+            text=f"Стр. {current_page} из {total_pages}",
+            callback_data="noop",
+        )
+        next_btn = (
+            InlineKeyboardButton(
+                text="➡️", callback_data=f"talk_agent:{current_page + 1}"
+            )
+            if current_page < total_pages
+            else InlineKeyboardButton(text="⏹", callback_data="noop")
+        )
+        keyboard.append([prev_btn, page_btn, next_btn])
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="💬 К секретарю", callback_data="action:talk"
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def agent_conversation_keyboard(
+    agent_id: str, conversation_id: str | None = None
+) -> InlineKeyboardMarkup:
+    """Buttons attached to every direct-agent reply.
+
+    Ending releases the agent workspace lock without deleting the native
+    Runner session, so a later selection resumes the same conversation.
+    """
+    end_callback = (
+        f"end_talk:{conversation_id}" if conversation_id else "end_talk:"
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🏁 Закончить", callback_data=end_callback
+                ),
+                InlineKeyboardButton(
+                    text="💬 С секретарём", callback_data="action:talk"
+                ),
             ]
         ]
     )
+
+
+def active_talks_keyboard(
+    conversations: list[dict[str, Any]],
+) -> InlineKeyboardMarkup:
+    """One 'end' button per active direct-agent conversation."""
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for conversation in conversations:
+        conversation_id = str(conversation.get("id") or "")
+        if not conversation_id:
+            continue
+        metadata = conversation.get("metadata") or {}
+        agent_id = str(metadata.get("talkable_agent") or "agent")
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🏁 Закончить ({agent_id})",
+                    callback_data=f"end_talk:{conversation_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def cancel_queue_keyboard(queue_id: str) -> InlineKeyboardMarkup:
@@ -199,6 +322,7 @@ def task_categories_keyboard(
     page: int = 1,
     page_size: int = 8,
     counts: dict[str, int] | None = None,
+    active_talks_count: int = 0,
 ) -> InlineKeyboardMarkup:
     """Category tabs and paginated task list buttons.
 
@@ -285,6 +409,16 @@ def task_categories_keyboard(
         )
         keyboard.append([prev_btn, page_btn, next_btn])
 
+    # Active direct-agent conversations are a separate entity from tasks:
+    # they occupy an agent workspace but never appear in a task category.
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text=f"🗣 Разговоры: {active_talks_count}",
+                callback_data="action:active_talks",
+            )
+        ]
+    )
     # Live execution monitor and global actions.
     keyboard.append(
         [

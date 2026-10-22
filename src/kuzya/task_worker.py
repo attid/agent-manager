@@ -647,7 +647,9 @@ class TaskExecutionWorker:
         Returns None when no task was available. Catches all exceptions during
         execution and marks the task failed with diagnostic error without crashing.
         """
-        task = self._repository.claim_in_progress(worker_id=self.worker_id)
+        task = self._repository.claim_in_progress(
+            worker_id=self.worker_id, default_agent_id=self.agent_id
+        )
         if task is None:
             return None
 

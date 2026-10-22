@@ -100,6 +100,15 @@ from .operations import (
     OperationStaleClaimError,
     OperationSubmitResult,
 )
+from .workspace_talks import (
+    ConversationTalkClosedError,
+    ConversationTalkNotFoundError,
+    WorkspaceBusyError,
+    WorkspaceTalkRepository,
+    active_talk_locks,
+    resolve_effective_execution,
+    task_waits_for_talk,
+)
 from .repository import (
     ConversationNotFoundError,
     ConversationRepository,
@@ -184,4 +193,11 @@ __all__ = [
     "interrupted_blocked_reason",
     "is_interrupted_block",
     "release_interrupted_reservation",
+    "WorkspaceBusyError",
+    "WorkspaceTalkRepository",
+    "ConversationTalkClosedError",
+    "ConversationTalkNotFoundError",
+    "active_talk_locks",
+    "resolve_effective_execution",
+    "task_waits_for_talk",
 ]

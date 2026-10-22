@@ -1,0 +1,689 @@
+diff --git a/docs/handbook/capability-inventory.md b/docs/handbook/capability-inventory.md
+--- a/docs/handbook/capability-inventory.md
++++ b/docs/handbook/capability-inventory.md
+@@ -1,13 +1,15 @@
+ # Capability inventory
+ 
+ The authoritative machine-readable inventory is
+-`src/kuzya/capabilities.py`. It declares every registered Pi JS tool
+-and REST endpoint with its method, schema, result status, permission action,
+-operation kind and handbook document. `audit_capabilities` compares that
+-declaration with the generated OpenAPI document, the real tools registered by
+-`src/pi_runner/policy.mjs` and `ACTIONS_FOR_TOOLS`; `tests/test_capabilities.py`
+-runs it. An undeclared tool, unsupported route, schema drift or silent
+-privilege widening fails the check.
++`src/kuzya/capabilities.py`. It declares every registered Pi JS tool,
++REST endpoint and transport adapter with its method, schema, result status,
++permission action, resource, operation kind and handbook document.
++`audit_capabilities` compares REST endpoint records with the generated
++OpenAPI document, adapter records with the mounted application router, tools
++with the real registry in `src/pi_runner/policy.mjs`, and actions with
++`ACTIONS_FOR_TOOLS`; `tests/test_capabilities.py` runs it. An undeclared
++tool, unsupported route, missing adapter, schema drift or silent privilege
++widening fails the check.
+ 
+ ## Tool inventory (38 tools)
+ 
+@@ -100,10 +102,16 @@
+ |---|---|---|---|---|
+ | `mcp_streamable_http` | `POST /mcp`, `GET /mcp` and `/mcp/` | Every JSON business operation generated from `app.openapi()` (43 tools for 45 REST operations; `GET /health` is excluded as a service route and the multipart attachment upload has no JSON tool) | No. `/mcp` is not an OpenAPI operation and has no entry in the permission route rules; administrative Bearer tokens are accepted, execution tokens receive `403`. Every tool call forwards the caller's token into the real REST route, which re-applies the action/resource rule. | `src/kuzya/api/mcp/endpoint.py`, `registry.py`, `executor.py`; [MCP transport](mcp.md) |
+ 
+-The adapter is intentionally absent from `CAPABILITIES`: `audit_capabilities`
+-compares `ENDPOINT_CAPABILITIES` with OpenAPI operations, and `/mcp` is not
+-one. Declaring it as an endpoint would produce an `unsupported-route` finding.
+-The handbook entry above is the single inventory record for the transport.
++In `src/kuzya/capabilities.py` the transport is four explicit records
++(`GET`/`POST` × `/mcp`/`/mcp/`) with `kind="adapter"`, `action="*"`,
++`resource="*"` and `doc="mcp.md"`. They do not repeat the 43 generated MCP
++tools. `audit_capabilities` removes endpoint-kind records from the OpenAPI
++comparison, so the adapter is neither falsely `unsupported` nor
++`undocumented`; it also checks each adapter path against the mounted
++application routes and asserts that `resolve_requirement` still returns
++`None` (no permission route rule), which is what keeps an execution token at
++`403`. The handbook row above remains the single human-readable adapter
++inventory record.
+ 
+ ## Worker inventory
+ 
+diff --git a/docs/handbook/mcp.md b/docs/handbook/mcp.md
+--- a/docs/handbook/mcp.md
++++ b/docs/handbook/mcp.md
+@@ -25,10 +25,13 @@
+   a route added to a running app becomes a tool on the next application
+   construction/restart, not dynamically during the same process.
+ - `/mcp` is not an OpenAPI operation and therefore is not in
+-  `app.openapi()`. It is also not a declared endpoint in
+-  `src/kuzya/capabilities.py`; the capability audit compares declared REST
+-  endpoints with OpenAPI operations and would report `/mcp` as unsupported if
+-  it were declared there. The transport is documented once in
++  `app.openapi()`. It is declared in `src/kuzya/capabilities.py` as explicit
++  adapter method/path records (`GET`/`POST` × `/mcp`/`/mcp/`,
++  `kind="adapter"`), not as OpenAPI endpoints and not as 43 duplicated MCP
++  tools. `audit_capabilities` excludes adapter records from the OpenAPI route
++  comparison, checks their paths against the mounted application router and
++  confirms `resolve_requirement` still returns `None` for them. The
++  human-readable adapter row is in
+   [Capability inventory](capability-inventory.md#mcp-transport-adapter).
+ 
+ ### MCP tools versus REST routes
+@@ -211,7 +214,10 @@
+ 
+ Expected in the current tree: `45` REST operations, `43` MCP tools,
+ `REST without MCP` containing `GET /health` and
+-`POST /tasks/{task_id}/attachments`, and `/mcp in OpenAPI: False`.
++`POST /tasks/{task_id}/attachments`, and `/mcp in OpenAPI: False`. The
++inventory check also mounts the application and verifies the four adapter
++records against `app.router.routes`; `/mcp` must be absent from OpenAPI and
++absent from permission route rules.
+ 
+ ### Authentication
+ 
+diff --git a/docs/handbook/task-lifecycle.md b/docs/handbook/task-lifecycle.md
+--- a/docs/handbook/task-lifecycle.md
++++ b/docs/handbook/task-lifecycle.md
+@@ -150,16 +150,24 @@
+ 
+ Resume is allowed for terminal statuses and is an execution authorization:
+ 
+-- The tool refuses only a `failed` task (it returns the failed record without
+-  patching); it has no `done`/`archived` guard, and the server route does not
+-  inspect the previous status at all.
++- The tool's only refusal is an API read failure, not a task status. It first
++  calls `GET /tasks/{task_id}` through `backendRequest`, whose envelope is
++  `{status: "ok"|"failed", data}` and whose `status` describes the HTTP read
++  (`src/pi_runner/policy.mjs:66-85`). It returns early only when
++  `current.status == "failed"`. The task status lives in
++  `current.data.status` and is never inspected; the subsequent `PATCH` runs
++  unconditionally (`policy.mjs:564-573`). The server route does not check the
++  previous task status either.
++- Resume from `failed` is therefore allowed and requeues execution exactly
++  like `done`/`archived`. There is no `failed` guard and no status filter: the
++  `PATCH` sets `status="in_progress"` plus the new instructions.
+ - Setting `in_progress` starts a **new execution cycle** through the normal
+   claim predicate; it is not merely a note appended to the instructions.
+   When the executor and workspace are unchanged the worker resumes the prior
+   native Runner session, so its attempt counter continues (a `done` task was
+   observed resuming at `attempt 7`).
+ - Treat it as an explicit request to execute again and confirm intent before
+-  resuming a `done` or `archived` task.
++  resuming a `done`, `archived` or `failed` task.
+ 
+ ## Turns (secretary lifecycle)
+ 
+diff --git a/docs/handbook/tools-and-api.md b/docs/handbook/tools-and-api.md
+--- a/docs/handbook/tools-and-api.md
++++ b/docs/handbook/tools-and-api.md
+@@ -7,16 +7,26 @@
+ ## REST endpoints
+ 
+ The authoritative list is the generated OpenAPI document (`GET /openapi.json`)
+-and `src/kuzya/api/app.py`. The surface below is complete: every route the app
+-exposes is listed, including artifact, session and subscription routes. The app
+-also mounts an MCP server on `POST /mcp` and `GET /mcp`; it is generated from
+-this OpenAPI document, is not a route in `capabilities.py` and has no Pi JS
+-tool. See [MCP transport](mcp.md) and the
++and `src/kuzya/api/app.py`. The 45 REST operations below are complete: every
++business route the app exposes is listed, including artifact, session and
++subscription routes. The app also mounts an MCP transport on `GET`/`POST` for
++`/mcp` and `/mcp/`. It is not an OpenAPI operation and has no Pi JS tool. It
++is represented in `src/kuzya/capabilities.py` by explicit adapter method/path
++records (`kind="adapter"`, action/resource `"*"`), not by duplicating the 43
++generated MCP tools; the adapter inherits the REST action/resource and adds no
++permission. See [MCP transport](mcp.md) and the
+ [ChatGPT plugin guide](../mcp-chatgpt.md).
+ 
+-`{task_id}` accepts either the internal `id` or the human `number`
+-(`41`); an exact internal id wins over a numeric number. `{path}` and
+-`{artifact_name}` are greedy path parameters (`:path`).
++`{task_id}` accepts either the internal `id` or the human `number` (`41`) on
++task routes that resolve through `TaskRepository.get`; an exact internal id
++wins over a numeric number. `GET /tasks/{task_id}/analysis` is the exception:
++it passes the path string straight to `AnalysisRepository.list_reports`
++without `TaskRepository.get`, so it requires the internal UUID. For a task
++with UUID `A` and `number=41`, `/tasks/41/analysis` returns an empty list even
++when reports exist for `A`. Numeric lookup is not claimed for other entities
++or filters: for example the `task_id` query filter on `/recommendations` and
++operation `target_id` are opaque strings. `{path}` and `{artifact_name}` are
++greedy path parameters (`:path`).
+ 
+ | Method | Path | Success | Required action | Notes |
+ |---|---|---|---|---|
+@@ -47,7 +57,7 @@
+ | `POST` | `/operations` | `202`/`200`, `403`, `409`, `422` | deferred (kind-scoped) | Submit a durable operation. |
+ | `GET` | `/operations` | `200`, `403` | deferred | List the queue; scoped callers get `403`. |
+ | `GET` | `/operations/{operation_id}` | `200`, `404` | deferred | Read status/result/error; owner-scoped. |
+-| `GET` | `/tasks/{task_id}/analysis` | `200` | `analysis.read` | List a task's analysis reports (empty for unknown id). |
++| `GET` | `/tasks/{task_id}/analysis` | `200` | `analysis.read` | List a task's analysis reports; internal UUID only, no human-number lookup (empty for unknown id). |
+ | `GET` | `/analysis/{report_id}` | `200`, `404` | `analysis.read` | Read one report with evidence. |
+ | `GET` | `/analysis/{report_id}/recommendations` | `200`, `404` | `analysis.read` | List a report's recommendations. |
+ | `GET` | `/recommendations` | `200` | `analysis.read` | Filters: `task_id`, `status`, `target_kind`, `limit`, `offset`. |
+@@ -76,10 +86,14 @@
+   wildcard resource authority for a scoped caller. A task-scoped execution can
+   read or write only `task:<id>` resources, not enumerate tasks, operations,
+   agents or knowledge.
+-- `limit` is optional and unlimited when omitted; `offset` defaults to `0`.
+-  Ordering is stated per section where it matters: tasks and recommendations
+-  are oldest first, analysis reports are newest first, and messages are ordered
+-  by `sequence`.
++- `limit` is an optional `int | null` and is unlimited when omitted; it is
++  the row-count bound. `offset` is an `int` with default `0`. The route
++  signatures declare no `ge`/`le` constraints, so FastAPI accepts any integer;
++  SQLAlchemy applies the values as `.limit()`/`.offset()` when `limit is not
++  None`/`offset` is truthy (`limit=0` returns an empty page). This applies to
++  every list route declaring these query parameters. Ordering is stated per
++  section where it matters: tasks and recommendations are oldest first,
++  analysis reports are newest first, and messages are ordered by `sequence`.
+ - Validation errors are `422` with FastAPI's standard `detail` array. Request
+   models with `extra="forbid"` reject unknown fields; `TaskImportItem` is the
+   documented exception that folds extras into `metadata`.
+@@ -225,10 +239,20 @@
+ #### `PATCH /tasks/{task_id}`
+ 
+ - Auth: `tasks.write` on `task:<id>`.
+-- Body (`TaskPatch`, all optional, unknown fields `422`): `title`,
+-  `description`, `status`, `workspace`, `agent_id`, `metadata`, `attachments`.
+-  Omitted fields are unchanged. `metadata` is shallow-merged; `attachments`
+-  replaces the whole stored array (`null` removes the key).
++- Body (`TaskPatch`, every field optional, unknown fields `422`):
++  `title: str | null`, `description: str | null`, `status: str | null`,
++  `workspace: str | null`, `agent_id: str | null`,
++  `metadata: object | null`, `attachments: array<TaskAttachment> | null`.
++  Omitted fields are unchanged (`model_fields_set`). An explicit `null` is
++  not uniformly "clear":
++  - `description`, `workspace` and `agent_id` store `NULL`/`null`.
++  - `attachments: null` removes `metadata.attachments`; an array replaces the
++    whole stored array.
++  - `metadata: null` shallow-merges `{}`, so it changes nothing and does not
++    clear existing keys. Send explicit keys to replace their values.
++  - `title: null` and `status: null` are accepted, not rejected.
++    `TaskRepository.update` applies `str(value)`, so they are stored as the
++    literal string `"None"`. Omit the field when the intent is "unchanged".
+ - `status="in_progress"` clears a terminal `metadata.execution_status`
+   (including `completed`) so the worker claims the task again.
+   `attachments`/other fields do not.
+@@ -424,6 +448,12 @@
+ #### `GET /tasks/{task_id}/analysis`
+ 
+ - Auth: `analysis.read` on `task:<id>`.
++- Path `task_id` must be the internal UUID. This route does not call
++  `TaskRepository.get`; it passes the string to
++  `AnalysisRepository.list_reports`, which filters the stored `task_id`
++  column directly (`src/kuzya/api/app.py:1716-1724`). A human `number` is not
++  resolved, so `/tasks/41/analysis` returns `[]` for a task whose UUID differs
++  from `"41"`, even when reports exist.
+ - `200` array of `AnalysisReportRead`, newest first. Unlike the other
+   task-scoped reads, an unknown task id returns an empty list, not `404`
+   (`AnalysisRepository.list_reports` only filters by `task_id`).
+@@ -494,15 +524,19 @@
+ 
+ #### `GET /agents/{agent_id}/revisions/{revision}`
+ 
+-- Auth: `agents.read` on `agent:<id>`. `200` `AgentRead`; `404` unknown
+-  agent/revision.
++- Auth: `agents.read` on `agent:<id>`. Path `revision` is an `int` with no
++  explicit numeric bounds; a non-integer is `422`.
++- `200` `AgentRead`; `404` unknown agent/revision.
+ 
+ #### `PATCH /agents/{agent_id}`
+ 
+ - Auth: `agents.write` on `agent:<id>`.
+ - Body (`AgentPatch`, unknown fields `422`): `expected_revision` (required
+-  int), optional `name`, `role`, `system_prompt`, `runner_config`, `skills`,
+-  `knowledge`. Explicit `null` for an optional field is `422`. Omitted fields
++  `int`), `name: str | null`, `role: str | null`,
++  `system_prompt: str | null`, `runner_config: object | null`,
++  `skills: array<object> | null`, `knowledge: object | null`. Every optional
++  field is typed, but an explicit `null` is rejected with `422` by
++  `_reject_explicit_nulls`; omit it to copy the current value. Omitted fields
+   are copied from the current snapshot; supplied fields replace whole (no
+   deep merge). A body with only `expected_revision` appends an unchanged
+   snapshot.
+@@ -616,12 +650,29 @@
+ `commit_hash`, `branch`, `ci_status`, `ci_required`, `pushed` and
+ `task_status`.
+ 
+-### No changes to commit is a success
++### Clean tree and no-op commit outcomes
+ 
+-When the working tree already matches `HEAD` (git reports "nothing to
+-commit"), the engine treats it as a successful `commit_local`, not an
+-execution error. An observed operation with `push=false` returned
+-`status=succeeded` with:
++A clean working tree does **not** by itself mean `succeeded`. `commit_local`
++first builds its candidate list from `metadata.changed_files`. If that list
++is empty or absent, it falls back to `git status --porcelain` (excluding
++`localdoc/` and `.gemini/`) (`src/kuzya/git_engine.py:96-113`).
++
++- If there are no candidates after that step (the common clean-tree case),
++  `commit_local` returns `success=False` with
++  `"Нет файлов для коммита в рабочей директории."` before running
++  `git commit`. The operation handler converts any `success=False` into
++  `OperationExecutionError`, so the operation ends `failed`
++  (`src/kuzya/operation_handlers.py:106-109`). No commit is attempted, and
++  `commit_and_push` returns before its `git push` step.
++- A non-empty declared list whose entries are all ignored or match nothing is
++  also `success=False` ("no stageable path"), so it is a failed operation too.
++- The only successful no-commit outcome requires at least one declared path
++  that git accepts for staging, followed by `git commit` reporting "nothing
++  to commit" (`git_engine.py:163-170`). Then `commit_local` returns
++  `success=True`, `action="commit_local"`, the message
++  `"Нет новых изменений для фиксации (рабочая директория чиста)."` and
++  `commit_hash=null`. An observed operation with `push=false` returned
++  `status=succeeded` with:
+ 
+ ```json
+ {
+@@ -633,20 +684,21 @@
+ }
+ ```
+ 
+-- This is **not** an error and there is nothing to retry. The operation
+-  completed; it simply created no commit.
+-- `commit_hash` is `null` because no commit object was created. Verify the
+-  real state with `git log -1` / `git show HEAD`, not by repeating the
+-  operation (see
++- This completed operation is not an error and there is nothing to retry; it
++  simply created no commit. `commit_hash` is `null` because no commit object
++  was created. Verify the real state with `git log -1` / `git show HEAD`, not
++  by repeating the operation (see
+   [Verification](verification.md#git-state-inspection-read-only)).
+-- The engine does not create an empty commit when the tree already matches
+-  `HEAD`.
++- The engine does not create an empty commit.
+ - Push does not happen when `input.push=false`; `result.pushed` reflects the
+   requested flag, not proof that a remote received anything.
+-- With `push=true` and no new local commit, `commit_and_push` still proceeds
+-  to `git push` of the current branch after the no-op commit, and the result
+-  reports `action="commit_push"`. A no-change push is not evidence that a new
+-  commit was created.
++- With `push=true`, push only follows a successful local result. The clean
++  tree/no-stageable failure above returns before `git push`, so that
++  `push=true` operation performs no push. In the narrow successful no-op
++  variant (declared stageable paths plus "nothing to commit"),
++  `commit_and_push` can reach `git push` of the current branch, but that push
++  contains no new commit; a no-change push is not evidence that a commit was
++  created.
+ - `git.rollback` restores the declared paths, marks the task `cancelled` and
+   returns success; it has no separate "nothing to roll back" error.
+ 
+@@ -730,22 +782,28 @@
+ ```bash
+ grep -n '@app\.' src/kuzya/api/app.py
+ grep -n '^    _endpoint(' src/kuzya/capabilities.py
++grep -n '^    _adapter(' src/kuzya/capabilities.py
+ ```
+ 
+ Static analysis must still cross-check the decorators against
+-`_ENDPOINT_CAPABILITIES` / `CAPABILITIES`; a route that exists in only one
+-of them is an inventory finding, not a documentation fact.
++`_ENDPOINT_CAPABILITIES` / `CAPABILITIES`, and the mounted `/mcp` routes
++against `ADAPTER_CAPABILITIES`; a route or adapter that exists in only one of
++them is an inventory finding, not a documentation fact.
+ 
+ ## Capability inventory
+ 
+ `src/kuzya/capabilities.py` is the machine-readable inventory of every
+-tool and route (method, schema, result status, permission action and handbook
+-document). `audit_capabilities` compares it with the generated OpenAPI
+-document, the tools actually registered by `policy.mjs` and
+-`ACTIONS_FOR_TOOLS`. `tests/test_capabilities.py` runs that audit, so an
+-undeclared tool, unsupported route, schema drift or silent privilege widening
+-fails deterministically. The `doc` field links each capability to its handbook
+-file.
++tool, REST route and transport adapter (method, schema, result status,
++permission action, resource and handbook document). `audit_capabilities`
++compares REST endpoint records with the generated OpenAPI document, adapter
++records with the mounted application routes, tools with the real
++`policy.mjs` registry, and actions with `ACTIONS_FOR_TOOLS`. The adapter
++records are `/mcp` and `/mcp/` for `GET`/`POST` with `kind="adapter"`; they
++document inherited authority and do not duplicate the generated MCP tools.
++`tests/test_capabilities.py` runs the audit, so an undeclared tool,
++unsupported route, missing adapter, schema drift or silent privilege widening
++fails deterministically. The `doc` field links each capability to its
++handbook file.
+ 
+ ## Related
+ 
+diff --git a/docs/handbook/verification.md b/docs/handbook/verification.md
+--- a/docs/handbook/verification.md
++++ b/docs/handbook/verification.md
+@@ -146,7 +146,7 @@
+ - [x] Every registered JS tool is represented in the capability inventory and
+       checked by `tests/test_capabilities.py`.
+ - [x] Every advertised operation kind has a registered executor.
+-- [x] OpenAPI, inventory and tool schemas agree.
++- [x] OpenAPI, inventory, mounted adapter routes and tool schemas agree.
+ - [x] A short platform operating prompt is injected on every run/resume and
+       customized identity prompts are preserved.
+ - [x] Parity tests enumerate the real registered tools (Node) and the live
+diff --git a/src/kuzya/capabilities.py b/src/kuzya/capabilities.py
+--- a/src/kuzya/capabilities.py
++++ b/src/kuzya/capabilities.py
+@@ -2,10 +2,10 @@
+ 
+ This module is the executable companion to ``docs/handbook``. It declares the
+ complete advertised platform surface -- the Pi JS tools in
+-``src/pi_runner/policy.mjs`` and the REST routes in
+-``src/kuzya/api/app.py`` -- and audits that declaration against the
+-live OpenAPI document, the real registered JS tools and the execution
+-permission registry.
++``src/pi_runner/policy.mjs``, the REST routes in ``src/kuzya/api/app.py``
++and transport adapters such as MCP -- and audits that declaration against
++the live OpenAPI document, the mounted application routes, the real
++registered JS tools and the execution permission registry.
+ 
+ Two audiences:
+ 
+@@ -31,6 +31,7 @@
+ )
+ 
+ __all__ = [
++    "ADAPTER_CAPABILITIES",
+     "CAPABILITIES",
+     "Capability",
+     "CapabilityAudit",
+@@ -154,14 +155,18 @@
+ 
+ @dataclasses.dataclass(frozen=True)
+ class Capability:
+-    """One advertised tool or REST endpoint.
++    """One advertised tool, REST endpoint or transport adapter.
+ 
+-    ``kind`` is ``"tool"`` for a registered Pi JS tool and ``"endpoint"`` for
+-    a REST route. Tool entries carry ``result_statuses`` (the values in the
+-    tool's structured result); endpoint entries carry ``success_statuses``.
+-    ``action`` is the execution-permission action the capability needs;
+-    ``None`` means the capability never reaches the HTTP backend (local) or
+-    that the action is resolved from the request body (deferred operations).
++    ``kind`` is ``"tool"`` for a registered Pi JS tool, ``"endpoint"`` for a
++    REST route in the OpenAPI document, and ``"adapter"`` for a transport
++    such as MCP that forwards to those routes. Tool entries carry
++    ``result_statuses`` (the values in the tool's structured result);
++    endpoint entries carry ``success_statuses``. ``action`` is the
++    execution-permission action the capability needs; ``None`` means the
++    capability never reaches the HTTP backend (local) or that the action is
++    resolved from the request body (deferred operations). Adapter entries
++    also carry ``resource``; they describe inherited authority, not a new
++    permission.
+     """
+ 
+     name: str
+@@ -169,6 +174,7 @@
+     method: str | None = None
+     path: str | None = None
+     action: str | None = None
++    resource: str | None = None
+     request_schema: str | None = None
+     response_schema: str | None = None
+     response_many: bool = False
+@@ -188,6 +194,7 @@
+             "method": self.method,
+             "path": self.path,
+             "action": self.action,
++            "resource": self.resource,
+             "request_schema": self.request_schema,
+             "response_schema": self.response_schema,
+             "response_many": self.response_many,
+@@ -231,6 +238,27 @@
+     )
+ 
+ 
++def _adapter(
++    method: str,
++    path: str,
++    *,
++    action: str,
++    resource: str,
++    doc: str,
++    summary: str,
++) -> Capability:
++    return Capability(
++        name=f"mcp_streamable_http {method} {path}",
++        kind="adapter",
++        method=method,
++        path=path,
++        action=action,
++        resource=resource,
++        doc=doc,
++        summary=summary,
++    )
++
++
+ def _endpoint(
+     method: str,
+     path: str,
+@@ -964,7 +992,27 @@
+     ),
+ )
+ 
+-#: The complete advertised surface: 37 tools plus every REST endpoint.
++#: MCP is one transport adapter, represented by its supported method/path
++#: pairs. It deliberately does not repeat the 43 generated MCP tools: those
++#: are derived from the REST endpoints at application construction.
++_ADAPTER_CAPABILITIES: tuple[Capability, ...] = tuple(
++    _adapter(
++        method,
++        path,
++        action="*",
++        resource="*",
++        doc="mcp.md",
++        summary=(
++            "MCP Streamable HTTP transport adapter; forwards to the real "
++            "REST route and inherits its action/resource"
++        ),
++    )
++    for path in ("/mcp", "/mcp/")
++    for method in ("GET", "POST")
++)
++
++#: The complete advertised surface: 38 tools, every REST endpoint and the
++#: explicit method/path records of the MCP transport adapter.
+ CAPABILITIES: tuple[Capability, ...] = (
+     *(_endpoint(
+         method, "/tasks/{task_id}/subscriptions", deferred=True,
+@@ -973,13 +1021,18 @@
+     ) for method in ("POST", "DELETE")),
+     *_TOOL_CAPABILITIES,
+     *_ENDPOINT_CAPABILITIES,
++    *_ADAPTER_CAPABILITIES,
+ )
+ 
+ TOOL_CAPABILITIES: tuple[Capability, ...] = tuple(
+     cap for cap in CAPABILITIES if cap.kind == "tool"
+ )
++#: Every HTTP route the inventory knows about: REST operations and adapters.
+ ENDPOINT_CAPABILITIES: tuple[Capability, ...] = tuple(
+-    cap for cap in CAPABILITIES if cap.kind == "endpoint"
++    cap for cap in CAPABILITIES if cap.kind in {"endpoint", "adapter"}
++)
++ADAPTER_CAPABILITIES: tuple[Capability, ...] = tuple(
++    cap for cap in CAPABILITIES if cap.kind == "adapter"
+ )
+ TOOL_BY_NAME: Mapping[str, Capability] = {
+     cap.name: cap for cap in TOOL_CAPABILITIES
+@@ -1088,16 +1141,23 @@
+     *,
+     openapi_paths: Mapping[str, Mapping[str, Any]] | None = None,
+     registered_tool_names: Iterable[str] | None = None,
++    mounted_route_paths: Iterable[str] | None = None,
+ ) -> CapabilityAudit:
+     """Compare the declared inventory with the live platform surface.
+ 
+     Args:
+         openapi_paths: The ``paths`` mapping from the FastAPI-generated
+-            OpenAPI document. When supplied, every declared endpoint must
+-            exist and every live route must be declared.
++            OpenAPI document. When supplied, every declared REST endpoint
++            must exist and every live route must be declared. Adapter
++            records are excluded from this comparison because they are
++            deliberately not OpenAPI operations.
+         registered_tool_names: The real tool names registered by
+             ``src/pi_runner/policy.mjs``. When supplied, the declared tools
+             and the registered tools must match exactly.
++        mounted_route_paths: Paths actually mounted on the application
++            router. When supplied, every declared adapter path must be
++            present; this prevents the adapter from silently disappearing
++            from the mounted app while remaining in the inventory.
+ 
+     The audit is executable and non-vacuous: it fails when a tool, route,
+     schema, permission mapping or operation-kind mapping drifts from source.
+@@ -1130,7 +1190,9 @@
+             for method in methods
+         }
+         declared_endpoints = {
+-            (cap.method or "", cap.path or "") for cap in ENDPOINT_CAPABILITIES
++            (cap.method or "", cap.path or "")
++            for cap in ENDPOINT_CAPABILITIES
++            if cap.kind == "endpoint"
+         }
+         for method, path in sorted(declared_endpoints - live):
+             findings.append(
+@@ -1149,9 +1211,47 @@
+                 )
+             )
+ 
++        mounted_paths = (
++            set(mounted_route_paths)
++            if mounted_route_paths is not None
++            else None
++        )
++        for cap in ADAPTER_CAPABILITIES:
++            key = (cap.method or "", cap.path or "")
++            adapter_path = cap.path or ""
++            if adapter_path in openapi_paths:
++                findings.append(
++                    Finding(
++                        "adapter-openapi-overlap",
++                        f"adapter declares {key[0]} {adapter_path} but the "
++                        "path is an OpenAPI operation",
++                    )
++                )
++            requirement = resolve_requirement(key[0], adapter_path)
++            if requirement is not None:
++                findings.append(
++                    Finding(
++                        "adapter-permission-drift",
++                        f"adapter {key[0]} {adapter_path} resolves to "
++                        f"{getattr(requirement, 'action', None)!r}; it must "
++                        "remain outside permission route rules so execution "
++                        "tokens are denied",
++                    )
++                )
++            if mounted_paths is not None and adapter_path not in mounted_paths:
++                findings.append(
++                    Finding(
++                        "missing-adapter-route",
++                        f"adapter declares {key[0]} {adapter_path} but the "
++                        "application router does not mount that path",
++                    )
++                )
++
+         for cap in ENDPOINT_CAPABILITIES:
++            if cap.kind != "endpoint":
++                continue
+             key = (cap.method or "", cap.path or "")
+-            operation = openapi_paths.get(cap.path or "", {}).get(
++            operation = openapi_paths.get(cap.path or {}, {}).get(
+                 (cap.method or "").lower()
+             )
+             if operation is None:
+diff --git a/tests/test_capabilities.py b/tests/test_capabilities.py
+--- a/tests/test_capabilities.py
++++ b/tests/test_capabilities.py
+@@ -18,6 +18,7 @@
+ 
+ from kuzya.api import create_app
+ from kuzya.capabilities import (
++    ADAPTER_CAPABILITIES,
+     CAPABILITIES,
+     ENDPOINT_CAPABILITIES,
+     HANDBOOK,
+@@ -31,7 +32,7 @@
+     write_handbook_discovery,
+ )
+ from kuzya.knowledge import KnowledgeBase
+-from kuzya.permissions import actions_for_tools
++from kuzya.permissions import actions_for_tools, resolve_requirement
+ from kuzya.storage import AgentProfileRepository, Database
+ 
+ REPO_ROOT = Path(__file__).resolve().parents[1]
+@@ -86,25 +87,75 @@
+     return json.loads(result.stdout)
+ 
+ 
+-def _openapi_paths(migrated_db: Path) -> dict:
+-    app = create_app(f"sqlite:///{migrated_db}")
+-    return app.openapi()["paths"]
++def _app(migrated_db: Path):
++    return create_app(f"sqlite:///{migrated_db}")
++
++
++def _mounted_route_paths(app) -> set[str]:
++    return {
++        route.path
++        for route in app.router.routes
++        if getattr(route, "path", None)
++    }
+ 
+ 
+ def test_inventory_parity_with_openapi_and_registered_tools(
+     tmp_path: Path, migrated_db: Path
+ ) -> None:
+-    paths = _openapi_paths(migrated_db)
++    app = _app(migrated_db)
++    paths = app.openapi()["paths"]
+     tool_names = _registered_tool_names(tmp_path)
+     audit = audit_capabilities(
+         openapi_paths=paths,
+         registered_tool_names=tool_names,
++        mounted_route_paths=_mounted_route_paths(app),
+     )
+     assert audit.ok, "\n".join(
+         f"{finding.code}: {finding.message}" for finding in audit.findings
+     )
+ 
+ 
++def test_mcp_adapter_is_inventory_covered_and_stays_outside_permissions(
++    migrated_db: Path,
++) -> None:
++    # The transport is explicit method/path records, not 43 duplicated tools.
++    assert {
++        (cap.method, cap.path) for cap in ADAPTER_CAPABILITIES
++    } == {
++        ("GET", "/mcp"),
++        ("POST", "/mcp"),
++        ("GET", "/mcp/"),
++        ("POST", "/mcp/"),
++    }
++    assert all(cap.kind == "adapter" for cap in ADAPTER_CAPABILITIES)
++    assert all(cap.action == "*" for cap in ADAPTER_CAPABILITIES)
++    assert all(cap.resource == "*" for cap in ADAPTER_CAPABILITIES)
++    assert all(cap.doc == "mcp.md" for cap in ADAPTER_CAPABILITIES)
++
++    app = _app(migrated_db)
++    paths = app.openapi()["paths"]
++    assert "/mcp" not in paths
++    # The adapter must not acquire a permission route rule: execution tokens
++    # are denied at the transport and keep using REST directly.
++    for method, path in (("GET", "/mcp"), ("POST", "/mcp/")):
++        assert resolve_requirement(method, path) is None
++
++    audit = audit_capabilities(
++        openapi_paths=paths,
++        mounted_route_paths=_mounted_route_paths(app),
++    )
++    assert audit.ok, [
++        (finding.code, finding.message) for finding in audit.findings
++    ]
++
++    # If the mounted route disappears while the inventory still declares it,
++    # the audit must report a concrete finding rather than silently pass.
++    missing = audit_capabilities(openapi_paths=paths, mounted_route_paths=set())
++    codes = {finding.code for finding in missing.findings}
++    assert "missing-adapter-route" in codes
++    assert not missing.ok
++
++
+ def test_inventory_declares_every_tool_once_and_documents_count() -> None:
+     document = inventory_document()
+     names = [tool["name"] for tool in document["tools"]]

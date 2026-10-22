@@ -893,6 +893,7 @@ def _render_task_text(turn_input: TurnInput) -> str:
     metadata string, it is rendered between the header and the message so the
     child prompt and the attachment manifest always agree.
     """
+    mode = turn_input.metadata.get("mode")
     header = (
         f"turn_id: {turn_input.turn_id}\n"
         f"conversation_id: {turn_input.conversation_id}\n"
@@ -901,7 +902,14 @@ def _render_task_text(turn_input: TurnInput) -> str:
         f"role: {turn_input.role}\n"
         f"wall_clock: {time_context_line()}\n"
     )
+    if isinstance(mode, str) and mode.strip():
+        header += f"mode: {mode.strip()}\n"
     context_blocks: list[str] = []
+    if isinstance(mode, str) and mode.strip() == "conversation":
+        context_blocks.append(
+            "Это интерактивный диалог с пользователем: твоя задача - "
+            "отвечать на вопросы пользователя в интерактивном диалоге."
+        )
     task_context = _render_task_context(turn_input.metadata)
     if task_context is not None and task_context not in turn_input.text:
         context_blocks.append(task_context)

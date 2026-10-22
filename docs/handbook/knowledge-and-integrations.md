@@ -98,7 +98,7 @@ Drain targets:
 | `archived_agents.json` | Archive a non-core agent. |
 | `created_agents.json` | Legacy compatibility; never overwrites an existing profile. |
 | `attachments.json` | Append `[SEND_FILE: <target>]` to the reply; only records tagged with the current turn identity are drained, and acknowledgement follows reply persistence. |
-| `clarification.json` | Signals `waiting_user_input`. |
+| `clarification.json` | Signals `waiting_for_input`. |
 | `actions.json` | Legacy `trigger_*` records; submitted as durable operations. |
 
 ## Skills
@@ -158,6 +158,14 @@ Drain targets:
   treat the transcript as the user's message and must not claim the audio did
   not exist.
 - `TelegramNotifier` posts task-finished notifications when configured.
+- Direct agent conversations are started from `/talk` → «👥 Выбрать агента».
+  Only profiles with `runner_config.talkable: true` are listed. The chosen
+  conversation carries `metadata.talkable_agent`/`talk_active`, keeps its
+  native Runner session, and appears as «🗣 Разговоры: N» in the task
+  category keyboard. Both the synchronous worker and the durable outbox
+  select the agent keyboard (`🏁 Закончить`/`💬 С секретарём`) from the same
+  conversation metadata. Ending it releases the agent workspace; see
+  [Task lifecycle](task-lifecycle.md#direct-conversations-with-task-agents).
 - `cmd_analyze` shows a stored analysis report without a model call, and
   otherwise submits the real durable operation and renders its stored
   pending/failed/succeeded outcome. A repeated view replays the same

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import html
 import logging
 from pathlib import Path
@@ -25,10 +26,13 @@ from .messenger import (
     send_rich_or_plain,
 )
 from .keyboards import (
+    active_talks_keyboard,
+    agent_conversation_keyboard,
     category_list_filters,
     execution_monitor_keyboard,
     mode_keyboard,
     task_display_number,
+    talk_agent_keyboard,
     talk_keyboard,
     task_card_keyboard,
     task_categories_keyboard,
@@ -84,7 +88,7 @@ async def cmd_start(
         f"Текущий режим: <b>{state.mode}</b>\n\n"
         "Выберите действие в меню ниже или используйте команды:\n"
         "• /new — поставить новую задачу\n"
-        "• /talk — общий разговор с секретарём\n"
+        "• /talk — общий разговор с секретарём или выбор агента\n"
         "• /list — просмотр задач и карточек\n"
         "• /live — что выполняется прямо сейчас"
     )
@@ -125,9 +129,17 @@ async def cmd_talk(
         storage.set_talk_conversation(user_id, talk_conv_id)
 
     storage.set_user_mode(user_id, "talk", conversation_id=talk_conv_id)
+    active_talks = await _active_talk_conversations(client)
+    suffix = (
+        f"\n\n🗣 Активных разговоров с агентами: {len(active_talks)}. "
+        "Их можно завершить в «📋 Список задач → 🗣 Разговоры»."
+        if active_talks
+        else ""
+    )
     await message.answer(
         "💬 <b>Режим общего разговора</b>\n\n"
-        "Задайте любой вопрос о состоянии задач, проектных планах или перемещении карточек.",
+        "Задайте любой вопрос о состоянии задач, проектных планах или перемещении карточек."
+        f"{suffix}",
         parse_mode="HTML",
         reply_markup=talk_keyboard(),
     )
@@ -155,10 +167,16 @@ async def cmd_list(
 ) -> None:
     tasks = await client.list_tasks(status="incoming")
     counts = await client.get_task_counts()
+    active_talks = await _active_talk_conversations(client)
     await message.answer(
         "📋 <b>Список задач</b>\nВыберите категорию или карточку:",
         parse_mode="HTML",
-        reply_markup=task_categories_keyboard("incoming", tasks, counts=counts),
+        reply_markup=task_categories_keyboard(
+            "incoming",
+            tasks,
+            counts=counts,
+            active_talks_count=len(active_talks),
+        ),
     )
 
 
@@ -173,6 +191,98 @@ def _plural_ru(value: int, one: str, few: str, many: str) -> str:
     if 2 <= remainder <= 4:
         return few
     return many
+
+
+def _is_talkable_agent(agent: dict[str, Any]) -> bool:
+    """Return whether a profile explicitly allows direct conversations."""
+    runner_config = agent.get("runner_config")
+    return bool(
+        isinstance(runner_config, dict)
+        and runner_config.get("talkable") is True
+    )
+
+
+async def _talkable_agents(client: BackendClient) -> list[dict[str, Any]]:
+    """Fetch current profiles and keep only ``runner_config.talkable`` ones."""
+    try:
+        agents = await client.list_agents()
+    except Exception as error:
+        logger.warning("talkable agent list failed: %s", error)
+        return []
+    return [
+        agent
+        for agent in agents
+        if isinstance(agent, dict) and _is_talkable_agent(agent)
+    ]
+
+
+async def _active_talk_conversations(
+    client: BackendClient,
+) -> list[dict[str, Any]]:
+    """Return conversations whose direct-talk workspace lock is active."""
+    try:
+        conversations = await client.list_conversations()
+    except Exception as error:
+        logger.warning("active talk conversation list failed: %s", error)
+        return []
+    active: list[dict[str, Any]] = []
+    for conversation in conversations:
+        if not isinstance(conversation, dict):
+            continue
+        metadata = conversation.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("talk_active") is True and metadata.get(
+            "talkable_agent"
+        ):
+            active.append(conversation)
+    return active
+
+
+def _agent_name_map(agents: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        str(agent.get("agent_id")): str(
+            agent.get("name") or agent.get("agent_id")
+        )
+        for agent in agents
+        if agent.get("agent_id")
+    }
+
+
+def _format_started_at(value: Any) -> str:
+    """Render a stored ISO timestamp as a compact local-looking label."""
+    if not isinstance(value, str) or not value:
+        return "время неизвестно"
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(dt.timezone.utc)
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _active_talk_message(
+    conversations: list[dict[str, Any]],
+    agents: list[dict[str, Any]],
+) -> str:
+    names = _agent_name_map(agents)
+    lines = ["🗣 <b>Активные разговоры с агентами</b>"]
+    for conversation in conversations:
+        metadata = conversation.get("metadata") or {}
+        agent_id = str(metadata.get("talkable_agent") or "agent")
+        name = names.get(agent_id, agent_id)
+        started = _format_started_at(metadata.get("talk_started_at"))
+        lines.append(
+            f"• <b>{html.escape(name)}</b> "
+            f"(<code>{html.escape(agent_id)}</code>) — с {html.escape(started)}"
+        )
+    lines.append("")
+    lines.append(
+        "Разговоры занимают workspace агента: задачи этого агента ждут, "
+        "пока разговор не завершён."
+    )
+    return "\n".join(lines)
 
 
 def _format_duration(seconds: Any) -> str:
@@ -608,9 +718,14 @@ async def on_category_switch(
     page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
     tasks = await client.list_tasks(**category_list_filters(category))
     counts = await client.get_task_counts()
+    active_talks = await _active_talk_conversations(client)
     await callback.message.edit_reply_markup(
         reply_markup=task_categories_keyboard(
-            category, tasks, page=page, counts=counts
+            category,
+            tasks,
+            page=page,
+            counts=counts,
+            active_talks_count=len(active_talks),
         )
     )
     await callback.answer()
@@ -726,8 +841,57 @@ async def on_switch_conversation(
 
     user_id = callback.from_user.id
     previous = storage.get_user_state(user_id).active_conversation_id
-    storage.set_talk_conversation(user_id, conversation_id)
-    storage.set_user_mode(user_id, "talk", conversation_id=conversation_id)
+    metadata = conversation.get("metadata") or {}
+    agent_id = (
+        metadata.get("talkable_agent")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if agent_id:
+        try:
+            conversation = await client.start_talk(conversation_id)
+        except Exception as error:
+            logger.warning("resume talk conversation failed: %s", error)
+            await callback.answer(
+                "Не удалось возобновить разговор", show_alert=True
+            )
+            return
+        metadata = conversation.get("metadata") or {}
+        closing = metadata.get("talk_closing") is True
+        active = metadata.get("talk_active") is True and not closing
+        storage.set_talk_agent_conversation(user_id, conversation_id)
+        reply_markup = agent_conversation_keyboard(
+            str(agent_id), conversation_id
+        )
+        if closing:
+            note = (
+                "Предыдущий разговор ещё завершается. Новые ходы пока не "
+                "принимаются."
+            )
+        elif active:
+            note = "Обычные сообщения теперь уходят этому агенту."
+        else:
+            note = (
+                "Workspace занят. Первое сообщение будет ждать "
+                "освобождения."
+            )
+        confirmation = (
+            f"✅ <b>Активный разговор с агентом "
+            f"{html.escape(str(agent_id))}:</b>\n"
+            f"<code>#{html.escape(conversation_id)}</code>\n\n"
+            f"{note}"
+        )
+    else:
+        storage.set_talk_conversation(user_id, conversation_id)
+        storage.set_user_mode(
+            user_id, "talk", conversation_id=conversation_id
+        )
+        reply_markup = talk_keyboard()
+        confirmation = (
+            f"✅ <b>Активный диалог:</b>\n"
+            f"<code>#{html.escape(conversation_id)}</code>\n\n"
+            "Обычные сообщения теперь уходят в этот диалог."
+        )
     logger.info(
         "telegram context switched to conversation",
         extra={
@@ -738,10 +902,9 @@ async def on_switch_conversation(
         },
     )
     await callback.message.answer(
-        f"✅ <b>Активный диалог:</b>\n<code>#{html.escape(conversation_id)}</code>\n\n"
-        "Обычные сообщения теперь уходят в этот диалог.",
+        confirmation,
         parse_mode="HTML",
-        reply_markup=talk_keyboard(),
+        reply_markup=reply_markup,
     )
     await callback.answer("Диалог выбран")
 
@@ -1068,10 +1231,273 @@ async def on_action_list_tasks(
 ) -> None:
     tasks = await client.list_tasks(status="incoming")
     counts = await client.get_task_counts()
+    active_talks = await _active_talk_conversations(client)
     await callback.message.answer(
         "📋 <b>Список задач:</b>",
         parse_mode="HTML",
-        reply_markup=task_categories_keyboard("incoming", tasks, counts=counts),
+        reply_markup=task_categories_keyboard(
+            "incoming",
+            tasks,
+            counts=counts,
+            active_talks_count=len(active_talks),
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("talk_agent:"))
+async def on_talk_agent_list(
+    callback: CallbackQuery,
+    client: BackendClient,
+) -> None:
+    """Show the paginated list of agents that accept direct talks."""
+    raw_page = callback.data.split(":", 1)[1]
+    page = int(raw_page) if raw_page.isdigit() else 1
+    agents = await _talkable_agents(client)
+    if not agents:
+        await callback.message.answer(
+            "👥 Нет агентов с флагом <code>talkable: true</code>.",
+            parse_mode="HTML",
+            reply_markup=talk_keyboard(),
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(
+        "👥 <b>Выберите агента для прямого разговора</b>\n\n"
+        "Разговор сохраняет сессию: вернуться и продолжить можно из этого же списка.",
+        parse_mode="HTML",
+        reply_markup=talk_agent_keyboard(agents, page=page),
+    )
+    await callback.answer("Выберите агента")
+
+
+@router.callback_query(F.data.startswith("select_talk_agent:"))
+async def on_select_talk_agent(
+    callback: CallbackQuery,
+    storage: UserStateStorage,
+    client: BackendClient,
+) -> None:
+    """Create or resume the persistent conversation with one agent."""
+    agent_id = callback.data.split(":", 1)[1]
+    try:
+        agent = await client.get_agent(agent_id)
+    except Exception as error:
+        logger.warning("talk agent lookup failed: %s", error)
+        agent = None
+    if agent is None or not _is_talkable_agent(agent):
+        await callback.answer(
+            "Агент недоступен для разговора", show_alert=True
+        )
+        return
+
+    user_id = callback.from_user.id
+    conversations = await _active_talk_conversations(client)
+    try:
+        all_conversations = await client.list_conversations()
+    except Exception as error:
+        logger.warning("talk conversation lookup failed: %s", error)
+        all_conversations = []
+
+    def matching(conversation: dict[str, Any]) -> bool:
+        metadata = conversation.get("metadata") or {}
+        if metadata.get("talkable_agent") != agent_id:
+            return False
+        if metadata.get("origin") != "telegram_agent_talk":
+            return False
+        owner = metadata.get("user_id")
+        return owner is None or str(owner) == str(user_id)
+
+    existing = [c for c in all_conversations if matching(c)]
+    active_existing = [
+        c
+        for c in existing
+        if c in conversations
+        and (c.get("metadata") or {}).get("talk_closing") is not True
+    ]
+    usable = [
+        c
+        for c in existing
+        if (c.get("metadata") or {}).get("talk_closing") is not True
+    ]
+    chosen = (active_existing or usable or existing or [None])[-1]
+    if chosen is None:
+        metadata = {
+            "origin": "telegram_agent_talk",
+            "user_id": user_id,
+            "chat_id": (
+                callback.message.chat.id
+                if callback.message and callback.message.chat
+                else None
+            ),
+            "talkable_agent": agent_id,
+        }
+        runner_config = agent.get("runner_config") or {}
+        project = runner_config.get("project")
+        if isinstance(project, str) and project:
+            metadata["talk_workspace"] = project
+        conversation = await client.create_conversation(
+            title=f"Разговор с агентом {agent.get('name') or agent_id}",
+            metadata=metadata,
+        )
+    else:
+        conversation = chosen
+
+    conversation_id = conversation["id"]
+    try:
+        conversation = await client.start_talk(conversation_id)
+    except Exception as error:
+        logger.warning("talk start failed: %s", error)
+        await callback.answer(
+            "Не удалось начать разговор", show_alert=True
+        )
+        return
+    metadata = dict(conversation.get("metadata") or {})
+    closing = metadata.get("talk_closing") is True
+    active = metadata.get("talk_active") is True and not closing
+    storage.set_talk_agent_conversation(user_id, conversation_id)
+    name = agent.get("name") or agent_id
+    if closing:
+        workspace_note = (
+            "Предыдущий разговор ещё завершается. Дождитесь освобождения "
+            "workspace и выберите агента снова."
+        )
+    elif not active:
+        workspace_note = (
+            "Workspace занят задачей или другим разговором. Первое сообщение "
+            "будет ждать освобождения; задачи этого агента тоже ждут."
+        )
+    else:
+        workspace_note = (
+            "Сообщения уходят этому агенту. Его workspace занят, пока "
+            "разговор не завершён."
+        )
+    await callback.message.answer(
+        f"💬 <b>Разговор с агентом {html.escape(str(name))}</b>\n"
+        f"ID: <code>{html.escape(agent_id)}</code>\n"
+        f"Диалог: <code>#{html.escape(conversation_id)}</code>\n\n"
+        f"{workspace_note}",
+        parse_mode="HTML",
+        reply_markup=agent_conversation_keyboard(
+            agent_id, conversation_id
+        ),
+    )
+    await callback.answer("Разговор выбран")
+
+
+@router.callback_query(F.data.startswith("end_talk:"))
+async def on_end_talk(
+    callback: CallbackQuery,
+    storage: UserStateStorage,
+    client: BackendClient,
+) -> None:
+    """End one direct-agent talk and release its workspace lock."""
+    raw_id = callback.data.split(":", 1)[1].strip()
+    user_id = callback.from_user.id
+    state = storage.get_user_state(user_id)
+    conversation_id = (
+        raw_id
+        or state.talk_agent_conversation_id
+        or state.active_conversation_id
+    )
+    if not conversation_id:
+        await callback.answer("Нет активного разговора", show_alert=True)
+        return
+    try:
+        conversation = await client.get_conversation(conversation_id)
+    except Exception as error:
+        logger.warning("end talk lookup failed: %s", error)
+        conversation = None
+    if conversation is None:
+        await callback.answer("Разговор недоступен", show_alert=True)
+        return
+    metadata = dict(conversation.get("metadata") or {})
+    agent_id = metadata.get("talkable_agent")
+    if not agent_id:
+        await callback.answer(
+            "Это не разговор с агентом", show_alert=True
+        )
+        return
+
+    # Stop accepting new local messages immediately. Pending local messages
+    # are cancelled; one already processing keeps the workspace lock until
+    # its turn finishes.
+    local_busy = storage.is_conversation_busy(conversation_id)
+    cancelled = storage.cancel_pending_for_conversation(conversation_id)
+
+    try:
+        conversation = await client.request_end_talk(conversation_id)
+    except Exception as error:
+        logger.warning("end talk request failed: %s", error)
+        await callback.answer(
+            "Не удалось завершить разговор", show_alert=True
+        )
+        return
+    metadata = dict(conversation.get("metadata") or {})
+
+    released = False
+    if not local_busy:
+        try:
+            conversation = await client.finalize_talk(conversation_id)
+        except Exception as error:
+            logger.warning("end talk finalize failed: %s", error)
+        else:
+            metadata = dict(conversation.get("metadata") or {})
+            released = metadata.get("talk_active") is False
+
+    if state.mode == "agent_talk" and conversation_id in (
+        state.talk_agent_conversation_id,
+        state.active_conversation_id,
+    ):
+        storage.set_user_mode(
+            user_id, "talk", conversation_id=state.talk_conversation_id
+        )
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    if released:
+        body = (
+            "Workspace освобождён, задачи этого агента снова могут "
+            "выполняться. Runner-сессия сохранена: при следующем выборе "
+            "агента контекст продолжится."
+        )
+    else:
+        body = (
+            "Новые сообщения больше не принимаются. Workspace освободится "
+            "автоматически после завершения текущего и уже поставленных "
+            "ходов. Runner-сессия сохранится."
+        )
+    if cancelled:
+        body += f" Отменено сообщений в очереди: {cancelled}."
+    await callback.message.answer(
+        f"🏁 <b>Разговор с агентом {html.escape(str(agent_id))} "
+        f"{'завершён' if released else 'закрывается'}:</b>\n\n{body}",
+        parse_mode="HTML",
+        reply_markup=talk_keyboard(),
+    )
+    await callback.answer("Разговор завершён")
+
+
+@router.callback_query(F.data == "action:active_talks")
+async def on_action_active_talks(
+    callback: CallbackQuery,
+    client: BackendClient,
+) -> None:
+    """Render active direct-agent talks with a per-conversation end button."""
+    conversations = await _active_talk_conversations(client)
+    agents = await _talkable_agents(client)
+    if not conversations:
+        await callback.message.answer(
+            "🗣 Активных разговоров с агентами нет.",
+            reply_markup=talk_keyboard(),
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(
+        _active_talk_message(conversations, agents),
+        parse_mode="HTML",
+        reply_markup=active_talks_keyboard(conversations),
     )
     await callback.answer()
 
@@ -1120,6 +1546,45 @@ async def _route_reply_to_original_conversation(
 
     if link is not None:
         context_task_id = link.get("task_id")
+        context_mode = "task" if context_task_id else "talk"
+        if not context_task_id:
+            try:
+                linked_conversation = await client.get_conversation(
+                    link["conversation_id"]
+                )
+            except Exception as error:
+                logger.warning(
+                    "reply target conversation lookup failed: %s", error
+                )
+                linked_conversation = None
+            if linked_conversation is not None:
+                metadata = linked_conversation.get("metadata") or {}
+                if isinstance(metadata, dict) and metadata.get(
+                    "talkable_agent"
+                ):
+                    if (
+                        metadata.get("talk_active") is True
+                        and metadata.get("talk_closing") is not True
+                    ):
+                        context_mode = "agent_talk"
+                    else:
+                        logger.info(
+                            "telegram reply to inactive agent talk refused",
+                            extra={
+                                "event": "telegram_reply_route",
+                                "basis": "agent_talk_inactive",
+                                "conversation_id": link["conversation_id"],
+                                "telegram_message_id": message.message_id,
+                            },
+                        )
+                        await message.answer(
+                            "⚠️ Этот разговор с агентом завершён или ещё не "
+                            "активирован. Новый ход не отправлен. Выберите "
+                            "агента заново через /talk → «👥 Выбрать агента» "
+                            "или нажмите кнопку продолжения диалога.",
+                            reply_markup=talk_keyboard(),
+                        )
+                        return True
         logger.info(
             "telegram reply routed to original conversation",
             extra={
@@ -1135,7 +1600,7 @@ async def _route_reply_to_original_conversation(
             user_id=message.from_user.id,
             chat_id=message.chat.id,
             telegram_message_id=message.message_id,
-            context_mode="task" if context_task_id else "talk",
+            context_mode=context_mode,
             context_task_id=context_task_id,
             context_conversation_id=link["conversation_id"],
             text=text,
@@ -1350,6 +1815,17 @@ async def on_user_message(
             storage.set_user_mode(
                 user_id, "talk", conversation_id=context_conversation_id
             )
+
+    elif context_mode == "agent_talk":
+        context_conversation_id = (
+            context_conversation_id or state.talk_agent_conversation_id
+        )
+        if not context_conversation_id:
+            await message.answer(
+                "⚠️ Разговор с агентом не выбран. Откройте /talk и выберите агента.",
+                reply_markup=mode_keyboard(),
+            )
+            return
 
     elif context_mode == "task":
         if context_task_id:

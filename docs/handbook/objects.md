@@ -27,14 +27,35 @@ exposed in Python as `meta`.
 - `agent_id` selects the executor; `workspace` selects the host directory.
   Neither is derived from `status` or `metadata.task_type`.
 - `metadata` carries execution provenance (`execution_context`,
-  `changed_files`, `summary`, `error`, `additional_instructions`,
-  `requires_review`, `task_type`, imported history).
+  `execution_agent_id`, `execution_workspace`, `changed_files`, `summary`,
+  `error`, `additional_instructions`, `requires_review`, `task_type`,
+  imported history). The claim stores the effective agent and project
+  directory even when the task itself has null `agent_id`/`workspace`, so a
+  direct talk cannot start in the same actual workspace.
+- `metadata.changed_files` and `metadata.provenance.changed_files` are
+  different fields and must not be confused:
+  - the task-level `changed_files` is the list of paths the task agreed to
+    change; the Git commit/rollback handlers read it as the explicit commit
+    set;
+  - `provenance.changed_files` is what the last Runner session itself
+    reported, which can be unrelated or incomplete (an observed session
+    reported `[".coverage"]` while the task held 10 correct paths).
+  `GET /tasks/{id}/session` returns the task-level list first and falls back
+  to provenance only when the task-level field is absent. Never treat
+  provenance as the commit set, or the task-level list as the last session's
+  raw observation. See
+  [Verification](verification.md#git-state-inspection-read-only).
 - Tasks are never created from messages. The import path
   (`POST /imports/tasks`) writes tasks by stable id and is idempotent.
 
 ## Conversation, Message and Turn
 
 - A `Message` belongs to exactly one `Conversation` (`ON DELETE CASCADE`).
+- `metadata` is opaque JSON. The Telegram direct-agent flow uses
+  `talkable_agent`, `talk_active`, `talk_pending`, `talk_closing`,
+  `talk_closed`, `talk_workspace` and `talk_started_at` to keep a task-agent
+  dialogue and its workspace lock; these keys are not a separate object type
+  and do not create tasks.
 - `(conversation_id, source, external_id)` is the message idempotency key.
   SQLite treats `NULL external_id` rows as distinct, so an append without an
   `external_id` always creates a new message.
@@ -55,6 +76,9 @@ exposed in Python as `meta`.
 - `role` and `agent_id` are free-form strings. `runner_config` and
   `knowledge` are JSON objects, `skills` is a JSON array of binding objects.
   No role allowlist, field cap or skill-count limit is imposed.
+- `runner_config.talkable: true` opts a profile into the Telegram
+  direct-conversation list. A missing or non-`true` value leaves it out; the
+  flag is read from the current snapshot and creates no separate profile copy.
 - `CORE_SYSTEM_AGENTS = {system-secretary, system-code-reviewer,
   system-log-analyzer}` may not be archived through the API.
 

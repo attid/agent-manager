@@ -144,6 +144,24 @@ directly, so a review still runs when the task's execution status is already
 `completed`; it never reruns the developer. A failure updates the task
 metadata with the diagnostics and records the operation `failed`.
 
+## Reading review history
+
+`GET /tasks/{task_id}/review` (`tasks.read` on `task:<id>`) returns the
+persisted rounds of a task without reading the database verdict or the raw
+operation result. It reads `review/round_<n>.json` plus the matching
+`round_<n>.md` from every known artifact layout: the in-worker
+`tasks/<task_id>/review/`, the older `<task_id>/review/`, and standalone
+operation directories `operations/task_<task_id>/operation_<id>/review/`.
+Each item is `{round, verdict, findings, report, created_at}`, ordered by
+ascending round and timestamp. `verdict` is the domain value (`approved` or
+`changes_requested`), not the upper-case executor mirror. A prefixed
+`task_<id>` directory must contain artifacts whose `task_id` matches the
+requested task; this prevents task `alpha` from reading the canonical
+artifacts of a distinct task literally named `task_alpha`. A malformed JSON
+artifact or an unusable timestamp falls back or is skipped without failing
+the whole listing; an unknown task is `404`, and a task without artifacts
+returns `[]`. The endpoint is read-only and never starts a review.
+
 ## Authority and evidence rules
 
 - Scope: the operation targets exactly one task and records the caller owner.

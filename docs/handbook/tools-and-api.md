@@ -7,12 +7,13 @@ do not implement domain logic. This file is the discovery contract.
 ## REST endpoints
 
 The authoritative list is the generated OpenAPI document (`GET /openapi.json`)
-and `src/kuzya/api/app.py`. The 46 REST operations below are complete: every
-business route the app exposes is listed, including artifact, session and
-subscription routes. The app also mounts an MCP transport on `GET`/`POST` for
-`/mcp` and `/mcp/`. It is not an OpenAPI operation and has no Pi JS tool. It
-is represented in `src/kuzya/capabilities.py` by explicit adapter method/path
-records (`kind="adapter"`, action/resource `"*"`), not by duplicating the 43
+and `src/kuzya/api/app.py`. The 50 REST operations below are complete: every
+business route the app exposes is listed, including artifact, session,
+review, agent-session and subscription routes. The app also mounts an MCP
+transport on `GET`/`POST` for `/mcp` and `/mcp/`. It is not an OpenAPI
+operation and has no Pi JS tool. It is represented in
+`src/kuzya/capabilities.py` by explicit adapter method/path records
+(`kind="adapter"`, action/resource `"*"`), not by duplicating the 48
 generated MCP tools; the adapter inherits the REST action/resource and adds no
 permission. See [MCP transport](mcp.md) and the
 [ChatGPT plugin guide](../mcp-chatgpt.md).
@@ -35,12 +36,13 @@ greedy path parameters (`:path`).
 | `POST` | `/tasks` | `201`, `409`, `422` | `tasks.write` | Create a task. |
 | `GET` | `/tasks` | `200` | `tasks.read` | List tasks; filters `status`, `status_not_in` (comma-separated exclusions), `workspace`, `limit`, `offset`. |
 | `GET` | `/tasks/counts` | `200` | `tasks.read` | One grouped count per stored status, including `archived`. |
-| `GET` | `/monitor/executions` | `200` | `tasks.read` | Running tasks/operations, bounded live session stats and queue counts. |
+| `GET` | `/monitor/executions` | `200` | `tasks.read` | Running tasks/operations, bounded live session stats and queue counts; `verbose=true` adds operation input and changed-file names. |
 | `GET` | `/tasks/{task_id}` | `200`, `404` | `tasks.read` | Read one task. |
 | `PATCH` | `/tasks/{task_id}` | `200`, `404`, `409`, `422` | `tasks.write` | Partial update; `409` while the task is running. |
 | `GET` | `/tasks/{task_id}/artifacts` | `200`, `404` | `tasks.read` | List artifact metadata. |
 | `GET` | `/tasks/{task_id}/artifacts/{artifact_name}` | `200`, `404` | `tasks.read` | Download one artifact (raw bytes, `text/plain`). |
 | `GET` | `/tasks/{task_id}/session` | `200`, `404` | `tasks.read` | Session id, summary, paths, changed files, usage. |
+| `GET` | `/tasks/{task_id}/review` | `200`, `404` | `tasks.read` | Persisted review rounds from `review/round_<n>.json` artifacts, oldest round first. |
 | `POST` | `/tasks/{task_id}/attachments` | `201`, `404`, `422` | `tasks.write` | Multipart upload (`file`); records the artifact. |
 | `POST` | `/tasks/{task_id}/subscriptions` | `200`, `403`, `404`, `409`, `422` | deferred (`tasks.write`) | Subscribe the originating conversation. |
 | `DELETE` | `/tasks/{task_id}/subscriptions` | `200`, `403`, `404`, `409`, `422` | deferred (`tasks.write`) | Cancel before the event is queued. |
@@ -48,15 +50,17 @@ greedy path parameters (`:path`).
 | `POST` | `/ask` | `200`, `404`, `422` | `conversations.write` | Ask an agent and wait for the turn. |
 | `POST` | `/conversations/ask` | `200`, `404`, `422` | `conversations.write` | Alias of `/ask`. |
 | `POST` | `/conversations` | `201`, `409`, `422` | `conversations.write` | Create a conversation. |
-| `GET` | `/conversations` | `200` | `conversations.read` | List conversations. |
+| `GET` | `/conversations` | `200` | `conversations.read` | List conversations; filters `agent_id`, `limit`, `offset`. |
 | `GET` | `/conversations/{conversation_id}` | `200`, `404` | `conversations.read` | Read one conversation. |
+| `PATCH` | `/conversations/{conversation_id}` | `200`, `404`, `422` | `conversations.write` | Shallow-merge `metadata`, optional `title`. |
+| `POST` | `/conversations/{conversation_id}/talk` | `200`, `400`, `404`, `422` | `conversations.write` | Direct-agent workspace lifecycle: `start`, `request_end`, `finalize`. |
 | `POST` | `/conversations/{conversation_id}/messages` | `201`/`200`, `404`, `409`, `422` | `conversations.write` | `201` insert, `200` idempotent replay. |
 | `GET` | `/conversations/{conversation_id}/messages` | `200`, `404` | `conversations.read` | List messages. |
 | `GET` | `/telegram/links/{chat_id}/{telegram_message_id}` | `200`, `404` | `conversations.read` | Resolve a Telegram reply target. |
 | `POST` | `/conversations/{conversation_id}/turns` | `201`, `400`, `404`, `422` | `turns.write` | Enqueue one secretary turn. |
 | `GET` | `/turns/{turn_id}` | `200`, `404` | `turns.read` | Turn status and reply reference. |
 | `POST` | `/operations` | `202`/`200`, `403`, `409`, `422` | deferred (kind-scoped) | Submit a durable operation. |
-| `GET` | `/operations` | `200`, `403` | deferred | List the queue; scoped callers get `403`. |
+| `GET` | `/operations` | `200`, `403` | deferred | List the queue; filters `status`, `kind`, `target_id`, `limit`, `offset`; scoped callers get `403`. |
 | `GET` | `/operations/{operation_id}` | `200`, `404` | deferred | Read status/result/error; owner-scoped. |
 | `GET` | `/tasks/{task_id}/analysis` | `200` | `analysis.read` | List a task's analysis reports; internal UUID only, no human-number lookup (empty for unknown id). |
 | `GET` | `/analysis/{report_id}` | `200`, `404` | `analysis.read` | Read one report with evidence. |
@@ -68,6 +72,7 @@ greedy path parameters (`:path`).
 | `POST` | `/agents` | `201`, `409`, `422` | `agents.write` | Create revision `1`. |
 | `GET` | `/agents` | `200` | `agents.read` | Current snapshots; `include_archived` query. |
 | `GET` | `/agents/{agent_id}` | `200`, `404` | `agents.read` | Current snapshot. |
+| `GET` | `/agents/{agent_id}/sessions` | `200`, `404` | `agents.read` | Native Runner session ids, attempt counts and timestamps; never session contents. |
 | `GET` | `/agents/{agent_id}/revisions` | `200` | `agents.read` | History; empty list for an unknown id. |
 | `GET` | `/agents/{agent_id}/revisions/{revision}` | `200`, `404` | `agents.read` | One immutable snapshot. |
 | `PATCH` | `/agents/{agent_id}` | `200`, `404`, `409`, `422` | `agents.write` | Append a revision after the optimistic check. |
@@ -158,6 +163,10 @@ Subscription object: `task_id`, `conversation_id`, `status`, `turn_id`
 (nullable), `summary` (nullable), `report`, `evidence`, `created_at`,
 `updated_at`.
 
+`ReviewRoundRead`: `round` (int), `verdict` (`approved` or
+`changes_requested`), `findings` (array of finding objects), `report`
+(Markdown text), `created_at` (naive UTC).
+
 `RecommendationRead`: `id`, `report_id`, `task_id` (nullable), `target_kind`,
 `target_id`, `target_revision` (nullable), `target_content_hash` (nullable),
 `title`, `rationale`, `evidence`, `proposed_content`, `diff` (nullable),
@@ -171,6 +180,9 @@ Subscription object: `task_id`, `conversation_id`, `status`, `turn_id`
 
 `AgentRead`: `agent_id`, `revision`, `name`, `role`, `system_prompt`,
 `runner_config`, `skills`, `knowledge`, `created_at`.
+
+`AgentSessionRead`: `session_id`, `created_at`, `last_activity`,
+`attempts_count`. It is metadata only; session contents are never included.
 
 `KnowledgeListResponse`: `items` (array of paths), `category` (nullable).
 `KnowledgeDocumentRead`: `path`, `content`. `KnowledgeDocumentDeleted`:
@@ -288,6 +300,36 @@ Read-only preflight; never writes.
 - `200` task session object (see above), `404` unknown task. Read-only; it
   does not start or resume anything.
 
+#### `GET /tasks/{task_id}/review`
+
+- Auth: `tasks.read` on `task:<id>`.
+- Path `task_id` accepts the internal id or the human task number, like the
+  other task-scoped reads; the resolved internal id is used for artifact
+  lookup.
+- `200` array of review-round objects, ordered by ascending `round` and then
+  by `created_at`: `round` (int), `verdict` (domain value `approved` or
+  `changes_requested`), `findings` (array of finding objects), `report`
+  (Markdown text of `round_<n>.md`, or `""` when the report file is absent)
+  and `created_at` (naive UTC from the artifact `timestamp`).
+- Artifacts are read from the known review layouts: the in-worker
+  `tasks/<task_id>/review/`, the older `<task_id>/review/` and standalone
+  operation directories
+  `operations/task_<task_id>/operation_<id>/review/`. A prefixed
+  `task_<id>` directory is ambiguous because another task can literally be
+  named `task_<id>`; every artifact from such a directory must carry a
+  matching `task_id` in its JSON document, otherwise it is skipped. A
+  recorded `task_id` that contradicts the requested task is skipped even in
+  an exact-id directory. The old prefix-match scan of `task_<id>_*`
+  directories was removed. Multiple review executions may therefore
+  contribute equal round numbers; all are returned.
+- A malformed `round_<n>.json` is skipped with a log warning instead of
+  hiding the task's other rounds. A non-finite or out-of-range numeric
+  timestamp falls back to the artifact file mtime rather than failing the
+  whole request.
+- `404` unknown task. A task without review artifacts returns `[]`. This is
+  a read-only projection: it does not start a review, parse the database
+  verdict or read a path named inside an artifact.
+
 #### `POST /tasks/{task_id}/attachments`
 
 - Auth: `tasks.write` on `task:<id>`. A scoped token may upload only to its
@@ -334,6 +376,11 @@ Read-only preflight; never writes.
 
 - Auth: `tasks.read`; collection route (`resource=None`). A task-scoped
   execution token may not call it; the monitor spans all running work.
+- Query: `verbose` (bool, default `false`). The base response is unchanged.
+  `verbose=true` adds `input` (the exact operation input object) to each
+  operation entry and `changed_files` (array of names) plus
+  `changed_files_count` to each task entry. The caller opts in to the larger
+  diagnostic payload; it is not included by default.
 - `200` object:
   - `generated_at`: UTC ISO timestamp of the snapshot.
   - `running`: array of running executions. A task entry has `kind="task"`,
@@ -406,12 +453,47 @@ Read-only preflight; never writes.
 #### `GET /conversations`
 
 - Auth: `conversations.read`; collection route.
-- Query: `limit`, `offset` (default `0`). `200` array of `ConversationRead`.
+- Query: `agent_id` (optional), `limit`, `offset` (default `0`). `agent_id`
+  matches either the durable `conversation_runtimes.agent_id` binding or the
+  `metadata.talkable_agent` hint used by the direct-agent flow; a
+  conversation matching both is returned once. Unknown agents return `[]`.
+- `200` array of `ConversationRead`, oldest first.
 
 #### `GET /conversations/{conversation_id}`
 
 - Auth: `conversations.read` on `conversation:<id>`. `200`
   `ConversationRead`; `404` unknown conversation.
+
+#### `PATCH /conversations/{conversation_id}`
+
+- Auth: `conversations.write` on `conversation:<id>`.
+- Body (`ConversationPatch`, unknown fields `422`): optional `title`,
+  optional `metadata` object. Supplied `metadata` keys are shallow-merged;
+  absent keys are preserved. Sending `metadata: {}` is a no-op merge.
+- `200` `ConversationRead`; `404` unknown conversation.
+- Not an idempotency-keyed write: replaying the same patch leaves the same
+  values, and no new conversation is created. The direct-agent workspace
+  lock is managed by `POST /conversations/{id}/talk`, not by a bare patch;
+  the conversation and its native Runner session are never deleted.
+
+#### `POST /conversations/{conversation_id}/talk`
+
+- Auth: `conversations.write` on `conversation:<id>`.
+- Body (`ConversationTalkRequest`, unknown fields `422`): `action` (required
+  string). Accepted values: `start`, `request_end`, `finalize`; any other
+  value is `400`.
+- `start` checks the task and other-talk locks under one immediate SQLite
+  write transaction. If the agent's workspace is free it sets
+  `metadata.talk_active=true`; if a task or another talk owns it, it sets
+  `metadata.talk_pending=true` and the first turn waits.
+- `request_end` sets `metadata.talk_closing=true`, so no new turn can be
+  enqueued (`POST .../turns` returns `409`). Existing pending/running turns
+  keep the lock and are processed.
+- `finalize` sets `talk_active=false`, `talk_closing=false`,
+  `talk_closed=true` only when no pending or running turn remains. It never
+  deletes the conversation or its native Runner session.
+- `200` `ConversationRead`; `404` missing or non-talkable conversation;
+  `400` unknown action; `422` validation.
 
 #### `POST /conversations/{conversation_id}/messages`
 
@@ -488,8 +570,12 @@ Read-only preflight; never writes.
 
 - Auth: deferred; any scoped execution token receives `403` (it may not
   enumerate the queue). Administrative callers only.
-- Query: `status`, `kind`, `target_id`, `limit`, `offset` (default `0`).
-- `200` array of `OperationRead`.
+- Query: `status` (exact operation status), `kind` (exact operation kind),
+  `target_id` (exact target id), `limit`, `offset` (default `0`). Filters
+  compose as an intersection.
+- `200` array of `OperationRead`, oldest intake sequence first. Example:
+  `GET /operations?status=running&kind=analysis` returns running analyses;
+  `GET /operations?target_id=<task_id>` returns every operation for a task.
 
 #### `GET /operations/{operation_id}`
 
@@ -571,6 +657,21 @@ Read-only preflight; never writes.
 #### `GET /agents/{agent_id}`
 
 - Auth: `agents.read` on `agent:<id>`. `200` current `AgentRead`; `404`.
+
+#### `GET /agents/{agent_id}/sessions`
+
+- Auth: `agents.read` on `agent:<id>`. `404` unknown profile.
+- Reads the trusted `runner_config.state_dir` of the current profile and
+  lists directories under `<state_dir>/sessions/`. A missing, relative or
+  symlinked state directory returns `[]`; it is never resolved against the
+  server working directory.
+- `200` array ordered by most recent activity first. Each item contains only
+  `session_id`, `created_at` (mtime of the first/lowest-numbered attempt),
+  `last_activity` (mtime of the last/highest-numbered attempt) and
+  `attempts_count`. A session with no attempts uses the session directory
+  mtime for both timestamps and reports `attempts_count=0`.
+- Session contents (`events.jsonl`, `task.md`, prompts, replies) are never
+  opened or returned.
 
 #### `GET /agents/{agent_id}/revisions`
 

@@ -18,7 +18,10 @@ from kuzya.storage.telegram_delivery import (
     reply_delivery_key,
 )
 from kuzya.secretary import TurnProcessor
-from kuzya.telegram.keyboards import dialog_switch_keyboard
+from kuzya.telegram.keyboards import (
+    agent_conversation_keyboard,
+    dialog_switch_keyboard,
+)
 from kuzya.telegram.messenger import (
     TelegramDeliveryService,
     api_question_header,
@@ -654,3 +657,48 @@ def test_markdown_footer_safe_wraps_only_the_footer_hashtag() -> None:
     # ...while secretary-authored headings and mid-line hashtags stay intact,
     # and short (non-hex32) ids used in tests are not rewritten.
     assert markdown_footer_safe("текст\n\n#conv-001") == "текст\n\n#conv-001"
+
+
+def test_outbox_delivers_agent_talk_reply_with_agent_buttons(
+    migrated_db,
+) -> None:
+    database = Database.from_path(migrated_db)
+    try:
+        conversations = ConversationRepository(database)
+        conversation = conversations.create_conversation(
+            metadata={
+                "chat_id": 90,
+                "talkable_agent": "devops-docker3",
+                "talk_active": True,
+            }
+        )
+        question = conversations.append_message(
+            conversation_id=conversation.id,
+            role="user",
+            text="проверь nginx",
+            source=INPUT_SOURCE_TELEGRAM,
+        )
+        processor = TurnProcessor(database)
+        processor.enqueue(
+            conversation_id=conversation.id,
+            input_message_id=question.message.id,
+        )
+        turn = processor.claim_next(conversation_id=conversation.id)
+        processor.complete(turn.id, turn.claim_token, text="nginx работает")
+
+        bot = _bot(801)
+        service = _service(migrated_db, bot)
+        assert asyncio.run(service.deliver_pending()) == 1
+        kwargs = bot.send_rich_message.await_args.kwargs
+        assert kwargs["reply_markup"] == agent_conversation_keyboard(
+            "devops-docker3", conversation.id
+        )
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert f"end_talk:{conversation.id}" in callbacks
+        assert "action:talk" in callbacks
+    finally:
+        database.dispose()

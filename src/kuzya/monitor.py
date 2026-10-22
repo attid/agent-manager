@@ -769,6 +769,8 @@ def _task_entry(
     task: Task,
     events_path: Path | None,
     now: dt.datetime,
+    *,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     meta = dict(task.meta or {})
     session = summarize_events(events_path, now) if events_path else _unavailable_session()
@@ -780,7 +782,7 @@ def _task_entry(
         if isinstance(session.get("tokens"), Mapping)
         else None
     )
-    return {
+    entry = {
         "kind": "task",
         "entry_type": "task",
         "task_id": task.id,
@@ -799,6 +801,11 @@ def _task_entry(
         "events_path": str(events_path) if events_path else None,
         "label": f"#{number}",
     }
+    if verbose:
+        changed = [str(item) for item in (meta.get("changed_files") or [])]
+        entry["changed_files"] = changed
+        entry["changed_files_count"] = len(changed)
+    return entry
 
 
 def _operation_entry(
@@ -806,6 +813,8 @@ def _operation_entry(
     task_by_id: Mapping[str, Task],
     events_path: Path | None,
     now: dt.datetime,
+    *,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     target = task_by_id.get(str(operation.target_id or ""))
     session = summarize_events(events_path, now) if events_path else _unavailable_session()
@@ -844,6 +853,7 @@ def _operation_entry(
         "tokens_total": total_tokens,
         "events_path": str(events_path) if events_path else None,
         "label": f"#{target_number}" if target_number is not None else operation.kind,
+        **({"input": dict(operation.input or {})} if verbose else {}),
     }
 
 
@@ -852,8 +862,14 @@ def build_execution_monitor(
     artifact_root: str | os.PathLike[str] | None,
     *,
     now: dt.datetime | None = None,
+    verbose: bool = False,
 ) -> dict[str, Any]:
-    """Return a JSON-safe snapshot of currently running executions and queues."""
+    """Return a JSON-safe snapshot of currently running executions and queues.
+
+    ``verbose`` adds the exact operation ``input`` payload and the task's
+    ``changed_files`` names. The base snapshot stays small; a caller must opt
+    in to the larger diagnostic detail.
+    """
     moment = now or _utcnow()
     root = Path(artifact_root or "~/.kuzya/data/artifacts").expanduser()
 
@@ -885,7 +901,12 @@ def build_execution_monitor(
     running: list[dict[str, Any]] = []
     for task in running_tasks:
         running.append(
-            _task_entry(task, task_events.get(str(task.id)), moment)
+            _task_entry(
+                task,
+                task_events.get(str(task.id)),
+                moment,
+                verbose=verbose,
+            )
         )
     for operation in running_operations:
         running.append(
@@ -894,6 +915,7 @@ def build_execution_monitor(
                 tasks_by_id,
                 operation_events.get(operation.id),
                 moment,
+                verbose=verbose,
             )
         )
 

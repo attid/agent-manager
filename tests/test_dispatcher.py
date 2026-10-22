@@ -23,6 +23,7 @@ from kuzya.storage import (
     ConversationRepository,
     Database,
     Turn,
+    WorkspaceBusyError,
 )
 
 
@@ -555,5 +556,79 @@ def test_run_loop_reconciles_before_processing(
         stored = TurnProcessor(database).get_turn(orphan.id)
         assert stored is not None
         assert stored.status == "failed"
+    finally:
+        database.dispose()
+
+
+def test_workspace_busy_defers_turn_without_failing_it(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = _database(migrated_db)
+    try:
+        _conversation(database, "conv-talk")
+        turn = _enqueue(database, "conv-talk", "проверь nginx")
+
+        def busy_handler(_turn_input: TurnInput) -> str:
+            raise WorkspaceBusyError("conv-talk", "ws-devops")
+
+        dispatcher = QueueDispatcher(database, busy_handler)
+        deferred = dispatcher.step()
+        assert deferred is not None
+        assert deferred.status == "deferred"
+        assert _turn_status(database, turn.id) == "pending"
+        assert _replies(database, "conv-talk") == []
+
+        # Reaching the retry deadline makes the same turn eligible again.
+        with database.session() as session:
+            stored = session.scalars(
+                select(Turn).where(Turn.id == turn.id)
+            ).one()
+            metadata = dict(stored.meta or {})
+            metadata.pop("workspace_deferred_until")
+            stored.meta = metadata
+
+        def ready_handler(_turn_input: TurnInput) -> str:
+            return "готово"
+
+        completed = QueueDispatcher(database, ready_handler).step()
+        assert completed is not None
+        assert completed.status == "completed"
+        assert _turn_status(database, turn.id) == "completed"
+        assert _replies(database, "conv-talk") == ["готово"]
+    finally:
+        database.dispose()
+
+
+def test_deferred_busy_conversation_does_not_starve_other_dialogs(
+    migrated_db: pathlib.Path,
+) -> None:
+    database = _database(migrated_db)
+    try:
+        _conversation(database, "conv-busy")
+        _conversation(database, "conv-free")
+        busy_turn = _enqueue(database, "conv-busy", "занято")
+        free_turn = _enqueue(database, "conv-free", "свободно")
+
+        def handler(turn_input: TurnInput) -> str:
+            if turn_input.conversation_id == "conv-busy":
+                raise WorkspaceBusyError("conv-busy", "ws-devops")
+            return "готово"
+
+        dispatcher = QueueDispatcher(database, handler)
+        first = dispatcher.step()
+        assert first is not None
+        assert first.status == "deferred"
+        assert first.conversation_id == "conv-busy"
+
+        second = dispatcher.step()
+        assert second is not None
+        assert second.status == "completed"
+        assert second.conversation_id == "conv-free"
+        assert _turn_status(database, free_turn.id) == "completed"
+
+        # The busy turn is excluded until its retry deadline, so an idle
+        # dispatcher sleeps instead of re-claiming it in a tight loop.
+        assert dispatcher.step() is None
+        assert _turn_status(database, busy_turn.id) == "pending"
     finally:
         database.dispose()

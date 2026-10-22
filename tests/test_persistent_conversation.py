@@ -32,6 +32,9 @@ from kuzya.storage import (
     ConversationRuntimeRepository,
     Database,
     OperationRepository,
+    TaskRepository,
+    WorkspaceBusyError,
+    WorkspaceTalkRepository,
 )
 from kuzya.storage.models import ConversationRuntime
 
@@ -2450,5 +2453,154 @@ def test_connection_failure_allows_new_input_in_same_native_session(
         assert repository.get_binding("conv-1").runner_session_id == "s1"
         assert processor.get_turn(failed.turn.id).attempt_count == 1
         assert _assistant_count(database) == 2
+    finally:
+        database.dispose()
+
+
+def test_conversation_metadata_talkable_agent_selects_that_profile(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A direct-talk conversation pins its requested agent, not the default."""
+    artifact_root = tmp_path / "exports"
+    database = Database.from_path(migrated_db)
+    try:
+        ConversationRepository(database).create_conversation(
+            id="conv-talk",
+            metadata={
+                "origin": "telegram_agent_talk",
+                "talkable_agent": "talker",
+                "talk_active": True,
+            },
+        )
+        _profile(database, agent_id="triage")
+        _profile(
+            database,
+            agent_id="talker",
+            prompt="You are the talkable devops agent.",
+            runner_config=_base_runner_config(
+                session_id="talker-session",
+                state_dir=tmp_path / "talker-state",
+            ),
+        )
+        processor = TurnProcessor(database)
+        message = _append_user(
+            database, conversation_id="conv-talk", text="проверь nginx"
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-talk",
+            input_message_id=message.id,
+        )
+        handler = _handler(database, artifact_root)
+        result = processor.run_once(
+            handler, conversation_id="conv-talk"
+        )
+        assert result.status == "completed", result.error
+
+        binding = ConversationRuntimeRepository(database).get_binding(
+            "conv-talk"
+        )
+        assert binding is not None
+        assert binding.agent_id == "talker"
+        assert binding.runner_session_id == "talker-session"
+        assert binding.last_provenance["agent_id"] == "talker"
+        assert handler.last_execution is not None
+        task_text = handler.last_execution.task_path.read_text(
+            encoding="utf-8"
+        )
+        assert "mode: conversation" in task_text
+        assert "интерактивном диалоге" in task_text
+        assert task_text.endswith("проверь nginx")
+
+        # The next message resumes the same native session and agent.
+        second = _append_user(
+            database, conversation_id="conv-talk", text="и логи"
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-talk",
+            input_message_id=second.id,
+        )
+        second_result = processor.run_once(
+            handler, conversation_id="conv-talk"
+        )
+        assert second_result.status == "completed", second_result.error
+        assert handler.last_execution is not None
+        assert handler.last_execution.launch_mode == "resume"
+        assert handler.last_execution.requested_session_id == "talker-session"
+        resumed_binding = ConversationRuntimeRepository(database).get_binding(
+            "conv-talk"
+        )
+        assert resumed_binding is not None
+        assert resumed_binding.agent_id == "talker"
+    finally:
+        database.dispose()
+
+
+def test_agent_talk_turn_waits_for_running_task_before_launching(
+    tmp_path: pathlib.Path, migrated_db: pathlib.Path
+) -> None:
+    """A direct talk must not launch a child in an occupied workspace."""
+    artifact_root = tmp_path / "exports"
+    database = Database.from_path(migrated_db)
+    try:
+        ConversationRepository(database).create_conversation(
+            id="conv-talk",
+            metadata={
+                "origin": "telegram_agent_talk",
+                "talkable_agent": "talker",
+                "talk_workspace": "ws-devops",
+            },
+        )
+        _profile(
+            database,
+            agent_id="talker",
+            runner_config=_base_runner_config(
+                session_id="talker-session",
+                state_dir=tmp_path / "talker-state",
+            ),
+        )
+        tasks = TaskRepository(database)
+        tasks.create(
+            title="Running deploy",
+            status="in_progress",
+            workspace="ws-devops",
+            agent_id="talker",
+        )
+        running_task = tasks.claim_in_progress(worker_id="task-worker")
+        assert running_task is not None
+
+        talks = WorkspaceTalkRepository(database)
+        started = talks.start("conv-talk")
+        assert started.meta["talk_active"] is False
+        assert started.meta["talk_pending"] is True
+
+        processor = TurnProcessor(database)
+        message = _append_user(
+            database, conversation_id="conv-talk", text="проверь nginx"
+        )
+        _enqueue(
+            processor,
+            conversation_id="conv-talk",
+            input_message_id=message.id,
+        )
+        turn = processor.claim_next(conversation_id="conv-talk")
+        assert turn is not None
+        turn_input = _turn_input(turn)
+        handler = _handler(database, artifact_root)
+        with pytest.raises(WorkspaceBusyError):
+            handler(turn_input)
+        assert handler.last_execution is None
+        assert not artifact_root.exists()
+
+        tasks.complete_execution(running_task.id, status="done")
+        assert handler(turn_input) == "frozen summary"
+        processor.complete(turn.id, turn.claim_token, text="frozen summary")
+        binding = ConversationRuntimeRepository(database).get_binding(
+            "conv-talk"
+        )
+        assert binding is not None
+        assert binding.agent_id == "talker"
+        assert talks.is_closing("conv-talk") is False
     finally:
         database.dispose()

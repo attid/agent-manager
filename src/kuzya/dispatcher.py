@@ -58,7 +58,14 @@ from .secretary import (
     TurnInputMessageNotFoundError,
     TurnProcessor,
 )
-from .storage import ConversationRepository, Database, Message, Turn
+from .storage import (
+    ConversationRepository,
+    Database,
+    Message,
+    Turn,
+    WorkspaceBusyError,
+    WorkspaceTalkRepository,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +81,9 @@ class TurnOutcome:
     """Result of one dispatcher :meth:`QueueDispatcher.step`.
 
     ``status`` is ``"completed"`` when a reply was appended and the turn was
-    marked completed, or ``"failed"`` when the turn was marked failed with a
+    marked completed, ``"deferred"`` when the handler proved the direct-agent
+    workspace is busy and the turn was returned to ``pending`` without
+    failing, or ``"failed"`` when the turn was marked failed with a
     diagnostic error. ``duration_ms`` is the wall-clock handler time in
     milliseconds, measured without holding any database transaction.
     """
@@ -199,6 +208,7 @@ class QueueDispatcher:
 
         self._processor = TurnProcessor(database)
         self._conversations = ConversationRepository(database)
+        self._workspace_talks = WorkspaceTalkRepository(database)
 
         self._lifecycle_lock = threading.Lock()
         self._control_thread: threading.Thread | None = None
@@ -267,6 +277,39 @@ class QueueDispatcher:
                     attempt_count=turn.attempt_count,
                 )
                 reply_text = self._invoke_handler(turn, turn_input)
+            except WorkspaceBusyError as error:
+                # The conversation must wait for a task or another talk in
+                # its workspace. Return the turn to ``pending`` without a
+                # failure transition so a later poll can run it.
+                try:
+                    deferred = self._processor.defer_claim(
+                        turn.id,
+                        claim_token,
+                        retry_after_seconds=max(
+                            self._poll_interval_seconds, 1.0
+                        ),
+                    )
+                except Exception as defer_error:  # noqa: BLE001
+                    return self._record_failure(
+                        turn, claim_token, defer_error, started
+                    )
+                duration_ms = (time.perf_counter() - started) * 1000.0
+                logger.info(
+                    "turn deferred: workspace busy duration_ms=%s",
+                    round(duration_ms, 3),
+                    extra={
+                        "event": "turn_deferred",
+                        "duration_ms": round(duration_ms, 3),
+                        "reason": str(error),
+                    },
+                )
+                return TurnOutcome(
+                    status="deferred",
+                    turn=deferred,
+                    error=str(error),
+                    duration_ms=duration_ms,
+                    worker_id=self.worker_id,
+                )
             except Exception as error:  # noqa: BLE001 - recorded as failure
                 return self._record_failure(
                     turn, claim_token, error, started
@@ -292,6 +335,7 @@ class QueueDispatcher:
                     "reply_id": reply.id,
                 },
             )
+            self._finalize_talk_if_idle(turn.conversation_id)
             stored = self._processor.get_turn(turn.id) or turn
             return TurnOutcome(
                 status="completed",
@@ -490,6 +534,7 @@ class QueueDispatcher:
             )
         except Exception as fail_error:  # noqa: BLE001 - loop must survive
             self._log_loop_error("fail", fail_error)
+        self._finalize_talk_if_idle(turn.conversation_id)
         logger.error(
             "turn failed duration_ms=%s error=%s",
             round(duration_ms, 3),
@@ -508,6 +553,13 @@ class QueueDispatcher:
             duration_ms=duration_ms,
             worker_id=self.worker_id,
         )
+
+    def _finalize_talk_if_idle(self, conversation_id: str) -> None:
+        """Release a closing talk's workspace after its last turn finishes."""
+        try:
+            self._workspace_talks.finalize_if_idle(conversation_id)
+        except Exception as error:  # noqa: BLE001 - loop must survive
+            self._log_loop_error("finalize_talk", error)
 
     def _reconcile(self) -> None:
         """Run idempotent startup reconciliation once per dispatcher start."""

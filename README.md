@@ -109,16 +109,18 @@ Endpoints:
 | `POST` | `/imports/tasks`| Idempotently imports history; returns created/skipped counts. |
 | `GET`  | `/tasks`        | Lists tasks; optional `status`, `workspace`, `limit`, `offset` filters. |
 | `GET`  | `/tasks/counts` | Returns task counts keyed by status.                 |
-| `GET`  | `/monitor/executions` | Running tasks/operations with live session counters and queue counts. |
+| `GET`  | `/monitor/executions` | Running tasks/operations with live session counters and queue counts; `verbose=true` adds operation input and changed-file names. |
 | `GET`  | `/tasks/{id}`   | Returns one task, or `404` when absent.              |
+| `GET`  | `/tasks/{id}/review` | Lists persisted review rounds and findings, oldest round first. |
 | `POST` | `/conversations`| Creates a conversation, returns `201` with the stored record. |
-| `GET`  | `/conversations`| Lists conversations oldest first; optional `limit`, `offset`. |
+| `GET`  | `/conversations`| Lists conversations oldest first; optional `agent_id`, `limit`, `offset`. |
 | `GET`  | `/conversations/{id}` | Returns one conversation, or `404` when absent. |
 | `POST` | `/conversations/{id}/messages` | Appends a message idempotently.       |
 | `GET`  | `/conversations/{id}/messages` | Lists messages in stable order, or `404` when the conversation is absent. |
 | `POST` | `/agents`       | Creates revision `1` of an agent profile, returns `201`. |
 | `GET`  | `/agents`       | Lists the current snapshot of every agent.           |
 | `GET`  | `/agents/{agent_id}` | Returns the current snapshot, or `404` when absent. |
+| `GET`  | `/agents/{agent_id}/sessions` | Lists native Runner session metadata; never session contents. |
 | `GET`  | `/agents/{agent_id}/revisions` | Lists all immutable snapshots by revision. |
 | `GET`  | `/agents/{agent_id}/revisions/{revision}` | Returns one snapshot, or `404` when absent. |
 | `PATCH`| `/agents/{agent_id}` | Appends a revision guarded by `expected_revision`.|

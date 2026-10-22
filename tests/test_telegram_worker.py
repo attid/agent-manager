@@ -142,9 +142,51 @@ def test_talk_message_is_not_enriched_with_task_context(
 
     asyncio.run(processor.process_message(queued))
 
-    client.get_task.assert_not_awaited()
+    client.get_task.assert_not_called()
     _, kwargs = client.append_message.await_args
     assert kwargs["text"] == "общий вопрос"
     assert "task_id" not in kwargs["metadata"]
     assert "task_number" not in kwargs["metadata"]
     assert "task_title" not in kwargs["metadata"]
+
+
+def test_agent_talk_reply_has_end_and_secretary_buttons(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A direct-agent reply keeps its own finish/secretary controls."""
+    storage = UserStateStorage(tmp_path / "state.db")
+    client = _completed_client()
+    client.get_conversation = AsyncMock(
+        return_value={
+            "id": "conv-agent",
+            "metadata": {"talkable_agent": "devops-docker3"},
+        }
+    )
+    processor = _context_processor(client, storage)
+    queued = storage.enqueue_message(
+        user_id=12345,
+        chat_id=12345,
+        telegram_message_id=12,
+        context_mode="agent_talk",
+        context_task_id=None,
+        context_conversation_id="conv-agent",
+        text="проверь nginx",
+    )
+
+    asyncio.run(processor.process_message(queued))
+
+    assert client.get_conversation.await_count == 2
+    client.get_conversation.assert_awaited_with("conv-agent")
+    client.get_task.assert_not_called()
+    _, kwargs = client.append_message.await_args
+    assert "task_id" not in kwargs["metadata"]
+    markup = processor.bot.send_rich_message.await_args.kwargs[
+        "reply_markup"
+    ]
+    callbacks = [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+    assert "end_talk:conv-agent" in callbacks
+    assert "action:talk" in callbacks
