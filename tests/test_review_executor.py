@@ -604,8 +604,8 @@ def _engine_request(
     )
 
 
-def _codex_result_file_from_prompt(prompt: str) -> Path | None:
-    """Extract the codex result-file path the backend embedded in the prompt."""
+def _result_file_from_prompt(prompt: str) -> Path | None:
+    """Extract the result-file path a file-contract backend embedded in the prompt."""
     match = re.search(
         r"Write the final JSON object to the file (\S+?) \(", prompt
     )
@@ -623,21 +623,23 @@ def _capturing_runner(
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
         captured["cmd"] = list(cmd)
         captured["kwargs"] = dict(kwargs)
-        # codex delivers its report via the result file named in the prompt.
-        if len(cmd) > 1 and cmd[1] == "exec":
-            result_file = _codex_result_file_from_prompt(cmd[-1])
-            if result_file is not None:
-                result_file.parent.mkdir(parents=True, exist_ok=True)
-                result_file.write_text(stdout, encoding="utf-8")
+        # File-contract engines (codex, agy) deliver their report via the
+        # result file named in the prompt.
+        result_file = _result_file_from_prompt(cmd[-1])
+        if result_file is not None:
+            result_file.parent.mkdir(parents=True, exist_ok=True)
+            result_file.write_text(stdout, encoding="utf-8")
         return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
     return run, captured
 
 
-def test_agy_backend_uses_plan_mode_and_project_cwd_without_implicit_effort(
+def test_agy_backend_uses_auto_mode_file_contract_without_implicit_effort(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No implicit --model/--effort: agy's default model rejects --effort.
+    """Auto mode + file result contract; no implicit --model/--effort.
+
+    ``--mode plan`` is read-only and cannot write the result file.
 
     Regression: the backend always sent ``--effort high`` while agy's default
     model (and most models) support no effort levels, so every agy review
@@ -657,13 +659,15 @@ def test_agy_backend_uses_plan_mode_and_project_cwd_without_implicit_effort(
     assert cmd[0] == "/fake/bin/agy"
     assert cmd[1:4] == [
         "--mode",
-        "plan",
+        "auto",
         "--dangerously-skip-permissions",
     ]
     assert cmd[4] == "-p"
     assert "--effort" not in cmd
     assert "--model" not in cmd
-    assert "# Code Review: Task #task-1" in cmd[5]
+    prompt = cmd[5]
+    assert "# Code Review: Task #task-1" in prompt
+    assert "Write the final JSON object to the file" in prompt
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     # The default floor is ten minutes: real external reviews run longer
     # than the old three-minute cap, which killed legitimate runs.
@@ -760,7 +764,7 @@ def test_codex_backend_uses_file_result_contract(
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
         captured["cmd"] = list(cmd)
         captured["kwargs"] = dict(kwargs)
-        result_file = _codex_result_file_from_prompt(cmd[-1])
+        result_file = _result_file_from_prompt(cmd[-1])
         assert result_file is not None
         result_file.parent.mkdir(parents=True, exist_ok=True)
         result_file.write_text(payload, encoding="utf-8")
@@ -931,8 +935,8 @@ def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, mo
             summary = tmp_path / f'summary-{len(prompts)}.json'
             summary.write_text(reply)
             reply = json.dumps({'status': 'completed', 'summary_path': str(summary)})
-        if engine == 'codex':
-            result_file = _codex_result_file_from_prompt(cmd[-1])
+        if engine in ('codex', 'agy'):
+            result_file = _result_file_from_prompt(cmd[-1])
             if result_file is not None:
                 result_file.parent.mkdir(parents=True, exist_ok=True)
                 result_file.write_text(reply, encoding='utf-8')

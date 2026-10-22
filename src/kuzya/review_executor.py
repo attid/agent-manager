@@ -1329,8 +1329,53 @@ class _ExternalReviewerBackend(_ReviewerBackend):
         )
 
 
-class AgyReviewerBackend(_ExternalReviewerBackend):
-    """Run the native ``agy`` plan-mode reviewer.
+class _FileResultContractMixin:
+    """File-based result delivery for reviewer CLIs that own their stdout.
+
+    The engine gets an exact per-attempt result path in its prompt and writes
+    the JSON contract there; the platform reads the file and ignores stdout
+    (kept only as a diagnostic artifact). A stale file never counts: the
+    path is wiped before every launch and each format attempt runs in its
+    own directory.
+    """
+
+    engine: str
+
+    def _result_path(self, context: _ReviewerRunContext) -> Path:
+        return (
+            context.review_artifact_dir
+            / f"engine_result_r{context.round_number}.json"
+        )
+
+    def _read_report(self, context: _ReviewerRunContext, stdout: str) -> str:
+        path = self._result_path(context)
+        if not path.is_file():
+            raise _ReviewerBackendFailure(
+                "missing_report",
+                f"{self.engine} did not write the result file {path}",
+                stdout=stdout,
+            )
+        return path.read_text(encoding="utf-8").strip()
+
+    def _result_directive(self, context: _ReviewerRunContext) -> str:
+        result_path = self._result_path(context)
+        result_path.unlink(missing_ok=True)
+        return (
+            f"\n\nWrite the final JSON object to the file {result_path} "
+            "(create or overwrite it; the file must contain only that JSON, "
+            "no Markdown fences). Do not create or modify any other files."
+        )
+
+
+class AgyReviewerBackend(
+    _FileResultContractMixin, _ExternalReviewerBackend
+):
+    """Run ``agy`` in auto mode with the file-based result contract.
+
+    ``--mode plan`` is read-only by design and cannot deliver a result file,
+    and agy formats its own stdout presentation, so the engine runs in
+    ``auto`` mode with permissions skipped (the reviewer runs on the host,
+    like the codex engine) and writes the JSON to an exact file path.
 
     ``--model`` and ``--effort`` are passed only when explicitly configured
     in the reviewer ``runner_config``. agy's default model (from
@@ -1376,46 +1421,30 @@ class AgyReviewerBackend(_ExternalReviewerBackend):
         prompt: str,
         context: _ReviewerRunContext,
     ) -> list[str]:
-        command = [str(binary), "--mode", "plan", "--dangerously-skip-permissions"]
+        command = [str(binary), "--mode", "auto", "--dangerously-skip-permissions"]
         model = self._model(context)
         if model is not None:
             command += ["--model", model]
         effort = self._effort(context)
         if effort is not None:
             command += ["--effort", effort]
-        command += ["-p", prompt]
+        command += ["-p", prompt + self._result_directive(context)]
         return command
 
 
-class CodexReviewerBackend(_ExternalReviewerBackend):
-    """Run ``codex exec`` with a file-based result contract.
+class CodexReviewerBackend(
+    _FileResultContractMixin, _ExternalReviewerBackend
+):
+    """Run ``codex exec`` with the file-based result contract.
 
     ``codex review`` formats its own human-readable report and rejects a
     custom prompt combined with scope flags, so the JSON contract cannot be
     delivered over stdout there. Instead ``codex exec`` runs the review as a
-    plain agent turn: the prompt carries the rubric plus an exact result
-    file path, the engine writes the JSON there (full access is fine — the
-    reviewer runs on the host like the agy engine) and the platform reads
-    the file, ignoring stdout.
+    plain agent turn: the prompt carries the rubric plus the exact result
+    file path, and the platform reads the file, ignoring stdout.
     """
 
     engine = "codex"
-
-    def _result_path(self, context: _ReviewerRunContext) -> Path:
-        return (
-            context.review_artifact_dir
-            / f"engine_result_r{context.round_number}.json"
-        )
-
-    def _read_report(self, context: _ReviewerRunContext, stdout: str) -> str:
-        path = self._result_path(context)
-        if not path.is_file():
-            raise _ReviewerBackendFailure(
-                "missing_report",
-                f"codex did not write the result file {path}",
-                stdout=stdout,
-            )
-        return path.read_text(encoding="utf-8").strip()
 
     def _build_command(
         self,
@@ -1423,18 +1452,9 @@ class CodexReviewerBackend(_ExternalReviewerBackend):
         prompt: str,
         context: _ReviewerRunContext,
     ) -> list[str]:
-        # A stale file from an earlier format attempt must never be mistaken
-        # for this attempt's result.
-        result_path = self._result_path(context)
-        result_path.unlink(missing_ok=True)
-        directive = (
-            f"\n\nWrite the final JSON object to the file {result_path} "
-            "(create or overwrite it; the file must contain only that JSON, "
-            "no Markdown fences). Do not create or modify any other files."
-        )
         return [
             str(binary),
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
-            prompt + directive,
+            prompt + self._result_directive(context),
         ]
