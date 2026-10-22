@@ -14,13 +14,21 @@ The execution engine comes from the reviewer profile's
 
 - `pi` (default) runs `pi_runner run --agent <role.json> --task <prompt.md>`
   with the standard read-only Pi role and provider/model resolution;
-- `agy` runs `agy --mode plan --dangerously-skip-permissions --effort <effort>
-  -p <prompt>` with a 180-second default timeout;
-- `codex` runs `codex review --uncommitted <prompt>`.
+- `agy` runs `agy --mode auto --dangerously-skip-permissions -p @<prompt.md>`
+  (the prompt file, not its text) with a 600-second default timeout;
+- `codex` runs `codex exec --dangerously-bypass-approvals-and-sandbox -` and
+  writes the prompt to the child's stdin.
+
+The review prompt is delivered as a file or on stdin — never as an `argv`
+element — so a large diff cannot fail the launch with
+`OSError: [Errno 7] Argument list too long`. Every attempt writes its own
+composed prompt to `<attempt_dir>/prompt.md`; the diagnostics
+`runtime.prompt_delivery` (`file` | `stdin`) and `runtime.prompt_path` record
+the delivery used.
 
 The reviewer profile's `system_prompt` from the knowledge base is embedded in
 the prompt for both native engines. When it is non-empty, the executor
-prepends it to the task prompt it passes on the command line:
+prepends it to the task prompt it delivers:
 
 ```
 <SYSTEM INSTRUCTIONS>
@@ -100,7 +108,7 @@ runs for coding tasks with `changed_files` that did not disable review. It:
   of the three format attempts allowed within each review round;
 - persists round reports and metrics (`round_<n>.json`, including the verdict);
 - re-runs the developer and re-reviews when changes are requested, and can end
-  in `waiting_user_input` when the developer asks for clarification;
+  in `waiting_for_input` when the developer asks for clarification;
 - resumes the original developer run for the fix round: the native Runner
   session id reported by the first execution is passed to
   `pi_runner resume --session <id>` together with the same state directory,

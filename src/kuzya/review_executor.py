@@ -1000,6 +1000,7 @@ class ReviewExecutor:
         *,
         cwd: Path,
         timeout: float | None,
+        input: str | None = None,
     ) -> Any:
         run = self._subprocess_run or subprocess.run
         env = dict(self._env) if self._env is not None else None
@@ -1011,6 +1012,7 @@ class ReviewExecutor:
             env=env,
             check=False,
             timeout=timeout,
+            input=input,
         )
 
     def _failure(
@@ -1195,7 +1197,18 @@ class _ExternalReviewerBackend(_ReviewerBackend):
     The default transport is stdout; an engine whose CLI owns its output
     format (codex) overrides :meth:`_read_report` to read a result file the
     engine writes at an exact path instead.
+
+    The prompt never travels in ``argv``: a real review diff can exceed the
+    OS ``ARG_MAX`` (the historical ``[Errno 7] Argument list too long``
+    failure). Each attempt writes its composed prompt to
+    ``<attempt_dir>/prompt.md`` and passes it either as a file
+    reference (``prompt_delivery = "file"``) or on stdin
+    (``prompt_delivery = "stdin"``).
     """
+
+    # How the composed prompt reaches the engine: a file reference in argv or
+    # the child's stdin. Prompt text itself is never an argv element.
+    prompt_delivery = "file"
 
     def _read_report(
         self, context: _ReviewerRunContext, stdout: str
@@ -1206,19 +1219,25 @@ class _ExternalReviewerBackend(_ReviewerBackend):
     def _build_command(
         self,
         binary: Path,
-        prompt: str,
+        prompt_path: Path,
         context: _ReviewerRunContext,
     ) -> list[str]:
         raise NotImplementedError
+
+    def _finalize_prompt(
+        self, context: _ReviewerRunContext, prompt: str
+    ) -> str:
+        """Add any engine-specific contract text before delivery."""
+        return prompt
 
     def _prompt_with_system_instructions(
         self, context: _ReviewerRunContext
     ) -> str:
         """Prepend the stored reviewer system prompt for native engines.
 
-        Native engines receive the task prompt directly on the command line and
-        have no role document, so the knowledge-base reviewer prompt must be
-        embedded into that prompt to keep custom instructions effective.
+        Native engines have no role document, so the knowledge-base reviewer
+        prompt must be embedded into the delivered prompt to keep custom
+        instructions effective.
         """
         system_prompt = (context.request.reviewer_system_prompt or "").strip()
         if not system_prompt:
@@ -1247,8 +1266,20 @@ class _ExternalReviewerBackend(_ReviewerBackend):
             raise self._binary_not_found()
 
         request = context.request
-        cmd = self._build_command(
-            binary, self._prompt_with_system_instructions(context), context
+        prompt_text = self._finalize_prompt(
+            context, self._prompt_with_system_instructions(context)
+        )
+        # The per-attempt prompt file is the single source of truth: the
+        # native-only text (system instructions, result directive) is written
+        # into it before launch, so the file and stdin always carry exactly
+        # the delivered bytes, including feedback appended on a retry.
+        prompt_path = context.task_prompt_path
+        prompt_path.write_text(prompt_text, encoding="utf-8")
+        cmd = self._build_command(binary, prompt_path, context)
+        prompt_input = (
+            prompt_path.read_text(encoding="utf-8")
+            if self.prompt_delivery == "stdin"
+            else None
         )
         # Request-level wins; then the reviewer profile's runner_config
         # ``timeout_seconds``; the default must fit a real review, which
@@ -1265,6 +1296,7 @@ class _ExternalReviewerBackend(_ReviewerBackend):
                 cmd,
                 cwd=request.project_dir,
                 timeout=timeout,
+                input=prompt_input,
             )
         except Exception as error:  # noqa: BLE001 - surfaced as diagnostics
             raise _ReviewerBackendFailure(
@@ -1317,6 +1349,8 @@ class _ExternalReviewerBackend(_ReviewerBackend):
                 "engine": self.engine,
                 "binary": str(binary),
                 "timeout_seconds": timeout,
+                "prompt_delivery": self.prompt_delivery,
+                "prompt_path": str(prompt_path),
             }
         )
         runtime.update(self._runtime_details(context))
@@ -1356,6 +1390,11 @@ class _FileResultContractMixin:
                 stdout=stdout,
             )
         return path.read_text(encoding="utf-8").strip()
+
+    def _finalize_prompt(
+        self, context: _ReviewerRunContext, prompt: str
+    ) -> str:
+        return prompt + self._result_directive(context)
 
     def _result_directive(self, context: _ReviewerRunContext) -> str:
         result_path = self._result_path(context)
@@ -1415,10 +1454,12 @@ class AgyReviewerBackend(
             details["effort"] = effort
         return details
 
+    prompt_delivery = "file"
+
     def _build_command(
         self,
         binary: Path,
-        prompt: str,
+        prompt_path: Path,
         context: _ReviewerRunContext,
     ) -> list[str]:
         command = [str(binary), "--mode", "auto", "--dangerously-skip-permissions"]
@@ -1428,7 +1469,9 @@ class AgyReviewerBackend(
         effort = self._effort(context)
         if effort is not None:
             command += ["--effort", effort]
-        command += ["-p", prompt + self._result_directive(context)]
+        # agy resolves the ``@path`` convention itself; the prompt text stays
+        # out of argv so a large diff cannot exceed ARG_MAX.
+        command += ["-p", f"@{prompt_path}"]
         return command
 
 
@@ -1446,15 +1489,19 @@ class CodexReviewerBackend(
 
     engine = "codex"
 
+    prompt_delivery = "stdin"
+
     def _build_command(
         self,
         binary: Path,
-        prompt: str,
+        prompt_path: Path,
         context: _ReviewerRunContext,
     ) -> list[str]:
+        # ``codex exec -`` reads the prompt from stdin, so the text never
+        # appears in argv.
         return [
             str(binary),
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
-            prompt + self._result_directive(context),
+            "-",
         ]

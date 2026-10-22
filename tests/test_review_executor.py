@@ -612,6 +612,22 @@ def _result_file_from_prompt(prompt: str) -> Path | None:
     return Path(match.group(1)) if match else None
 
 
+def _delivered_prompt(cmd: list[str], kwargs: dict) -> str:
+    """Return the prompt one engine actually received.
+
+    A stdin engine gets it via ``input=``; a file engine receives a ``@path``
+    reference in argv, so the file contents are the delivered prompt. Prompt
+    text is never an argv element itself.
+    """
+    stdin_text = kwargs.get("input")
+    if isinstance(stdin_text, str):
+        return stdin_text
+    last = cmd[-1]
+    if last.startswith("@"):
+        return Path(last[1:]).read_text(encoding="utf-8")
+    return last
+
+
 def _capturing_runner(
     stdout: str,
     *,
@@ -623,9 +639,11 @@ def _capturing_runner(
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
         captured["cmd"] = list(cmd)
         captured["kwargs"] = dict(kwargs)
+        prompt = _delivered_prompt(list(cmd), kwargs)
+        captured["prompt"] = prompt
         # File-contract engines (codex, agy) deliver their report via the
         # result file named in the prompt.
-        result_file = _result_file_from_prompt(cmd[-1])
+        result_file = _result_file_from_prompt(prompt)
         if result_file is not None:
             result_file.parent.mkdir(parents=True, exist_ok=True)
             result_file.write_text(stdout, encoding="utf-8")
@@ -665,7 +683,17 @@ def test_agy_backend_uses_auto_mode_file_contract_without_implicit_effort(
     assert cmd[4] == "-p"
     assert "--effort" not in cmd
     assert "--model" not in cmd
-    prompt = cmd[5]
+    # The prompt goes by file reference, never as argv text: the reference
+    # points at the per-attempt ``prompt.md`` so a retry delivers fresh
+    # feedback from the same file.
+    assert cmd[5].startswith("@")
+    prompt_path = Path(cmd[5][1:])
+    assert prompt_path.name == "prompt.md"
+    assert prompt_path.parent.name == "attempt_1"
+    assert prompt_path.is_file()
+    assert captured["kwargs"]["input"] is None
+    prompt = captured["prompt"]
+    assert prompt == prompt_path.read_text(encoding="utf-8")
     assert "# Code Review: Task #task-1" in prompt
     assert "Write the final JSON object to the file" in prompt
     assert captured["kwargs"]["cwd"] == str(tmp_path)
@@ -674,6 +702,7 @@ def test_agy_backend_uses_auto_mode_file_contract_without_implicit_effort(
     assert captured["kwargs"]["timeout"] == 600.0
     assert result.verdict == VERDICT_APPROVED
     assert result.runtime["engine"] == "agy"
+    assert result.runtime["prompt_delivery"] == "file"
     assert "effort" not in result.runtime
     review_dir = tmp_path / "artifacts" / "task-1" / "review"
     assert (review_dir / "stdout.txt").is_file()
@@ -716,7 +745,7 @@ def test_native_engines_prepend_reviewer_system_prompt(
     )
     _executor(runner).execute(request)
 
-    prompt = captured["cmd"][-1]
+    prompt = captured["prompt"]
     assert prompt.startswith(
         "<SYSTEM INSTRUCTIONS>\n"
         f"{system_prompt}\n"
@@ -737,7 +766,7 @@ def test_native_engines_omit_empty_reviewer_system_prompt(
     request = _engine_request(tmp_path, engine, reviewer_system_prompt="")
     _executor(runner).execute(request)
 
-    prompt = captured["cmd"][-1]
+    prompt = captured["prompt"]
     assert prompt.startswith("# Code Review: Task #task-1")
     assert "<SYSTEM INSTRUCTIONS>" not in prompt
 
@@ -764,7 +793,9 @@ def test_codex_backend_uses_file_result_contract(
     def run(cmd, **kwargs):  # noqa: ANN001 - mirrors subprocess.run
         captured["cmd"] = list(cmd)
         captured["kwargs"] = dict(kwargs)
-        result_file = _result_file_from_prompt(cmd[-1])
+        prompt = _delivered_prompt(list(cmd), kwargs)
+        captured["prompt"] = prompt
+        result_file = _result_file_from_prompt(prompt)
         assert result_file is not None
         result_file.parent.mkdir(parents=True, exist_ok=True)
         result_file.write_text(payload, encoding="utf-8")
@@ -779,7 +810,10 @@ def test_codex_backend_uses_file_result_contract(
     assert cmd[0] == "/fake/bin/codex"
     assert cmd[1] == "exec"
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
-    prompt = cmd[-1]
+    # ``-`` is codex's stdin sentinel: the prompt is not an argv element.
+    assert cmd[-1] == "-"
+    assert isinstance(captured["kwargs"]["input"], str)
+    prompt = captured["prompt"]
     assert "# Code Review: Task #task-1" in prompt
     assert "engine_result_r1.json" in prompt
     assert captured["kwargs"]["cwd"] == str(tmp_path)
@@ -787,6 +821,57 @@ def test_codex_backend_uses_file_result_contract(
     assert result.findings[0].file == "src/app.py"
     assert result.findings[0].line == 9
     assert result.runtime["engine"] == "codex"
+    assert result.runtime["prompt_delivery"] == "stdin"
+
+
+@pytest.mark.parametrize("engine", ["agy", "codex"])
+def test_large_prompt_never_travels_in_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    """A >200KB review prompt must never become an argv element.
+
+    Regression: task dc456adb failed with ``OSError: [Errno 7] Argument list
+    too long`` because the whole prompt (reviewer system prompt plus the
+    diff) was passed as one CLI argument. agy now gets a file reference and
+    codex gets the prompt on stdin, so argv stays small no matter the diff.
+    """
+    monkeypatch.setattr(
+        "kuzya.review_executor.shutil.which",
+        lambda name: f"/fake/bin/{name}",
+    )
+    huge_diff = "diff --git a/src/app.py b/src/app.py\n" + "+line\n" * 40_000
+    runner, captured = _capturing_runner(
+        '{"verdict": "approved", "findings": []}'
+    )
+    request = _request(
+        tmp_path,
+        developer_summary=huge_diff,
+        reviewer_runner_config={"engine": engine},
+    )
+    result = _executor(runner).execute(request)
+
+    cmd = captured["cmd"]
+    prompt = captured["prompt"]
+    assert len(prompt) > 200_000
+    assert huge_diff in prompt
+    # No single argument carries the prompt, and the whole argv stays far
+    # below the OS limit that used to be exceeded.
+    assert max(len(part) for part in cmd) < 10_000
+    assert sum(len(part) for part in cmd) < 100_000
+    assert all(huge_diff[:200] not in part for part in cmd)
+
+    if engine == "agy":
+        assert cmd[-1].startswith("@")
+        delivered = Path(cmd[-1][1:]).read_text(encoding="utf-8")
+        assert delivered == prompt
+        assert captured["kwargs"]["input"] is None
+    else:
+        assert cmd[-1] == "-"
+        assert captured["kwargs"]["input"] == prompt
+        assert Path(result.runtime["prompt_path"]).read_text(
+            encoding="utf-8"
+        ) == prompt
+    assert result.approved
 
 
 def test_codex_backend_missing_result_file_fails_even_with_stale_file(
@@ -928,7 +1013,7 @@ def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, mo
     prompts = []
     replies = iter(['ВЕРДИКТ: ОДОБРЕНО', '{"verdict":"approved"}', '{"verdict":"approved","findings":[]}'])
     def run(cmd, **kwargs):
-        prompt = Path(cmd[cmd.index('--task') + 1]).read_text() if engine == 'pi' else cmd[-1]
+        prompt = Path(cmd[cmd.index('--task') + 1]).read_text() if engine == 'pi' else _delivered_prompt(list(cmd), kwargs)
         prompts.append(prompt)
         reply = next(replies)
         if engine == 'pi':
@@ -936,7 +1021,7 @@ def test_json_contract_retries_with_feedback_and_preserves_attempts(tmp_path, mo
             summary.write_text(reply)
             reply = json.dumps({'status': 'completed', 'summary_path': str(summary)})
         if engine in ('codex', 'agy'):
-            result_file = _result_file_from_prompt(cmd[-1])
+            result_file = _result_file_from_prompt(prompt)
             if result_file is not None:
                 result_file.parent.mkdir(parents=True, exist_ok=True)
                 result_file.write_text(reply, encoding='utf-8')

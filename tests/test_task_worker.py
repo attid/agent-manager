@@ -1047,10 +1047,12 @@ def test_review_cycle_uses_reviewer_profile_engine(
     review_reply = '{"verdict": "approved", "findings": []}'
 
     def fake_review_run(cmd, **kwargs):
-        # codex delivers its report via the result file named in the prompt.
+        # codex delivers its report via the result file named in the prompt,
+        # and the prompt itself arrives on stdin (``codex exec -``).
         if len(cmd) > 1 and cmd[1] == "exec":
+            prompt = kwargs.get("input") or ""
             match = re.search(
-                r"Write the final JSON object to the file (\S+?) \(", cmd[-1]
+                r"Write the final JSON object to the file (\S+?) \(", prompt
             )
             if match:
                 result_file = Path(match.group(1))
@@ -1077,6 +1079,9 @@ def test_review_cycle_uses_reviewer_profile_engine(
     # exact result file instead of printing it on stdout.
     assert cmd[1] == "exec"
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    # The prompt is delivered on stdin, not as an argv element.
+    assert cmd[-1] == "-"
+    assert run_mock.call_args.kwargs["input"]
     metrics = json.loads(
         (
             tmp_path
