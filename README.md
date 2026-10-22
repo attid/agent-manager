@@ -109,6 +109,7 @@ Endpoints:
 | `POST` | `/imports/tasks`| Idempotently imports history; returns created/skipped counts. |
 | `GET`  | `/tasks`        | Lists tasks; optional `status`, `workspace`, `limit`, `offset` filters. |
 | `GET`  | `/tasks/counts` | Returns task counts keyed by status.                 |
+| `GET`  | `/monitor/executions` | Running tasks/operations with live session counters and queue counts. |
 | `GET`  | `/tasks/{id}`   | Returns one task, or `404` when absent.              |
 | `POST` | `/conversations`| Creates a conversation, returns `201` with the stored record. |
 | `GET`  | `/conversations`| Lists conversations oldest first; optional `limit`, `offset`. |

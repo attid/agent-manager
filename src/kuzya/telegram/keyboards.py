@@ -138,6 +138,19 @@ def task_card_keyboard(task_id: str, status: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def execution_monitor_keyboard() -> InlineKeyboardMarkup:
+    """Refresh button for the live execution monitor message."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить", callback_data="action:live"
+                )
+            ]
+        ]
+    )
+
+
 def task_categories_keyboard(
     active_category: str = "incoming",
     tasks: list[dict[str, Any]] | None = None,
@@ -230,7 +243,14 @@ def task_categories_keyboard(
         )
         keyboard.append([prev_btn, page_btn, next_btn])
 
-    # Global actions
+    # Live execution monitor and global actions.
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="⚡ Исполнители", callback_data="action:live"
+            )
+        ]
+    )
     keyboard.append(
         [
             InlineKeyboardButton(text="➕ Новая задача", callback_data="action:new_task"),

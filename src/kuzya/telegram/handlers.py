@@ -21,6 +21,7 @@ from .client import BackendClient
 from .config import TelegramConfig
 from .messenger import rich_edit_message
 from .keyboards import (
+    execution_monitor_keyboard,
     mode_keyboard,
     task_display_number,
     talk_keyboard,
@@ -79,7 +80,8 @@ async def cmd_start(
         "Выберите действие в меню ниже или используйте команды:\n"
         "• /new — поставить новую задачу\n"
         "• /talk — общий разговор с секретарём\n"
-        "• /list — просмотр задач и карточек"
+        "• /list — просмотр задач и карточек\n"
+        "• /live — что выполняется прямо сейчас"
     )
     await message.answer(text, parse_mode="HTML", reply_markup=mode_keyboard())
 
@@ -152,6 +154,122 @@ async def cmd_list(
         "📋 <b>Список задач</b>\nВыберите категорию или карточку:",
         parse_mode="HTML",
         reply_markup=task_categories_keyboard("incoming", tasks, counts=counts),
+    )
+
+
+def _plural_ru(value: int, one: str, few: str, many: str) -> str:
+    """Pick the Russian plural form for a small counter."""
+    remainder = abs(value) % 100
+    if 11 <= remainder <= 14:
+        return many
+    remainder %= 10
+    if remainder == 1:
+        return one
+    if 2 <= remainder <= 4:
+        return few
+    return many
+
+
+def _format_duration(seconds: Any) -> str:
+    try:
+        total = max(0, int(seconds or 0))
+    except (TypeError, ValueError):
+        total = 0
+    if total < 60:
+        return f"{total}с"
+    if total < 3600:
+        return f"{total // 60} мин"
+    hours, remainder = divmod(total, 3600)
+    if remainder >= 60:
+        return f"{hours} ч {remainder // 60} мин"
+    return f"{hours} ч"
+
+
+def _format_tokens(tokens: Any) -> str | None:
+    if not isinstance(tokens, dict):
+        return None
+    total = tokens.get("totalTokens")
+    if not isinstance(total, (int, float)) or isinstance(total, bool):
+        return None
+    if total >= 1000:
+        rounded = int(round(total / 1000))
+        return f"{rounded}k токенов"
+    return f"{int(total)} токенов"
+
+
+def format_execution_monitor(payload: dict[str, Any]) -> str:
+    """Render the monitor payload as a compact Telegram message.
+
+    The session age is labelled as activity, never as a stall verdict: a
+    model can think without emitting an event for a long time.
+    """
+    running = payload.get("running") or []
+    lines = ["⚡ Исполнители", ""]
+    if not running:
+        lines.append("Сейчас никто не выполняется.")
+    for item in running:
+        is_operation = item.get("entry_type") == "operation" or bool(
+            item.get("operation_id")
+        )
+        number = item.get("target_number") if is_operation else item.get("number")
+        if is_operation:
+            label = item.get("kind_label") or item.get("operation_kind") or "операция"
+        else:
+            label = item.get("title") or "задача"
+        parts = [f"#{number}" if number is not None else "?", str(label)]
+        agent = item.get("agent_id")
+        if agent:
+            parts.append(f"агент {agent}")
+        parts.append(_format_duration(item.get("elapsed")))
+        if item.get("session_available"):
+            tools = item.get("tools_used")
+            if tools is not None:
+                parts.append(
+                    f"{tools} {_plural_ru(int(tools), 'инструмент', 'инструмента', 'инструментов')}"
+                )
+            tokens_text = _format_tokens(item.get("tokens"))
+            if tokens_text:
+                cost = item.get("cost")
+                if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                    tokens_text += f" (${cost:.2f})"
+                parts.append(tokens_text)
+            activity = item.get("last_activity_sec")
+            if activity is not None:
+                parts.append(f"активность {activity}с назад")
+            current = item.get("current_tool")
+            if current:
+                parts.append(f"сейчас: {current}")
+        lines.append(" · ".join(parts))
+
+    queues = payload.get("queues") or {}
+    lines.append("")
+    lines.append(
+        "⏳ В очереди: "
+        f"ходы {int(queues.get('turns', 0))} · "
+        f"операции {int(queues.get('operations', 0))} · "
+        f"подписки {int(queues.get('subscriptions', 0))} · "
+        f"задачи без клейма {int(queues.get('tasks', 0))}"
+    )
+    generated = payload.get("generated_at")
+    if isinstance(generated, str) and len(generated) >= 19:
+        lines.append(f"Обновлено: {generated[11:19]} UTC")
+    return "\n".join(lines)
+
+
+@router.message(Command("live"))
+async def cmd_live(
+    message: Message,
+    client: BackendClient,
+) -> None:
+    """Show running executions and allow refreshing by pressing the button."""
+    try:
+        payload = await client.get_execution_monitor()
+    except Exception as error:
+        await message.answer(f"❌ Не удалось получить состояние исполнителей: {error}")
+        return
+    await message.answer(
+        format_execution_monitor(payload),
+        reply_markup=execution_monitor_keyboard(),
     )
 
 
@@ -804,6 +922,27 @@ async def on_action_reset_talk(
         reply_markup=talk_keyboard(),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "action:live")
+async def on_action_live(
+    callback: CallbackQuery,
+    client: BackendClient,
+) -> None:
+    """Redraw the monitor message in place with fresh numbers."""
+    try:
+        payload = await client.get_execution_monitor()
+    except Exception as error:
+        await callback.answer(
+            f"Не удалось обновить: {error}", show_alert=True
+        )
+        return
+    await rich_edit_message(
+        callback.message,
+        format_execution_monitor(payload),
+        reply_markup=execution_monitor_keyboard(),
+    )
+    await callback.answer("Обновлено")
 
 
 @router.callback_query(F.data == "action:list_tasks")

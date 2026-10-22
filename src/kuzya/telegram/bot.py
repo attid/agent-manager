@@ -20,6 +20,7 @@ BOT_COMMANDS = [
     BotCommand(command="new", description="Поставить новую задачу"),
     BotCommand(command="talk", description="Общий разговор со секретарём"),
     BotCommand(command="list", description="Список задач и карточек"),
+    BotCommand(command="live", description="Что выполняется прямо сейчас"),
     BotCommand(command="analyze", description="Анализ сессий и уроков задач"),
     BotCommand(command="watch", description="Секретарь разберёт результат задачи"),
     BotCommand(command="unwatch", description="Отменить ожидание результата"),

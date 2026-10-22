@@ -139,6 +139,10 @@ class BackendClient:
         """Return task counts keyed by status."""
         return await self._request("GET", "/tasks/counts")
 
+    async def get_execution_monitor(self) -> dict[str, Any]:
+        """Return running executions and queue counts."""
+        return await self._request("GET", "/monitor/executions")
+
     async def patch_task(
         self,
         task_id: str,

@@ -1,22 +1,27 @@
 # Capability inventory
 
 The authoritative machine-readable inventory is
-`src/kuzya/capabilities.py`. It declares every registered Pi JS tool
-and REST endpoint with its method, schema, result status, permission action,
-operation kind and handbook document. `audit_capabilities` compares that
-declaration with the generated OpenAPI document, the real tools registered by
-`src/pi_runner/policy.mjs` and `ACTIONS_FOR_TOOLS`; `tests/test_capabilities.py`
-runs it. An undeclared tool, unsupported route, schema drift or silent
-privilege widening fails the check.
+`src/kuzya/capabilities.py`. It declares every registered Pi JS tool,
+REST endpoint and transport adapter with its method, schema, result status,
+permission action, resource, operation kind and handbook document.
+`audit_capabilities` compares REST endpoint records with the generated
+OpenAPI document, adapter records with the mounted application router, tools
+with the real registry in `src/pi_runner/policy.mjs`, and actions with
+`ACTIONS_FOR_TOOLS`; `tests/test_capabilities.py` runs it. An undeclared
+tool, unsupported route, missing adapter, schema drift or silent privilege
+widening fails the check.
 
-## Tool inventory (37 tools)
+## Tool inventory (38 tools)
 
 Source: `src/pi_runner/policy.mjs`. "Deferred" means the tool writes a session
 receipt that `PersistentConversationHandler` applies after the turn. A local
-tool grants no backend action, so it cannot widen raw-HTTP authority.
+tool grants no backend action, so it cannot widen raw-HTTP authority. The
+previous 37-tool count omitted `call_api`; the inventory in
+`src/kuzya/capabilities.py` and the registered tools both contain 38.
 
 | Tool | Behavior | Backend / receipt | Result | Permission |
 |---|---|---|---|---|
+| `call_api` | Universal API call | any declared REST route | `ok`/`applied`/`failed`/`unknown` | `*` (admin-equivalent) |
 | `attach_document` | Deferred | `/session/attachments.json` | `pending` | local |
 | `create_agent` | API write | `POST /agents` | `applied` | `agents.write` |
 | `archive_agent` | Deferred | `/session/archived_agents.json` | `pending` | local |
@@ -81,10 +86,46 @@ Source: `src/kuzya/api/app.py`. Groups: health;
 workspaces/resolve; tasks (create/read/list/patch/import, status counts via
 `GET /tasks/counts`, attachment upload via
 `POST /tasks/{task_id}/attachments`, artifacts and per-task analysis);
+live execution monitoring via `GET /monitor/executions` (running tasks and
+operations with bounded `events.jsonl` session stats and queue counts);
 conversations and messages; turns; operations (submit/list/read);
 analysis reports; recommendations (list/preview/approve/apply); agents
 (create/read/list/patch/archive/history); knowledge (list/read/write/delete).
 See [Tools and API discovery](tools-and-api.md#rest-endpoints).
+
+## Execution monitor
+
+`GET /monitor/executions` reads only durable rows and the newest bounded
+`events.jsonl` tail for each running execution. It reports elapsed time and,
+when available, tool count, current tool, last usage tokens/cost and the file
+age as `last_activity_sec`. Missing event files degrade to elapsed-only
+entries with `session_available=false`; they are not errors. The route uses
+`tasks.read` with no resource, so a task-scoped execution credential cannot
+enumerate other work. The Telegram `/live` command and the
+`⚡ Исполнители` category button render the same payload and redraw the
+message in place on refresh.
+
+## MCP transport adapter
+
+MCP is one derived adapter, not 46 more endpoints. Its registry is generated
+from the live OpenAPI document at application construction; duplicating the
+operation list here would create exactly the drift the parity audit exists to
+prevent.
+
+| Adapter | Listens on | Upstream | Adds permissions? | Source |
+|---|---|---|---|---|
+| `mcp_streamable_http` | `POST /mcp`, `GET /mcp` and `/mcp/` | Every JSON business operation generated from `app.openapi()` (44 tools for 46 REST operations; `GET /health` is excluded as a service route and the multipart attachment upload has no JSON tool) | No. `/mcp` is not an OpenAPI operation and has no entry in the permission route rules; administrative Bearer tokens are accepted, execution tokens receive `403`. Every tool call forwards the caller's token into the real REST route, which re-applies the action/resource rule. | `src/kuzya/api/mcp/endpoint.py`, `registry.py`, `executor.py`; [MCP transport](mcp.md) |
+
+In `src/kuzya/capabilities.py` the transport is four explicit records
+(`GET`/`POST` × `/mcp`/`/mcp/`) with `kind="adapter"`, `action="*"`,
+`resource="*"` and `doc="mcp.md"`. They do not repeat the 44 generated MCP
+tools. `audit_capabilities` removes endpoint-kind records from the OpenAPI
+comparison, so the adapter is neither falsely `unsupported` nor
+`undocumented`; it also checks each adapter path against the mounted
+application routes and asserts that `resolve_requirement` still returns
+`None` (no permission route rule), which is what keeps an execution token at
+`403`. The handbook row above remains the single human-readable adapter
+inventory record.
 
 ## Worker inventory
 

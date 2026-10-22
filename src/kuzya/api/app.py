@@ -52,6 +52,7 @@ from sqlalchemy.engine import make_url
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ..logging import bind_log_context
+from ..monitor import build_execution_monitor
 from ..analysis import (
     AnalysisError,
     RecommendationConflictError,
@@ -1085,6 +1086,14 @@ def create_app(
     ) -> dict[str, int]:
         """Return task counts keyed by status."""
         return repository.get_status_counts()
+
+    @app.get("/monitor/executions")
+    def get_execution_monitor(request: Request) -> dict[str, Any]:
+        """Return running tasks/operations with live session counters."""
+        return build_execution_monitor(
+            request.app.state.database,
+            getattr(request.app.state, "artifact_root", None),
+        )
 
     @app.get("/tasks/{task_id}", response_model=TaskRead)
     def get_task(

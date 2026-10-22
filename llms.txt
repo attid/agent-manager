@@ -29,6 +29,9 @@ registered Pi JS tools.
   an execution-scoped backend credential rather than an administrative token.
 - Deferred work: every review/analysis/Git trigger is a durable `Operation`
   row, not a synchronous side effect; inspect the operation for its outcome.
+- Live executions: `GET /monitor/executions` reports running tasks and
+  operations with bounded `events.jsonl` tool/token/activity counters and
+  queue counts; Telegram exposes the same snapshot via `/live`.
 - Capability inventory: `src/kuzya/capabilities.py` is the
   machine-readable tool/API/permission/doc map, and
   `audit_capabilities` compares it with the live surface.
@@ -46,6 +49,8 @@ registered Pi JS tools.
   cycle, resume and recovery.
 - [Tools and API discovery](docs/handbook/tools-and-api.md): REST endpoints,
   JS tools, auth, idempotency and discovery commands.
+- [MCP transport](docs/handbook/mcp.md): OpenAPI-generated tools, inherited
+  authentication and execution scope, verification.
 - [MCP endpoint and ChatGPT plugin](docs/mcp-chatgpt.md): `/mcp` Streamable
   HTTP server, auto-generated tools, Bearer auth, long-operation guidance.
 - [Review](docs/handbook/review.md): independent review operation and its

@@ -2,10 +2,10 @@
 
 This module is the executable companion to ``docs/handbook``. It declares the
 complete advertised platform surface -- the Pi JS tools in
-``src/pi_runner/policy.mjs`` and the REST routes in
-``src/kuzya/api/app.py`` -- and audits that declaration against the
-live OpenAPI document, the real registered JS tools and the execution
-permission registry.
+``src/pi_runner/policy.mjs``, the REST routes in ``src/kuzya/api/app.py``
+and transport adapters such as MCP -- and audits that declaration against
+the live OpenAPI document, the mounted application routes, the real
+registered JS tools and the execution permission registry.
 
 Two audiences:
 
@@ -31,6 +31,7 @@ from .permissions import (
 )
 
 __all__ = [
+    "ADAPTER_CAPABILITIES",
     "CAPABILITIES",
     "Capability",
     "CapabilityAudit",
@@ -106,6 +107,11 @@ HANDBOOK: tuple[HandbookEntry, ...] = (
         "REST surface, JS tools, auth, idempotency, discovery",
     ),
     HandbookEntry(
+        "mcp.md",
+        "MCP transport",
+        "OpenAPI-generated tools, inherited auth and scope, verification",
+    ),
+    HandbookEntry(
         "review.md",
         "Review",
         "independent review operation and verdict contract",
@@ -149,14 +155,18 @@ HANDBOOK_BY_FILENAME: Mapping[str, HandbookEntry] = {
 
 @dataclasses.dataclass(frozen=True)
 class Capability:
-    """One advertised tool or REST endpoint.
+    """One advertised tool, REST endpoint or transport adapter.
 
-    ``kind`` is ``"tool"`` for a registered Pi JS tool and ``"endpoint"`` for
-    a REST route. Tool entries carry ``result_statuses`` (the values in the
-    tool's structured result); endpoint entries carry ``success_statuses``.
-    ``action`` is the execution-permission action the capability needs;
-    ``None`` means the capability never reaches the HTTP backend (local) or
-    that the action is resolved from the request body (deferred operations).
+    ``kind`` is ``"tool"`` for a registered Pi JS tool, ``"endpoint"`` for a
+    REST route in the OpenAPI document, and ``"adapter"`` for a transport
+    such as MCP that forwards to those routes. Tool entries carry
+    ``result_statuses`` (the values in the tool's structured result);
+    endpoint entries carry ``success_statuses``. ``action`` is the
+    execution-permission action the capability needs; ``None`` means the
+    capability never reaches the HTTP backend (local) or that the action is
+    resolved from the request body (deferred operations). Adapter entries
+    also carry ``resource``; they describe inherited authority, not a new
+    permission.
     """
 
     name: str
@@ -164,6 +174,7 @@ class Capability:
     method: str | None = None
     path: str | None = None
     action: str | None = None
+    resource: str | None = None
     request_schema: str | None = None
     response_schema: str | None = None
     response_many: bool = False
@@ -183,6 +194,7 @@ class Capability:
             "method": self.method,
             "path": self.path,
             "action": self.action,
+            "resource": self.resource,
             "request_schema": self.request_schema,
             "response_schema": self.response_schema,
             "response_many": self.response_many,
@@ -223,6 +235,27 @@ def _tool(
         summary=summary,
         local=local,
         deferred=deferred,
+    )
+
+
+def _adapter(
+    method: str,
+    path: str,
+    *,
+    action: str,
+    resource: str,
+    doc: str,
+    summary: str,
+) -> Capability:
+    return Capability(
+        name=f"mcp_streamable_http {method} {path}",
+        kind="adapter",
+        method=method,
+        path=path,
+        action=action,
+        resource=resource,
+        doc=doc,
+        summary=summary,
     )
 
 
@@ -632,6 +665,13 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
     ),
     _endpoint(
         "GET",
+        "/monitor/executions",
+        action="tasks.read",
+        doc="tools-and-api.md",
+        summary="list running tasks and operations with live session counters",
+    ),
+    _endpoint(
+        "GET",
         "/tasks/{task_id}",
         action="tasks.read",
         response_schema="TaskRead",
@@ -959,7 +999,27 @@ _ENDPOINT_CAPABILITIES: tuple[Capability, ...] = (
     ),
 )
 
-#: The complete advertised surface: 37 tools plus every REST endpoint.
+#: MCP is one transport adapter, represented by its supported method/path
+#: pairs. It deliberately does not repeat the 43 generated MCP tools: those
+#: are derived from the REST endpoints at application construction.
+_ADAPTER_CAPABILITIES: tuple[Capability, ...] = tuple(
+    _adapter(
+        method,
+        path,
+        action="*",
+        resource="*",
+        doc="mcp.md",
+        summary=(
+            "MCP Streamable HTTP transport adapter; forwards to the real "
+            "REST route and inherits its action/resource"
+        ),
+    )
+    for path in ("/mcp", "/mcp/")
+    for method in ("GET", "POST")
+)
+
+#: The complete advertised surface: 38 tools, every REST endpoint and the
+#: explicit method/path records of the MCP transport adapter.
 CAPABILITIES: tuple[Capability, ...] = (
     *(_endpoint(
         method, "/tasks/{task_id}/subscriptions", deferred=True,
@@ -968,13 +1028,18 @@ CAPABILITIES: tuple[Capability, ...] = (
     ) for method in ("POST", "DELETE")),
     *_TOOL_CAPABILITIES,
     *_ENDPOINT_CAPABILITIES,
+    *_ADAPTER_CAPABILITIES,
 )
 
 TOOL_CAPABILITIES: tuple[Capability, ...] = tuple(
     cap for cap in CAPABILITIES if cap.kind == "tool"
 )
+#: Every HTTP route the inventory knows about: REST operations and adapters.
 ENDPOINT_CAPABILITIES: tuple[Capability, ...] = tuple(
-    cap for cap in CAPABILITIES if cap.kind == "endpoint"
+    cap for cap in CAPABILITIES if cap.kind in {"endpoint", "adapter"}
+)
+ADAPTER_CAPABILITIES: tuple[Capability, ...] = tuple(
+    cap for cap in CAPABILITIES if cap.kind == "adapter"
 )
 TOOL_BY_NAME: Mapping[str, Capability] = {
     cap.name: cap for cap in TOOL_CAPABILITIES
@@ -1083,16 +1148,23 @@ def audit_capabilities(
     *,
     openapi_paths: Mapping[str, Mapping[str, Any]] | None = None,
     registered_tool_names: Iterable[str] | None = None,
+    mounted_route_paths: Iterable[str] | None = None,
 ) -> CapabilityAudit:
     """Compare the declared inventory with the live platform surface.
 
     Args:
         openapi_paths: The ``paths`` mapping from the FastAPI-generated
-            OpenAPI document. When supplied, every declared endpoint must
-            exist and every live route must be declared.
+            OpenAPI document. When supplied, every declared REST endpoint
+            must exist and every live route must be declared. Adapter
+            records are excluded from this comparison because they are
+            deliberately not OpenAPI operations.
         registered_tool_names: The real tool names registered by
             ``src/pi_runner/policy.mjs``. When supplied, the declared tools
             and the registered tools must match exactly.
+        mounted_route_paths: Paths actually mounted on the application
+            router. When supplied, every declared adapter path must be
+            present; this prevents the adapter from silently disappearing
+            from the mounted app while remaining in the inventory.
 
     The audit is executable and non-vacuous: it fails when a tool, route,
     schema, permission mapping or operation-kind mapping drifts from source.
@@ -1125,7 +1197,9 @@ def audit_capabilities(
             for method in methods
         }
         declared_endpoints = {
-            (cap.method or "", cap.path or "") for cap in ENDPOINT_CAPABILITIES
+            (cap.method or "", cap.path or "")
+            for cap in ENDPOINT_CAPABILITIES
+            if cap.kind == "endpoint"
         }
         for method, path in sorted(declared_endpoints - live):
             findings.append(
@@ -1144,9 +1218,47 @@ def audit_capabilities(
                 )
             )
 
-        for cap in ENDPOINT_CAPABILITIES:
+        mounted_paths = (
+            set(mounted_route_paths)
+            if mounted_route_paths is not None
+            else None
+        )
+        for cap in ADAPTER_CAPABILITIES:
             key = (cap.method or "", cap.path or "")
-            operation = openapi_paths.get(cap.path or "", {}).get(
+            adapter_path = cap.path or ""
+            if adapter_path in openapi_paths:
+                findings.append(
+                    Finding(
+                        "adapter-openapi-overlap",
+                        f"adapter declares {key[0]} {adapter_path} but the "
+                        "path is an OpenAPI operation",
+                    )
+                )
+            requirement = resolve_requirement(key[0], adapter_path)
+            if requirement is not None:
+                findings.append(
+                    Finding(
+                        "adapter-permission-drift",
+                        f"adapter {key[0]} {adapter_path} resolves to "
+                        f"{getattr(requirement, 'action', None)!r}; it must "
+                        "remain outside permission route rules so execution "
+                        "tokens are denied",
+                    )
+                )
+            if mounted_paths is not None and adapter_path not in mounted_paths:
+                findings.append(
+                    Finding(
+                        "missing-adapter-route",
+                        f"adapter declares {key[0]} {adapter_path} but the "
+                        "application router does not mount that path",
+                    )
+                )
+
+        for cap in ENDPOINT_CAPABILITIES:
+            if cap.kind != "endpoint":
+                continue
+            key = (cap.method or "", cap.path or "")
+            operation = openapi_paths.get(cap.path or {}, {}).get(
                 (cap.method or "").lower()
             )
             if operation is None:
